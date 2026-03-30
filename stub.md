@@ -1,4 +1,4 @@
-```
+```asm
 ; 对于每个被 trace 的函数，维持一个 thunk
 
 thunk_func1:
