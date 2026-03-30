@@ -38,7 +38,7 @@ Entry_stub:
 ```
 
 ```asm
-; func1 执行完后，由于返回值被劫持，进入 ret_hook 函数
+; func1 执行完后，由于返回地址被劫持，进入 ret_hook 函数
 ret_hook:
     push 0                      ; 存入一个空值，用来填充返回地址
     pushall
