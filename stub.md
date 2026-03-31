@@ -46,7 +46,7 @@ ret_hook:
     mov r12, rsp                
     and rsp, 0xFFFFFFFFFFFFFFF0 ; 强制栈对齐
 
-    mov rdi, rax
+    mov rdi, r12
     call print_ret_value        ; 输出返回值
 
     call get_ret_addr_c         ; 查找返回地址
