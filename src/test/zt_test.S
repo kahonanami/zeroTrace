@@ -8,7 +8,9 @@
 .extern add_5
 
 test_thunk:
+    push 1
     call entry_stub
+    lea rsp, [rsp + 8]
     jmp add_5
 
 add:

@@ -49,5 +49,7 @@
 ## TODO LIST
 
 - [x] 基础的 stub 框架
-- [ ] zt_log 系统
+- [x] zt_log 系统
+- [x] log 中记录被 trace 函数 id
 - [ ] 函数参数输出优化
+- [ ] 实现 injector 框架
