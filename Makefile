@@ -24,7 +24,7 @@ OBJ_TEST_HELPERS := $(patsubst $(TEST_DIR)/%.S, $(BUILD_DIR)/%.o, $(TEST_S))
 .PRECIOUS: $(BUILD_DIR)/%.o
 
 TEST_BINS := $(patsubst $(TEST_DIR)/%.c, $(TEST_BIN_DIR)/%, $(TEST_C))
-APP_TARGET := $(BIN_DIR)/zt_app
+APP_TARGET := $(BIN_DIR)/ztrace
 
 .PHONY: all clean directories test run-tests
 
