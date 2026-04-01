@@ -6,7 +6,7 @@
 static __thread uint64_t saved_ret_addr[MAX_SAVED_RET_ADDR];
 static __thread int call_stack_idx = 0;
 
-void print_func_arg(struct ctx* context){
+void print_func_arg(ctx_t* context){
     log_info("function id: %d", context->func_id);
     log_info("RDI: 0x%lx", context->rdi);
     log_info("RSI: 0x%lx", context->rsi);
@@ -16,7 +16,7 @@ void print_func_arg(struct ctx* context){
     log_info("R9: 0x%lx", context->r9);
 }
 
-void print_ret_value(struct ctx* context){
+void print_ret_value(ctx_t* context){
     log_info("RAX (return value): 0x%lx\n", context->rax);
 }
 

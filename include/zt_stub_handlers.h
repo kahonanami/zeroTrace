@@ -2,7 +2,7 @@
 
 #include <stdint.h>
 
-struct ctx{
+typedef struct{
     uint64_t r15;
     uint64_t r14;
     uint64_t r13;
@@ -21,11 +21,11 @@ struct ctx{
     uint64_t rflags;
     uint64_t thunk_ret_addr;
     uint64_t func_id;
-};
+} ctx_t;
 
 #define MAX_SAVED_RET_ADDR 256
 
-extern void print_func_arg(struct ctx* context);
+extern void print_func_arg(ctx_t* context);
 extern void save_ret_addr_c(uint64_t ret_addr);
-extern void print_ret_value(struct ctx* context);
+extern void print_ret_value(ctx_t* context);
 extern uint64_t get_ret_addr_c(void);
