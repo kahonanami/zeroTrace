@@ -3,7 +3,7 @@
 .section .text
 
 .global entry_stub
-.global ret_hook
+.global exit_stub
 
 .extern print_func_arg
 .extern save_ret_addr_c
@@ -58,18 +58,18 @@ entry_stub:
 
     call print_func_arg
 
-    mov rdi, [r12 + 0x88]
+    mov rdi, [r12 + 0x90]
     call save_ret_addr_c
 
-    lea rax, [rip + ret_hook]
-    mov [r12 + 0x88], rax
+    lea rax, [rip + exit_stub]
+    mov [r12 + 0x90], rax
 
     mov rsp, r12
     POP_ALL
     ret
 
 
-ret_hook:
+exit_stub:
     push 0
     PUSH_ALL
 

@@ -7,13 +7,13 @@ static __thread uint64_t saved_ret_addr[MAX_SAVED_RET_ADDR];
 static __thread int call_stack_idx = 0;
 
 void print_func_arg(struct ctx* context){
-    // TODO: 打印函数 ID & 实现 zt_log
-    log_info("RDI: 0x%lx\n", context->rdi);
-    log_info("RSI: 0x%lx\n", context->rsi);
-    log_info("RDX: 0x%lx\n", context->rdx);
-    log_info("RCX: 0x%lx\n", context->rcx);
-    log_info("R8: 0x%lx\n", context->r8);
-    log_info("R9: 0x%lx\n", context->r9);
+    log_info("function id: %d", context->func_id);
+    log_info("RDI: 0x%lx", context->rdi);
+    log_info("RSI: 0x%lx", context->rsi);
+    log_info("RDX: 0x%lx", context->rdx);
+    log_info("RCX: 0x%lx", context->rcx);
+    log_info("R8: 0x%lx", context->r8);
+    log_info("R9: 0x%lx", context->r9);
 }
 
 void print_ret_value(struct ctx* context){

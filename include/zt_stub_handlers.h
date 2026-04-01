@@ -19,6 +19,8 @@ struct ctx{
     uint64_t rbx;
     uint64_t rax;
     uint64_t rflags;
+    uint64_t thunk_ret_addr;
+    uint64_t func_id;
 };
 
 #define MAX_SAVED_RET_ADDR 256
