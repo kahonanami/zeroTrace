@@ -8,6 +8,7 @@ typedef struct {
     pid_t pid;
     char exe_path[512];
     uint64_t image_base;
+    bool is_pie;
 } zt_injector_session_t;
 
 extern int zt_injector_attach(zt_injector_session_t *session, pid_t pid);
