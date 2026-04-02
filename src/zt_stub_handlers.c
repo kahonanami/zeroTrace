@@ -11,7 +11,7 @@ typedef struct {
 static __thread zt_saved_probe_frame_t saved_frames[MAX_SAVED_RET_ADDR];
 static __thread int call_stack_idx = 0;
 
-void print_func_arg(ctx_t* context){
+void print_func_arg(ctx_t *context){
     log_info("function id: %d", context->func_id);
     log_info("RDI: 0x%lx", context->rdi);
     log_info("RSI: 0x%lx", context->rsi);
@@ -21,7 +21,7 @@ void print_func_arg(ctx_t* context){
     log_info("R9: 0x%lx", context->r9);
 }
 
-void print_ret_value(ctx_t* context){
+void print_ret_value(ctx_t *context){
     log_info("probe %lu return value: 0x%lx", context->func_id, context->rax);
 }
 

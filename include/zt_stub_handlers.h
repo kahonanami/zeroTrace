@@ -25,8 +25,8 @@ typedef struct{
 
 #define MAX_SAVED_RET_ADDR 256
 
-extern void print_func_arg(ctx_t* context);
+extern void print_func_arg(ctx_t *context);
 extern uint64_t save_probe_frame_c(uint64_t ret_addr, uint64_t func_id);
 extern uint64_t peek_probe_id_c(void);
-extern void print_ret_value(ctx_t* context);
+extern void print_ret_value(ctx_t *context);
 extern uint64_t get_ret_addr_c(void);
