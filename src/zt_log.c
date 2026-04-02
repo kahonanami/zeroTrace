@@ -1,3 +1,9 @@
+/*
+Source: https://github.com/rxi/log.c
+MIT License
+*/
+
+
 #include "../include/zt_log.h"
 
 #define MAX_CALLBACKS 32
