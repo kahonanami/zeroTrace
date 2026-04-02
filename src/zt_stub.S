@@ -6,7 +6,8 @@
 .global exit_stub
 
 .extern print_func_arg
-.extern save_ret_addr_c
+.extern save_probe_frame_c
+.extern peek_probe_id_c
 .extern print_ret_value
 .extern get_ret_addr_c
 
@@ -59,7 +60,8 @@ entry_stub:
     call print_func_arg
 
     mov rdi, [r12 + 0x90]
-    call save_ret_addr_c
+    mov rsi, [r12 + 0x88]
+    call save_probe_frame_c
 
     lea rax, [rip + exit_stub]
     mov [r12 + 0x90], rax
@@ -70,7 +72,14 @@ entry_stub:
 
 
 exit_stub:
+    mov r13, rax
+    mov r12, rsp
+    and rsp, 0xFFFFFFFFFFFFFFF0
+    call peek_probe_id_c
+    mov rsp, r12
+    push rax
     push 0
+    mov rax, r13
     PUSH_ALL
 
     mov r12, rsp
@@ -82,8 +91,8 @@ exit_stub:
     call get_ret_addr_c
 
     mov rsp, r12
-    mov [rsp + 0x80], rax
+    mov [rsp + 0x88], rax
 
     POP_ALL
-
+    lea rsp, [rsp + 8]
     ret

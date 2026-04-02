@@ -6,12 +6,20 @@
 
 #include "../include/zt_log.h"
 
+static void print_usage(const char *prog) {
+    fprintf(stderr,
+            "Usage:\n"
+            "  %s -p <pid> -s <symbol>\n",
+            prog);
+}
+
 int main(int argc, char *argv[]) {
     int opt;
     long pid = -1;
+    const char *symbol = NULL;
     bool p_flag_provided = false;
 
-    while ((opt = getopt(argc, argv, "p:")) != -1) {
+    while ((opt = getopt(argc, argv, "p:s:")) != -1) {
         switch (opt) {
             case 'p':
                 p_flag_provided = true;
@@ -19,20 +27,18 @@ int main(int argc, char *argv[]) {
                 char *endptr;
                 pid = strtol(optarg, &endptr, 10);
                 
-                if (optarg == endptr || *endptr != '\0') {
-                    fprintf(stderr, "Error: The -p option requires a valid numeric PID.\n");
-                    fprintf(stderr, "Invalid input: %s\n", optarg);
-                    exit(EXIT_FAILURE);
-                }
-                
-                if (pid <= 0) {
-                    fprintf(stderr, "Error: PID value is out of range.\n");
+                if (optarg == endptr || *endptr != '\0' || pid <= 0) {
+                    fprintf(stderr, "Invalid pid: %s\n", optarg);
                     exit(EXIT_FAILURE);
                 }
                 break;
                 
+            case 's':
+                symbol = optarg;
+                break;
+                
             case '?':
-                fprintf(stderr, "Usage: %s -p <pid>\n", argv[0]);
+                print_usage(argv[0]);
                 exit(EXIT_FAILURE);
                 
             default:
@@ -42,11 +48,18 @@ int main(int argc, char *argv[]) {
 
     if (!p_flag_provided) {
         fprintf(stderr, "Error: Missing required '-p' option.\n");
-        fprintf(stderr, "Usage: %s -p <pid>\n", argv[0]);
+        print_usage(argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    if (symbol == NULL) {
+        fprintf(stderr, "Error: Missing required '-s' option.\n");
+        print_usage(argv[0]);
         exit(EXIT_FAILURE);
     }
 
     printf("ztrace get PID: %ld\n", pid);
+    printf("ztrace get symbol: %s\n", symbol);
 
     return 0;
 }
