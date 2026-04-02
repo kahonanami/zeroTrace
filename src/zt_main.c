@@ -5,6 +5,7 @@
 #include <getopt.h>
 
 #include "../include/zt_log.h"
+#include "../include/zt_injector.h"
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
@@ -60,6 +61,14 @@ int main(int argc, char *argv[]) {
 
     printf("ztrace get PID: %ld\n", pid);
     printf("ztrace get symbol: %s\n", symbol);
+
+    zt_injector_session_t session;
+    if(zt_injector_attach(&session, (pid_t)pid) != 0) {
+        fprintf(stderr, "Failed to attach to process with PID %ld\n", pid);
+        exit(EXIT_FAILURE);
+    }
+
+    printf("Successfully attached to process with PID %d, %s\n", session.pid, session.exe_path);
 
     return 0;
 }
