@@ -68,7 +68,7 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    printf("Successfully attached to process with PID %d, %s\n, %d", session.pid, session.exe_path, session.is_pie);
+    printf("Successfully attached to process with PID %d, %s\n, %d, image_base: 0x%lX", session.pid, session.exe_path, session.is_pie, session.image_base);
 
     return 0;
 }
