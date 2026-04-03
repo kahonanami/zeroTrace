@@ -23,6 +23,8 @@ static int cmd_attach(char *args);
 static int cmd_detach(char *args);
 static int cmd_trace(char *args);
 static int cmd_stop(char *args);
+static int cmd_enable(char *args);
+static int cmd_disable(char *args);
 static int cmd_untrace(char *args);
 static int cmd_info(char *args);
 static int cmd_continue(char *args);
@@ -39,6 +41,8 @@ static struct {
     {"detach", "Detach from current target", cmd_detach},
     {"trace", "Register and enable a probe: trace <symbol>", cmd_trace},
     {"stop", "Stop current trace", cmd_stop},
+    {"enable", "Enable a probe again: enable <symbol|id>", cmd_enable},
+    {"disable", "Disable a probe: disable <symbol|id>", cmd_disable},
     {"untrace", "Remove a probe: untrace <symbol|id>", cmd_untrace},
     {"info", "Show info: info target | info probes", cmd_info},
     {"continue", "Continue the stopped target process", cmd_continue},
@@ -333,6 +337,102 @@ static int cmd_stop(char *args) {
     g_cli_log_path[0] = '\0';
     g_cli_log_offset = 0;
     printf("Trace stopped\n");
+    return 0;
+}
+
+static int cmd_enable(char *args) {
+    char *target;
+    char *endptr;
+    long probe_id;
+    zt_probe_info_t *probe;
+
+    if (!g_cli_attached) {
+        printf("No target attached\n");
+        return 0;
+    }
+
+    if (!zt_trace_is_active()) {
+        printf("No active trace\n");
+        return 0;
+    }
+
+    target = zt_next_arg(args);
+    if (target == NULL) {
+        printf("Usage: enable <symbol|id>\n");
+        return 0;
+    }
+
+    probe_id = strtol(target, &endptr, 10);
+    if (target != endptr && *endptr == '\0' && probe_id > 0) {
+        if (zt_trace_enable_probe(&g_cli_session, (uint64_t)probe_id) != 0) {
+            printf("Failed to enable probe id %ld\n", probe_id);
+            return 0;
+        }
+
+        printf("Enabled probe id %ld\n", probe_id);
+        return 0;
+    }
+
+    probe = zt_probe_find_by_symbol(&g_cli_session, target);
+    if (probe == NULL) {
+        printf("Probe not found: %s\n", target);
+        return 0;
+    }
+
+    if (zt_trace_enable_probe(&g_cli_session, probe->probe_id) != 0) {
+        printf("Failed to enable probe %s\n", target);
+        return 0;
+    }
+
+    printf("Enabled probe %s\n", target);
+    return 0;
+}
+
+static int cmd_disable(char *args) {
+    char *target;
+    char *endptr;
+    long probe_id;
+    zt_probe_info_t *probe;
+
+    if (!g_cli_attached) {
+        printf("No target attached\n");
+        return 0;
+    }
+
+    if (!zt_trace_is_active()) {
+        printf("No active trace\n");
+        return 0;
+    }
+
+    target = zt_next_arg(args);
+    if (target == NULL) {
+        printf("Usage: disable <symbol|id>\n");
+        return 0;
+    }
+
+    probe_id = strtol(target, &endptr, 10);
+    if (target != endptr && *endptr == '\0' && probe_id > 0) {
+        if (zt_trace_disable_probe(&g_cli_session, (uint64_t)probe_id) != 0) {
+            printf("Failed to disable probe id %ld\n", probe_id);
+            return 0;
+        }
+
+        printf("Disabled probe id %ld\n", probe_id);
+        return 0;
+    }
+
+    probe = zt_probe_find_by_symbol(&g_cli_session, target);
+    if (probe == NULL) {
+        printf("Probe not found: %s\n", target);
+        return 0;
+    }
+
+    if (zt_trace_disable_probe(&g_cli_session, probe->probe_id) != 0) {
+        printf("Failed to disable probe %s\n", target);
+        return 0;
+    }
+
+    printf("Disabled probe %s\n", target);
     return 0;
 }
 

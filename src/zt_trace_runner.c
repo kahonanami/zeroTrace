@@ -402,6 +402,68 @@ int zt_trace_poll(void) {
     return 0;
 }
 
+int zt_trace_disable_probe(zt_injector_session_t *session, uint64_t probe_id) {
+    zt_probe_info_t *probe;
+
+    if (session == NULL || probe_id == 0 || !g_active_trace.active || g_active_trace.session != session) {
+        return -1;
+    }
+
+    probe = zt_probe_find_by_id(session, probe_id);
+    if (probe == NULL || probe->thunk_addr == 0) {
+        return -1;
+    }
+
+    if (g_active_trace.target_running && zt_stop_target(session) != 0) {
+        return -1;
+    }
+    g_active_trace.target_running = 0;
+
+    if (zt_uninstall_probe_patch(session, probe_id) != 0) {
+        return -1;
+    }
+
+    if (ptrace(PTRACE_CONT, session->pid, NULL, NULL) != 0) {
+        return -1;
+    }
+
+    g_active_trace.target_running = 1;
+    return 0;
+}
+
+int zt_trace_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
+    zt_probe_info_t *probe;
+
+    if (session == NULL || probe_id == 0 || !g_active_trace.active || g_active_trace.session != session) {
+        return -1;
+    }
+
+    probe = zt_probe_find_by_id(session, probe_id);
+    if (probe == NULL) {
+        return -1;
+    }
+
+    if (probe->thunk_addr != 0) {
+        return 0;
+    }
+
+    if (g_active_trace.target_running && zt_stop_target(session) != 0) {
+        return -1;
+    }
+    g_active_trace.target_running = 0;
+
+    if (zt_trace_install_probe(session, &g_active_trace.runtime, probe->symbol, NULL) != 0) {
+        return -1;
+    }
+
+    if (ptrace(PTRACE_CONT, session->pid, NULL, NULL) != 0) {
+        return -1;
+    }
+
+    g_active_trace.target_running = 1;
+    return 0;
+}
+
 int zt_trace_stop(void) {
     int ret;
     int i;
