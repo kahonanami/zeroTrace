@@ -10,7 +10,11 @@
 #include <sys/types.h>
 #include <stdlib.h>
 #include <sys/ptrace.h>
+#include <sys/user.h>
 #include <sys/wait.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
+#include <signal.h>
 #include <capstone/capstone.h>
 
 #include "../include/zt_injector.h"
@@ -184,6 +188,136 @@ int zt_write_remote_memory(pid_t pid, uint64_t remote_addr, const void *buffer, 
         copied += chunk_size;
     }
 
+    return 0;
+}
+
+static int zt_remote_syscall6(pid_t pid,
+                              long syscall_no,
+                              uint64_t arg1,
+                              uint64_t arg2,
+                              uint64_t arg3,
+                              uint64_t arg4,
+                              uint64_t arg5,
+                              uint64_t arg6,
+                              uint64_t *ret_out) {
+    struct user_regs_struct saved_regs;
+    struct user_regs_struct regs;
+    uint64_t saved_word;
+    uint64_t patched_word;
+    int status;
+
+    if (ret_out == NULL) {
+        return -1;
+    }
+
+    if (ptrace(PTRACE_GETREGS, pid, NULL, &saved_regs) != 0) {
+        return -1;
+    }
+
+    errno = 0;
+    saved_word = (uint64_t)ptrace(PTRACE_PEEKDATA,
+                                  pid,
+                                  (void *)(uintptr_t)saved_regs.rip,
+                                  NULL);
+    if (saved_word == (uint64_t)-1 && errno != 0) {
+        return -1;
+    }
+
+    patched_word = saved_word;
+    ((uint8_t *)&patched_word)[0] = 0x0f; /* syscall */
+    ((uint8_t *)&patched_word)[1] = 0x05;
+    ((uint8_t *)&patched_word)[2] = 0xcc; /* int3 */
+
+    if (ptrace(PTRACE_POKEDATA,
+               pid,
+               (void *)(uintptr_t)saved_regs.rip,
+               (void *)(uintptr_t)patched_word) != 0) {
+        return -1;
+    }
+
+    regs = saved_regs;
+    regs.rax = (uint64_t)syscall_no;
+    regs.rdi = arg1;
+    regs.rsi = arg2;
+    regs.rdx = arg3;
+    regs.r10 = arg4;
+    regs.r8 = arg5;
+    regs.r9 = arg6;
+
+    if (ptrace(PTRACE_SETREGS, pid, NULL, &regs) != 0) {
+        ptrace(PTRACE_POKEDATA, pid, (void *)(uintptr_t)saved_regs.rip, (void *)(uintptr_t)saved_word);
+        return -1;
+    }
+
+    if (ptrace(PTRACE_CONT, pid, NULL, NULL) != 0) {
+        ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs);
+        ptrace(PTRACE_POKEDATA, pid, (void *)(uintptr_t)saved_regs.rip, (void *)(uintptr_t)saved_word);
+        return -1;
+    }
+
+    if (waitpid(pid, &status, 0) < 0) {
+        ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs);
+        ptrace(PTRACE_POKEDATA, pid, (void *)(uintptr_t)saved_regs.rip, (void *)(uintptr_t)saved_word);
+        return -1;
+    }
+
+    if (!WIFSTOPPED(status) || WSTOPSIG(status) != SIGTRAP) {
+        ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs);
+        ptrace(PTRACE_POKEDATA, pid, (void *)(uintptr_t)saved_regs.rip, (void *)(uintptr_t)saved_word);
+        return -1;
+    }
+
+    if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) != 0) {
+        ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs);
+        ptrace(PTRACE_POKEDATA, pid, (void *)(uintptr_t)saved_regs.rip, (void *)(uintptr_t)saved_word);
+        return -1;
+    }
+
+    *ret_out = regs.rax;
+
+    if (ptrace(PTRACE_POKEDATA,
+               pid,
+               (void *)(uintptr_t)saved_regs.rip,
+               (void *)(uintptr_t)saved_word) != 0) {
+        ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs);
+        return -1;
+    }
+
+    if (ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs) != 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+int zt_remote_mmap(pid_t pid,
+                   size_t size,
+                   int prot,
+                   int flags,
+                   uint64_t *remote_addr_out) {
+    uint64_t ret;
+
+    if (remote_addr_out == NULL || size == 0) {
+        return -1;
+    }
+
+    if (zt_remote_syscall6(pid,
+                           SYS_mmap,
+                           0,
+                           size,
+                           (uint64_t)prot,
+                           (uint64_t)flags,
+                           (uint64_t)-1,
+                           0,
+                           &ret) != 0) {
+        return -1;
+    }
+
+    if ((int64_t)ret < 0 && (int64_t)ret >= -4095) {
+        return -1;
+    }
+
+    *remote_addr_out = ret;
     return 0;
 }
 

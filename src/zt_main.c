@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <getopt.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <capstone/capstone.h>
 
 #include "../include/zt_log.h"
@@ -113,6 +114,45 @@ static void zt_test_remote_rw(pid_t pid, uint64_t remote_addr) {
     }
 }
 
+static void zt_test_remote_thunk_rw(pid_t pid,
+                                    uint64_t remote_addr,
+                                    const uint8_t *thunk_buf,
+                                    size_t thunk_size) {
+    uint8_t remote_buf[ZT_THUNK_MAX_SIZE];
+    int i;
+
+    if (thunk_buf == NULL || thunk_size == 0 || thunk_size > sizeof(remote_buf)) {
+        printf("invalid thunk buffer for remote write test\n");
+        return;
+    }
+
+    if (zt_write_remote_memory(pid, remote_addr, thunk_buf, thunk_size) != 0) {
+        printf("failed to write thunk to remote addr 0x%llx\n",
+               (unsigned long long)remote_addr);
+        return;
+    }
+
+    if (zt_read_remote_memory(pid, remote_addr, remote_buf, thunk_size) != 0) {
+        printf("failed to read thunk back from remote addr 0x%llx\n",
+               (unsigned long long)remote_addr);
+        return;
+    }
+
+    printf("Remote thunk bytes (%zu): ", thunk_size);
+    for (i = 0; i < (int)thunk_size; ++i) {
+        printf("%02x ", remote_buf[i]);
+    }
+    printf("\n");
+
+    if (memcmp(thunk_buf, remote_buf, thunk_size) == 0) {
+        printf("remote thunk write/readback ok at 0x%llx\n",
+               (unsigned long long)remote_addr);
+    } else {
+        printf("remote thunk write/readback mismatch at 0x%llx\n",
+               (unsigned long long)remote_addr);
+    }
+}
+
 int main(int argc, char *argv[]) {
     int opt;
     long pid = -1;
@@ -163,6 +203,7 @@ int main(int argc, char *argv[]) {
 
     zt_injector_session_t session;
     uint64_t remote_entry_stub_addr;
+    uint64_t remote_thunk_addr;
     if(zt_injector_attach(&session, (pid_t)pid) != 0) {
         fprintf(stderr, "Failed to attach to process with PID %ld\n", pid);
         exit(EXIT_FAILURE);
@@ -182,6 +223,16 @@ int main(int argc, char *argv[]) {
                (unsigned long long)remote_entry_stub_addr);
     } else {
         printf("Failed to resolve remote entry_stub addr from %s\n", session.exe_path);
+    }
+
+    if (zt_remote_mmap(session.pid,
+                       4096,
+                       PROT_READ | PROT_WRITE | PROT_EXEC,
+                       MAP_PRIVATE | MAP_ANONYMOUS,
+                       &remote_thunk_addr) == 0) {
+        printf("Remote mmap addr: 0x%llx\n", (unsigned long long)remote_thunk_addr);
+    } else {
+        printf("Failed to mmap remote thunk page\n");
     }
 
     zt_probe_info_t *probe = zt_register_probe(&session, symbol);
@@ -224,6 +275,7 @@ int main(int argc, char *argv[]) {
                 printf("%02x ", thunk_buf[i]);
             }
             printf("\n");
+            zt_test_remote_thunk_rw(session.pid, remote_thunk_addr, thunk_buf, thunk_size);
             zt_dump_thunk_disasm(thunk_buf, thunk_code_size);
             zt_dump_thunk_tail(thunk_buf, thunk_size);
         }
