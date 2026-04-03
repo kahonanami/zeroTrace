@@ -149,7 +149,7 @@ ztrace.1473057.log
 
 ## 自动化测试
 
-项目内置自动化测试，直接运行：
+运行如下指令进行项目内置的自动化测试：
 
 ```bash
 make test
@@ -164,7 +164,7 @@ make test
 
 ## Benchmark
 
-项目提供了一键 benchmark：
+运行如下指令进行 Benchmark 测试：
 
 ```bash
 make benchmark
@@ -205,8 +205,7 @@ ztrace vs uprobe      : 16.39x lower overhead
 
 从这组数据可以看到：
 
-- `zeroTrace` 单次额外开销约为 `125.75 ns`
-- 明显低于题目要求的 `< 1000 ns`
+- `zeroTrace` 单次额外开销约为 `125.75 ns`，明显低于题目要求的 `< 1000 ns`
 - 相比 `uprobe`，额外开销约低 `16.39x`
 
 ## TODO List
