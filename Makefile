@@ -32,11 +32,14 @@ PAYLOAD_PIC_OBJ := $(BUILD_DIR)/zt_payload.pic.o $(BUILD_DIR)/zt_stub.pic.o
 TEST_BINS := $(patsubst $(TEST_DIR)/%.c, $(TEST_BIN_DIR)/%, $(TEST_C))
 STANDALONE_TEST_BINS := \
 	$(TEST_BIN_DIR)/test_loop \
-	$(TEST_BIN_DIR)/test_benchmark_target
+	$(TEST_BIN_DIR)/test_benchmark_target \
+	$(TEST_BIN_DIR)/test_many_probes_target
+THREAD_STANDALONE_TEST_BINS := \
+	$(TEST_BIN_DIR)/test_threaded_target
 BENCHMARK_BINS := \
 	$(TEST_BIN_DIR)/test_benchmark_target \
 	$(TEST_BIN_DIR)/test_benchmark_runner
-CORE_TEST_BINS := $(filter-out $(STANDALONE_TEST_BINS), $(TEST_BINS))
+CORE_TEST_BINS := $(filter-out $(STANDALONE_TEST_BINS) $(THREAD_STANDALONE_TEST_BINS), $(TEST_BINS))
 AUTO_TEST_BINS := $(filter-out $(BENCHMARK_BINS), $(CORE_TEST_BINS))
 APP_TARGET := $(BIN_DIR)/ztrace
 
@@ -78,6 +81,10 @@ $(CORE_TEST_BINS): $(TEST_BIN_DIR)/%: $(TEST_DIR)/%.c $(OBJ_CORE) $(OBJ_TEST_HEL
 $(STANDALONE_TEST_BINS): $(TEST_BIN_DIR)/%: $(TEST_DIR)/%.c
 	$(CC) $(CFLAGS) $< -o $@
 	@echo "[✓] Built standalone test: $@"
+
+$(THREAD_STANDALONE_TEST_BINS): $(TEST_BIN_DIR)/%: $(TEST_DIR)/%.c
+	$(CC) $(CFLAGS) $< -o $@ -lpthread
+	@echo "[✓] Built threaded standalone test: $@"
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
