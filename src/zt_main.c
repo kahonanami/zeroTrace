@@ -4,7 +4,8 @@
 #include <stdbool.h>
 #include <getopt.h>
 
-#include "../include/zt_log.h"
+#include "../include/zt_cli.h"
+#include "../include/zt_trace_runner.h"
 
 static void print_usage(const char *prog) {
     fprintf(stderr,
@@ -23,43 +24,44 @@ int main(int argc, char *argv[]) {
         switch (opt) {
             case 'p':
                 p_flag_provided = true;
-                
-                char *endptr;
-                pid = strtol(optarg, &endptr, 10);
-                
-                if (optarg == endptr || *endptr != '\0' || pid <= 0) {
-                    fprintf(stderr, "Invalid pid: %s\n", optarg);
-                    exit(EXIT_FAILURE);
+
+                {
+                    char *endptr;
+                    pid = strtol(optarg, &endptr, 10);
+
+                    if (optarg == endptr || *endptr != '\0' || pid <= 0) {
+                        fprintf(stderr, "Invalid pid: %s\n", optarg);
+                        return EXIT_FAILURE;
+                    }
                 }
                 break;
-                
+
             case 's':
                 symbol = optarg;
                 break;
-                
+
             case '?':
                 print_usage(argv[0]);
-                exit(EXIT_FAILURE);
-                
+                return EXIT_FAILURE;
+
             default:
-                exit(EXIT_FAILURE);
+                return EXIT_FAILURE;
         }
     }
 
-    if (!p_flag_provided) {
-        fprintf(stderr, "Error: Missing required '-p' option.\n");
-        print_usage(argv[0]);
-        exit(EXIT_FAILURE);
+    if (!p_flag_provided && symbol == NULL) {
+        zt_cli_main_loop();
+        return EXIT_SUCCESS;
     }
 
-    if (symbol == NULL) {
-        fprintf(stderr, "Error: Missing required '-s' option.\n");
+    if (!p_flag_provided || symbol == NULL) {
         print_usage(argv[0]);
-        exit(EXIT_FAILURE);
+        return EXIT_FAILURE;
     }
 
-    printf("ztrace get PID: %ld\n", pid);
-    printf("ztrace get symbol: %s\n", symbol);
+    if (zt_trace_symbol_once((pid_t)pid, symbol) != 0) {
+        return EXIT_FAILURE;
+    }
 
-    return 0;
+    return EXIT_SUCCESS;
 }

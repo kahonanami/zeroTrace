@@ -4,11 +4,13 @@
 
 .global entry_stub
 .global exit_stub
+.protected entry_stub
+.protected exit_stub
 
-.extern print_func_arg
+.extern zt_handle_entry
 .extern save_probe_frame_c
 .extern peek_probe_id_c
-.extern print_ret_value
+.extern zt_handle_return
 .extern get_ret_addr_c
 
 .macro PUSH_ALL
@@ -57,7 +59,7 @@ entry_stub:
     and rsp, 0xFFFFFFFFFFFFFFF0
     mov rdi, r12
 
-    call print_func_arg
+    call zt_handle_entry
 
     mov rdi, [r12 + 0x90]
     mov rsi, [r12 + 0x88]
@@ -86,7 +88,7 @@ exit_stub:
     and rsp, 0xFFFFFFFFFFFFFFF0
 
     mov rdi, r12
-    call print_ret_value
+    call zt_handle_return
 
     call get_ret_addr_c
 

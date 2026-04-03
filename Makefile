@@ -1,6 +1,10 @@
 CC := gcc
 CFLAGS := -Wall -Wextra -g -Iinclude
 ASMFLAGS := -g -Wa,--noexecstack
+PIC_CFLAGS := $(CFLAGS) -fPIC
+PIC_ASMFLAGS := $(ASMFLAGS) -fPIC
+LDFLAGS_SO := -shared
+LDLIBS := -lcapstone -ldl -lreadline
 
 SRC_DIR := src
 TEST_DIR := src/test
@@ -21,14 +25,18 @@ TEST_C := $(wildcard $(TEST_DIR)/*.c)
 TEST_S := $(wildcard $(TEST_DIR)/*.S)
 
 OBJ_TEST_HELPERS := $(patsubst $(TEST_DIR)/%.S, $(BUILD_DIR)/%.o, $(TEST_S))
+PAYLOAD_SO := $(BIN_DIR)/libzt_payload.so
+PAYLOAD_PIC_OBJ := $(BUILD_DIR)/zt_payload.pic.o $(BUILD_DIR)/zt_stub.pic.o
 .PRECIOUS: $(BUILD_DIR)/%.o
 
 TEST_BINS := $(patsubst $(TEST_DIR)/%.c, $(TEST_BIN_DIR)/%, $(TEST_C))
+STANDALONE_TEST_BINS := $(TEST_BIN_DIR)/add_loop
+CORE_TEST_BINS := $(filter-out $(STANDALONE_TEST_BINS), $(TEST_BINS))
 APP_TARGET := $(BIN_DIR)/ztrace
 
 .PHONY: all clean directories test run-tests
 
-all: directories $(APP_TARGET) $(TEST_BINS)
+all: directories $(APP_TARGET) $(PAYLOAD_SO) $(TEST_BINS)
 
 test: all run-tests
 
@@ -47,18 +55,32 @@ directories:
 	@mkdir -p $(TEST_BIN_DIR)
 
 $(APP_TARGET): $(OBJ_CORE) $(OBJ_MAIN)
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 	@echo "[✓] Built main app: $@"
 
-$(TEST_BIN_DIR)/%: $(TEST_DIR)/%.c $(OBJ_CORE) $(OBJ_TEST_HELPERS)
-	$(CC) $(CFLAGS) $< $(OBJ_CORE) $(OBJ_TEST_HELPERS) -o $@
+$(PAYLOAD_SO): $(PAYLOAD_PIC_OBJ)
+	$(CC) $(LDFLAGS_SO) -o $@ $^
+	@echo "[✓] Built payload shared library: $@"
+
+$(CORE_TEST_BINS): $(TEST_BIN_DIR)/%: $(TEST_DIR)/%.c $(OBJ_CORE) $(OBJ_TEST_HELPERS)
+	$(CC) $(CFLAGS) $< $(OBJ_CORE) $(OBJ_TEST_HELPERS) -o $@ $(LDLIBS)
 	@echo "[✓] Built test: $@"
+
+$(TEST_BIN_DIR)/add_loop: $(TEST_DIR)/add_loop.c
+	$(CC) $(CFLAGS) $< -o $@
+	@echo "[✓] Built standalone test: $@"
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
+$(BUILD_DIR)/%.pic.o: $(SRC_DIR)/%.c
+	$(CC) $(PIC_CFLAGS) -c $< -o $@
+
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.S
 	$(CC) $(ASMFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/%.pic.o: $(SRC_DIR)/%.S
+	$(CC) $(PIC_ASMFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/%.o: $(TEST_DIR)/%.S
 	$(CC) $(ASMFLAGS) -c $< -o $@
