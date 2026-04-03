@@ -110,7 +110,7 @@ static int zt_read_image_base(pid_t pid, const char *image_path, uint64_t *base_
     return -ENOENT;
 }
 
-static int zt_read_remote_memory(pid_t pid, uint64_t remote_addr, void *buffer, size_t size) {
+int zt_read_remote_memory(pid_t pid, uint64_t remote_addr, void *buffer, size_t size) {
     size_t copied;
     long word;
     size_t word_size;
@@ -139,6 +139,48 @@ static int zt_read_remote_memory(pid_t pid, uint64_t remote_addr, void *buffer, 
         }
 
         memcpy((uint8_t *)buffer + copied, &word, chunk_size);
+        copied += chunk_size;
+    }
+
+    return 0;
+}
+
+int zt_write_remote_memory(pid_t pid, uint64_t remote_addr, const void *buffer, size_t size) {
+    size_t copied;
+    size_t word_size;
+    long word;
+    uint8_t temp[sizeof(long)];
+
+    if (buffer == NULL || size == 0) {
+        return -1;
+    }
+
+    copied = 0;
+    word_size = sizeof(long);
+    while (copied < size) {
+        size_t chunk_size;
+
+        chunk_size = size - copied;
+        if (chunk_size > word_size) {
+            chunk_size = word_size;
+        }
+
+        if (chunk_size != word_size) {
+            if (zt_read_remote_memory(pid, remote_addr + copied, temp, word_size) != 0) {
+                return -1;
+            }
+        }
+
+        memcpy(temp, (const uint8_t *)buffer + copied, chunk_size);
+        memcpy(&word, temp, sizeof(word));
+
+        if (ptrace(PTRACE_POKEDATA,
+                   pid,
+                   (void *)(uintptr_t)(remote_addr + copied),
+                   (void *)word) != 0) {
+            return -1;
+        }
+
         copied += chunk_size;
     }
 

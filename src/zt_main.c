@@ -74,6 +74,45 @@ static void zt_dump_thunk_tail(const uint8_t *thunk_buf, size_t thunk_size) {
     printf("  continue_addr   = 0x%llx\n", (unsigned long long)continue_addr);
 }
 
+static void zt_test_remote_rw(pid_t pid, uint64_t remote_addr) {
+    uint8_t before[16];
+    uint8_t after[16];
+    int i;
+
+    if (zt_read_remote_memory(pid, remote_addr, before, sizeof(before)) != 0) {
+        printf("zt_read_remote_memory failed at 0x%llx\n", (unsigned long long)remote_addr);
+        return;
+    }
+
+    printf("Remote bytes before write: ");
+    for (i = 0; i < (int)sizeof(before); ++i) {
+        printf("%02x ", before[i]);
+    }
+    printf("\n");
+
+    if (zt_write_remote_memory(pid, remote_addr, before, sizeof(before)) != 0) {
+        printf("zt_write_remote_memory failed at 0x%llx\n", (unsigned long long)remote_addr);
+        return;
+    }
+
+    if (zt_read_remote_memory(pid, remote_addr, after, sizeof(after)) != 0) {
+        printf("zt_read_remote_memory(after) failed at 0x%llx\n", (unsigned long long)remote_addr);
+        return;
+    }
+
+    printf("Remote bytes after write:  ");
+    for (i = 0; i < (int)sizeof(after); ++i) {
+        printf("%02x ", after[i]);
+    }
+    printf("\n");
+
+    if (memcmp(before, after, sizeof(before)) == 0) {
+        printf("remote read/write roundtrip ok\n");
+    } else {
+        printf("remote read/write roundtrip mismatch\n");
+    }
+}
+
 int main(int argc, char *argv[]) {
     int opt;
     long pid = -1;
@@ -156,6 +195,8 @@ int main(int argc, char *argv[]) {
            probe->symbol,
            probe->symbol_addr);
     printf("Current probe count: %d\n", session.probe_count);
+
+    zt_test_remote_rw(session.pid, probe->symbol_addr);
 
     if (zt_enable_probe(&session, probe->probe_id) != 0) {
         printf("zt_enable_probe failed for probe %lu\n", probe->probe_id);
