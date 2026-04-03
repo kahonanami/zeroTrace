@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <dlfcn.h>
+#include <errno.h>
 #include <sys/mman.h>
 #include <sys/ptrace.h>
 #include <sys/wait.h>
@@ -27,13 +28,38 @@ typedef struct {
     uint64_t remote_thunk_addr;
 } zt_runtime_state_t;
 
-static void zt_dump_trace_events(const zt_trace_buffer_t *buffer, size_t max_events) {
-    uint64_t write_seq;
-    size_t start;
-    size_t end;
-    size_t i;
+static volatile sig_atomic_t g_stop_requested;
 
-    if (buffer == NULL) {
+static void zt_handle_stop_signal(int signo) {
+    (void)signo;
+    g_stop_requested = 1;
+}
+
+static int zt_wait_for_tracee_stop(pid_t pid) {
+    int status;
+
+    for (;;) {
+        if (waitpid(pid, &status, 0) > 0) {
+            if (WIFSTOPPED(status)) {
+                return 0;
+            }
+            return -1;
+        }
+
+        if (errno == EINTR) {
+            continue;
+        }
+
+        return -1;
+    }
+}
+
+static void zt_dump_trace_events_since(const zt_trace_buffer_t *buffer, uint64_t *last_seq) {
+    uint64_t write_seq;
+    uint64_t start_seq;
+    uint64_t seq;
+
+    if (buffer == NULL || last_seq == NULL) {
         return;
     }
 
@@ -44,27 +70,26 @@ static void zt_dump_trace_events(const zt_trace_buffer_t *buffer, size_t max_eve
 
     write_seq = buffer->write_seq;
     printf("Trace buffer write_seq: %llu\n", (unsigned long long)write_seq);
-    if (write_seq == 0) {
+    if (write_seq == 0 || write_seq <= *last_seq) {
         printf("No trace events captured yet\n");
         return;
     }
 
-    start = 0;
-    if (write_seq > max_events) {
-        start = (size_t)(write_seq - max_events);
+    start_seq = *last_seq + 1;
+    if (write_seq - *last_seq > ZT_TRACE_EVENT_CAPACITY) {
+        start_seq = write_seq - ZT_TRACE_EVENT_CAPACITY + 1;
     }
-    end = (size_t)write_seq;
 
     printf("Trace events:\n");
-    for (i = start; i < end; ++i) {
-        const zt_trace_event_t *event = &buffer->events[i % ZT_TRACE_EVENT_CAPACITY];
+    for (seq = start_seq; seq <= write_seq; ++seq) {
+        const zt_trace_event_t *event = &buffer->events[(seq - 1) % ZT_TRACE_EVENT_CAPACITY];
 
-        if (event->committed_seq != i + 1) {
+        if (event->committed_seq != seq) {
             continue;
         }
 
         printf("  seq=%zu probe=%llu type=%s values=[0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx]\n",
-               i + 1,
+               (size_t)seq,
                (unsigned long long)event->probe_id,
                event->event_type == ZT_TRACE_EVENT_ENTRY ? "entry" : "return",
                (unsigned long long)event->value0,
@@ -74,6 +99,8 @@ static void zt_dump_trace_events(const zt_trace_buffer_t *buffer, size_t max_eve
                (unsigned long long)event->value4,
                (unsigned long long)event->value5);
     }
+
+    *last_seq = write_seq;
 }
 
 static int zt_setup_remote_payload(zt_injector_session_t *session,
@@ -225,36 +252,76 @@ static int zt_setup_remote_payload(zt_injector_session_t *session,
     return 0;
 }
 
-static void zt_capture_trace_once(zt_injector_session_t *session,
+static int zt_stop_target(zt_injector_session_t *session) {
+    if (session == NULL) {
+        return -1;
+    }
+
+    if (kill(session->pid, SIGSTOP) != 0) {
+        return -1;
+    }
+
+    if (zt_wait_for_tracee_stop(session->pid) != 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static void zt_capture_trace_loop(zt_injector_session_t *session,
                                   uint64_t remote_trace_buffer_addr) {
     zt_trace_buffer_t trace_buffer;
-    int status;
+    uint64_t last_seq;
+    bool target_running;
 
     if (session == NULL || remote_trace_buffer_addr == 0) {
         return;
     }
 
-    if (ptrace(PTRACE_CONT, session->pid, NULL, NULL) != 0) {
-        printf("Failed to continue target process for trace capture\n");
-        return;
+    last_seq = 0;
+    target_running = false;
+    g_stop_requested = 0;
+    signal(SIGINT, zt_handle_stop_signal);
+
+    printf("Tracing... press Ctrl+C to stop.\n");
+    while (!g_stop_requested) {
+        if (ptrace(PTRACE_CONT, session->pid, NULL, NULL) != 0) {
+            printf("Failed to continue target process for trace capture\n");
+            break;
+        }
+        target_running = true;
+
+        sleep(1);
+        if (g_stop_requested) {
+            break;
+        }
+
+        if (zt_stop_target(session) != 0) {
+            printf("Failed to stop target process for trace readback\n");
+            break;
+        }
+        target_running = false;
+
+        if (zt_read_remote_memory(session->pid,
+                                  remote_trace_buffer_addr,
+                                  &trace_buffer,
+                                  sizeof(trace_buffer)) != 0) {
+            printf("Failed to read remote trace buffer\n");
+            break;
+        }
+
+        zt_dump_trace_events_since(&trace_buffer, &last_seq);
     }
 
-    sleep(2);
-    kill(session->pid, SIGSTOP);
-    if (waitpid(session->pid, &status, 0) <= 0 || !WIFSTOPPED(status)) {
-        printf("Failed to stop target process for trace readback\n");
-        return;
+    signal(SIGINT, SIG_IGN);
+
+    if (target_running) {
+        if (zt_stop_target(session) != 0) {
+            printf("Failed to stop target process after Ctrl+C\n");
+        }
     }
 
-    if (zt_read_remote_memory(session->pid,
-                              remote_trace_buffer_addr,
-                              &trace_buffer,
-                              sizeof(trace_buffer)) != 0) {
-        printf("Failed to read remote trace buffer\n");
-        return;
-    }
-
-    zt_dump_trace_events(&trace_buffer, 8);
+    signal(SIGINT, SIG_DFL);
 }
 
 int zt_trace_symbol_once(pid_t pid, const char *symbol) {
@@ -337,7 +404,7 @@ int zt_trace_symbol_once(pid_t pid, const char *symbol) {
            (unsigned long long)probe->symbol_addr,
            (unsigned long long)runtime.remote_thunk_addr);
 
-    zt_capture_trace_once(&session, runtime.remote_trace_buffer_addr);
+    zt_capture_trace_loop(&session, runtime.remote_trace_buffer_addr);
 
     if (zt_uninstall_probe_patch(&session, probe->probe_id) == 0) {
         printf("probe patch restored at 0x%llx\n",
