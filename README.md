@@ -46,6 +46,8 @@ make
   benchmark 目标程序
 - `bin/tests/test_benchmark_runner`
   benchmark 使用的非交互 trace runner
+- `bin/tests/test_benchmark_latency`
+  benchmark 使用的安装/清理延迟测试 runner
 
 清理构建产物：
 
@@ -186,35 +188,41 @@ benchmark 目标函数是 `bench_getpid()`，它是测试程序中的一个 `noi
 - `benchmark/ztrace.out`
 - `benchmark/ztrace.runner.out`
 - `benchmark/ztrace.benchmark.log`
+- `benchmark/latency.out`
 - `benchmark/report.txt`
 
 一组最新的 benchmark 结果如下：
 
 ```text
 iterations            : 1000000
-baseline total ns     : 63492697
-baseline per call     : 63.49 ns
-uprobe total ns       : 2124504413
-uprobe per call       : 2124.50 ns
-uprobe overhead/call  : 2061.01 ns
-ztrace total ns       : 189246417
-ztrace per call       : 189.25 ns
-ztrace overhead/call  : 125.75 ns
-ztrace vs uprobe      : 16.39x lower overhead
+baseline total ns     : 66018978
+baseline per call     : 66.02 ns
+uprobe total ns       : 2006695737
+uprobe per call       : 2006.70 ns
+uprobe overhead/call  : 1940.68 ns
+ztrace total ns       : 235681372
+ztrace per call       : 235.68 ns
+ztrace overhead/call  : 169.66 ns
+ztrace vs uprobe      : 11.44x lower overhead
+
+Probe lifecycle latency
+-----------------------
+install latency       : 1069535 ns (1.070 ms)
+uninstall latency     : 18174 ns (0.018 ms)
 ```
 
 从这组数据可以看到：
 
-- `zeroTrace` 单次额外开销约为 `125.75 ns`，明显低于题目要求的 `< 1000 ns`
-- 相比 `uprobe`，额外开销约低 `16.39x`
+- `zeroTrace` 单次额外开销约为 `169.66 ns`，明显低于题目要求的 `< 1000 ns`
+- `probe` 安装延迟约为 `1.070 ms`，清理延迟约为 `0.018 ms`，都低于题目要求的 `< 10 ms`
+- 相比 `uprobe`，额外开销约低 `11.44x`
 
 ## TODO List
 
-- [ ] 对于已知开源库函数，优化输出格式，支持解析字符串等参数/结构体
 - [ ] 补充浮点寄存器 / SIMD 上下文保存与恢复验证
 - [ ] 增强信号安全测试，覆盖目标进程收到异步信号时的 trace 行为
 - [ ] 优化 `zt_trace_poll()` 的轮询策略，减少对目标进程的打断
-- [ ] 补充探针安装 / 清理延迟的自动化测量
+- [ ] 为更多函数补充 `conf/zttrace.conf` 签名和更丰富的参数显示规则
 
 ## 项目结构
 
@@ -234,7 +242,7 @@ ztrace vs uprobe      : 16.39x lower overhead
 ## 说明
 
 - 当前项目主要面向 `x86_64 Linux`
-- 目前的 trace 参数输出按寄存器方式显示，默认打印 `rdi/rsi/rdx/rcx/r8/r9`
+- 已支持通过 `conf/zttrace.conf` 对常见 libc/POSIX 函数做签名感知格式化；未配置到的函数会回退到寄存器风格显示
 - 对复杂函数前导指令的支持依赖 Capstone 解析；如果函数入口包含当前未处理的情况，probe 安装可能失败
 
 更底层的设计说明可以参考：

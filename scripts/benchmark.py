@@ -14,6 +14,7 @@ ITERATIONS = int(os.environ.get("ZT_BENCH_ITERATIONS", "1000000"))
 ROOT_DIR = Path(__file__).resolve().parent.parent
 TARGET = ROOT_DIR / "bin" / "tests" / "test_benchmark_target"
 BENCH_RUNNER = ROOT_DIR / "bin" / "tests" / "test_benchmark_runner"
+LATENCY_RUNNER = ROOT_DIR / "bin" / "tests" / "test_benchmark_latency"
 RESULT_DIR = ROOT_DIR / "benchmark"
 BASELINE_OUT = RESULT_DIR / "baseline.out"
 UPROBE_OUT = RESULT_DIR / "uprobe.out"
@@ -21,6 +22,7 @@ UPROBE_TRACE_OUT = RESULT_DIR / "uprobe.bpftrace.out"
 ZTRACE_OUT = RESULT_DIR / "ztrace.out"
 ZTRACE_RUNNER_OUT = RESULT_DIR / "ztrace.runner.out"
 ZTRACE_LOG_OUT = RESULT_DIR / "ztrace.benchmark.log"
+LATENCY_OUT = RESULT_DIR / "latency.out"
 REPORT_OUT = RESULT_DIR / "report.txt"
 
 
@@ -33,6 +35,14 @@ def extract_total_ns(text: str) -> int:
     if match is None:
         raise RuntimeError(f"failed to parse total_ns from output:\n{text}")
     return int(match.group(1))
+
+
+def extract_latency_ns(text: str) -> tuple[int, int]:
+    install = re.search(r"\binstall_ns=(\d+)\b", text)
+    uninstall = re.search(r"\buninstall_ns=(\d+)\b", text)
+    if install is None or uninstall is None:
+        raise RuntimeError(f"failed to parse latency metrics from output:\n{text}")
+    return int(install.group(1)), int(uninstall.group(1))
 
 
 def run_and_capture(cmd, env=None) -> str:
@@ -204,7 +214,46 @@ def run_ztrace() -> int:
     return total_ns
 
 
-def format_report(baseline_ns: int, uprobe_ns: int, ztrace_ns: int) -> str:
+def run_latency() -> tuple[int, int]:
+    print("[4/4] Running install/uninstall latency benchmark...")
+    env = os.environ.copy()
+    env["ZT_BENCH_WAIT_SIGUSR1"] = "1"
+    target_proc = subprocess.Popen(
+        [str(TARGET), str(ITERATIONS)],
+        cwd=ROOT_DIR,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    latency_proc = subprocess.run(
+        [str(LATENCY_RUNNER), str(target_proc.pid), "bench_getpid", str(ZTRACE_LOG_OUT)],
+        cwd=ROOT_DIR,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+    target_proc.send_signal(signal.SIGTERM)
+    try:
+        target_proc.communicate(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        target_proc.kill()
+        target_proc.communicate()
+
+    write_text(LATENCY_OUT, latency_proc.stdout)
+    install_ns, uninstall_ns = extract_latency_ns(latency_proc.stdout)
+    print(f"install_ns={install_ns} uninstall_ns={uninstall_ns}")
+    return install_ns, uninstall_ns
+
+
+def format_report(baseline_ns: int,
+                  uprobe_ns: int,
+                  ztrace_ns: int,
+                  install_ns: int,
+                  uninstall_ns: int) -> str:
     baseline_per_call = baseline_ns / ITERATIONS
     uprobe_per_call = uprobe_ns / ITERATIONS
     ztrace_per_call = ztrace_ns / ITERATIONS
@@ -227,14 +276,19 @@ def format_report(baseline_ns: int, uprobe_ns: int, ztrace_ns: int) -> str:
         f"ztrace per call       : {ztrace_per_call:.2f} ns\n"
         f"ztrace overhead/call  : {ztrace_overhead:.2f} ns\n"
         f"ztrace vs uprobe      : {ztrace_vs_uprobe:.2f}x lower overhead\n\n"
+        "Probe lifecycle latency\n"
+        "-----------------------\n"
+        f"install latency       : {install_ns} ns ({install_ns / 1000000.0:.3f} ms)\n"
+        f"uninstall latency     : {uninstall_ns} ns ({uninstall_ns / 1000000.0:.3f} ms)\n\n"
         "Files\n"
         "-----\n"
         f"baseline output : {BASELINE_OUT}\n"
         f"uprobe output   : {UPROBE_OUT}\n"
         f"uprobe trace    : {UPROBE_TRACE_OUT}\n"
         f"ztrace output   : {ZTRACE_OUT}\n"
-        f"ztrace runner    : {ZTRACE_RUNNER_OUT}\n"
+        f"ztrace runner   : {ZTRACE_RUNNER_OUT}\n"
         f"ztrace trace log : {ZTRACE_LOG_OUT}\n"
+        f"latency output  : {LATENCY_OUT}\n"
     )
 
 
@@ -249,12 +303,17 @@ def main() -> int:
         print("run: make all", file=sys.stderr)
         return 1
 
+    if not LATENCY_RUNNER.exists():
+        print(f"latency runner not built: {LATENCY_RUNNER}", file=sys.stderr)
+        print("run: make all", file=sys.stderr)
+        return 1
+
     if shutil.which("bpftrace") is None:
         print("bpftrace is required for automated uprobe benchmark", file=sys.stderr)
         return 1
 
     RESULT_DIR.mkdir(parents=True, exist_ok=True)
-    for path in [BASELINE_OUT, UPROBE_OUT, UPROBE_TRACE_OUT, ZTRACE_OUT, ZTRACE_RUNNER_OUT, ZTRACE_LOG_OUT, REPORT_OUT]:
+    for path in [BASELINE_OUT, UPROBE_OUT, UPROBE_TRACE_OUT, ZTRACE_OUT, ZTRACE_RUNNER_OUT, ZTRACE_LOG_OUT, LATENCY_OUT, REPORT_OUT]:
         if path.exists():
             path.unlink()
 
@@ -263,8 +322,9 @@ def main() -> int:
     baseline_ns = run_baseline()
     uprobe_ns = run_uprobe()
     ztrace_ns = run_ztrace()
+    install_ns, uninstall_ns = run_latency()
 
-    report = format_report(baseline_ns, uprobe_ns, ztrace_ns)
+    report = format_report(baseline_ns, uprobe_ns, ztrace_ns, install_ns, uninstall_ns)
     write_text(REPORT_OUT, report)
     print()
     print(report, end="")
