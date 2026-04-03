@@ -15,3 +15,4 @@ int zt_trace_remove_probe(zt_injector_session_t *session, uint64_t probe_id);
 int zt_trace_pause(zt_injector_session_t *session);
 int zt_trace_resume(zt_injector_session_t *session);
 int zt_trace_is_active(void);
+int zt_trace_shutdown(void);

@@ -31,16 +31,23 @@ PAYLOAD_PIC_OBJ := $(BUILD_DIR)/zt_payload.pic.o $(BUILD_DIR)/zt_stub.pic.o
 
 TEST_BINS := $(patsubst $(TEST_DIR)/%.c, $(TEST_BIN_DIR)/%, $(TEST_C))
 STANDALONE_TEST_BINS := \
-	$(TEST_BIN_DIR)/test_loop
+	$(TEST_BIN_DIR)/test_loop \
+	$(TEST_BIN_DIR)/test_benchmark_target
+BENCHMARK_BINS := \
+	$(TEST_BIN_DIR)/test_benchmark_target \
+	$(TEST_BIN_DIR)/test_benchmark_runner
 CORE_TEST_BINS := $(filter-out $(STANDALONE_TEST_BINS), $(TEST_BINS))
-AUTO_TEST_BINS := $(CORE_TEST_BINS)
+AUTO_TEST_BINS := $(filter-out $(BENCHMARK_BINS), $(CORE_TEST_BINS))
 APP_TARGET := $(BIN_DIR)/ztrace
 
-.PHONY: all clean directories test run-tests
+.PHONY: all clean directories test run-tests benchmark
 
 all: directories $(APP_TARGET) $(PAYLOAD_SO) $(TEST_BINS)
 
 test: all run-tests
+
+benchmark: all $(BENCHMARK_BINS)
+	python3 scripts/benchmark.py
 
 run-tests:
 	@echo "\n=============================="
