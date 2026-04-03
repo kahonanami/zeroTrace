@@ -321,6 +321,94 @@ int zt_remote_mmap(pid_t pid,
     return 0;
 }
 
+int zt_remote_call2(pid_t pid,
+                    uint64_t func_addr,
+                    uint64_t arg1,
+                    uint64_t arg2,
+                    uint64_t *ret_out) {
+    struct user_regs_struct saved_regs;
+    struct user_regs_struct regs;
+    uint8_t saved_code[16];
+    uint8_t call_code[16];
+    int status;
+
+    if (func_addr == 0 || ret_out == NULL) {
+        return -1;
+    }
+
+    if (ptrace(PTRACE_GETREGS, pid, NULL, &saved_regs) != 0) {
+        return -1;
+    }
+
+    if (zt_read_remote_memory(pid, saved_regs.rip, saved_code, sizeof(saved_code)) != 0) {
+        return -1;
+    }
+
+    memcpy(call_code, saved_code, sizeof(call_code));
+    call_code[0] = 0x48; /* movabs rax, imm64 */
+    call_code[1] = 0xB8;
+    memcpy(call_code + 2, &func_addr, sizeof(func_addr));
+    call_code[10] = 0xFF; /* call rax */
+    call_code[11] = 0xD0;
+    call_code[12] = 0xCC; /* int3 */
+
+    if (zt_write_remote_memory(pid, saved_regs.rip, call_code, sizeof(call_code)) != 0) {
+        return -1;
+    }
+
+    regs = saved_regs;
+    regs.rdi = arg1;
+    regs.rsi = arg2;
+    if (ptrace(PTRACE_SETREGS, pid, NULL, &regs) != 0) {
+        zt_write_remote_memory(pid, saved_regs.rip, saved_code, sizeof(saved_code));
+        return -1;
+    }
+
+    if (ptrace(PTRACE_CONT, pid, NULL, NULL) != 0) {
+        ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs);
+        zt_write_remote_memory(pid, saved_regs.rip, saved_code, sizeof(saved_code));
+        return -1;
+    }
+
+    if (waitpid(pid, &status, 0) < 0) {
+        ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs);
+        zt_write_remote_memory(pid, saved_regs.rip, saved_code, sizeof(saved_code));
+        return -1;
+    }
+
+    if (!WIFSTOPPED(status) || WSTOPSIG(status) != SIGTRAP) {
+        ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs);
+        zt_write_remote_memory(pid, saved_regs.rip, saved_code, sizeof(saved_code));
+        return -1;
+    }
+
+    if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) != 0) {
+        ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs);
+        zt_write_remote_memory(pid, saved_regs.rip, saved_code, sizeof(saved_code));
+        return -1;
+    }
+
+    *ret_out = regs.rax;
+
+    if (zt_write_remote_memory(pid, saved_regs.rip, saved_code, sizeof(saved_code)) != 0) {
+        ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs);
+        return -1;
+    }
+
+    if (ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs) != 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+int zt_remote_call1(pid_t pid,
+                    uint64_t func_addr,
+                    uint64_t arg1,
+                    uint64_t *ret_out) {
+    return zt_remote_call2(pid, func_addr, arg1, 0, ret_out);
+}
+
 static int zt_insn_has_rip_relative(const cs_insn *insn) {
     cs_x86 *x86;
     uint8_t i;
@@ -711,6 +799,34 @@ int zt_install_probe_patch(zt_injector_session_t *session,
     }
 
     probe->thunk_addr = thunk_addr;
+    return 0;
+}
+
+int zt_uninstall_probe_patch(zt_injector_session_t *session, uint64_t probe_id) {
+    zt_probe_info_t *probe;
+
+    if (session == NULL) {
+        return -1;
+    }
+
+    probe = zt_probe_find_by_id(session, probe_id);
+    if (probe == NULL) {
+        return -1;
+    }
+
+    if (probe->orig_len == 0) {
+        return -1;
+    }
+
+    if (zt_write_remote_memory(session->pid,
+                               probe->symbol_addr,
+                               probe->orig_code,
+                               probe->orig_len) != 0) {
+        return -1;
+    }
+
+    probe->thunk_addr = 0;
+    probe->enabled = false;
     return 0;
 }
 

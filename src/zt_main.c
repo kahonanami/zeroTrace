@@ -1,9 +1,16 @@
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <stdbool.h>
 #include <getopt.h>
 #include <string.h>
+#include <limits.h>
+#include <signal.h>
+#include <dlfcn.h>
+#include <sys/ptrace.h>
+#include <sys/wait.h>
 #include <sys/mman.h>
 #include <capstone/capstone.h>
 
@@ -153,21 +160,75 @@ static void zt_test_remote_thunk_rw(pid_t pid,
     }
 }
 
-static void zt_dump_remote_patch_bytes(pid_t pid, uint64_t remote_addr) {
-    uint8_t patch[ZT_PROBE_PATCH_LEN];
+static void zt_dump_remote_patch_bytes(pid_t pid, uint64_t remote_addr, size_t size) {
+    uint8_t patch[ZT_PROBE_ORIG_CODE_MAX];
     int i;
 
-    if (zt_read_remote_memory(pid, remote_addr, patch, sizeof(patch)) != 0) {
+    if (size == 0 || size > sizeof(patch)) {
+        printf("invalid patch size: %zu\n", size);
+        return;
+    }
+
+    if (zt_read_remote_memory(pid, remote_addr, patch, size) != 0) {
         printf("failed to read installed patch at 0x%llx\n",
                (unsigned long long)remote_addr);
         return;
     }
 
     printf("Installed patch bytes: ");
-    for (i = 0; i < (int)sizeof(patch); ++i) {
+    for (i = 0; i < (int)size; ++i) {
         printf("%02x ", patch[i]);
     }
     printf("\n");
+}
+
+static void zt_dump_trace_events(const zt_trace_buffer_t *buffer, size_t max_events) {
+    uint64_t write_seq;
+    size_t start;
+    size_t end;
+    size_t i;
+
+    if (buffer == NULL) {
+        return;
+    }
+
+    if (buffer->magic != ZT_TRACE_BUFFER_MAGIC) {
+        printf("trace buffer magic mismatch\n");
+        return;
+    }
+
+    write_seq = buffer->write_seq;
+    printf("Trace buffer write_seq: %llu\n", (unsigned long long)write_seq);
+    if (write_seq == 0) {
+        printf("No trace events captured yet\n");
+        return;
+    }
+
+    start = 0;
+    if (write_seq > max_events) {
+        start = (size_t)(write_seq - max_events);
+    }
+    end = (size_t)write_seq;
+
+    printf("Trace events:\n");
+    for (i = start; i < end; ++i) {
+        const zt_trace_event_t *event = &buffer->events[i % ZT_TRACE_EVENT_CAPACITY];
+
+        if (event->committed_seq != i + 1) {
+            continue;
+        }
+
+        printf("  seq=%zu probe=%llu type=%s values=[0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx]\n",
+               i + 1,
+               (unsigned long long)event->probe_id,
+               event->event_type == ZT_TRACE_EVENT_ENTRY ? "entry" : "return",
+               (unsigned long long)event->value0,
+               (unsigned long long)event->value1,
+               (unsigned long long)event->value2,
+               (unsigned long long)event->value3,
+               (unsigned long long)event->value4,
+               (unsigned long long)event->value5);
+    }
 }
 
 int main(int argc, char *argv[]) {
@@ -219,8 +280,16 @@ int main(int argc, char *argv[]) {
     printf("ztrace get symbol: %s\n", symbol);
 
     zt_injector_session_t session;
+    char payload_so_path[PATH_MAX];
+    char dlopen_module_path[PATH_MAX];
+    uint64_t remote_dlopen_addr;
+    uint64_t remote_payload_path_addr;
     uint64_t remote_entry_stub_addr;
     uint64_t remote_thunk_addr;
+    uint64_t remote_trace_buffer_addr;
+    uint64_t remote_payload_init_addr;
+    uint64_t remote_payload_config_addr;
+    uint64_t remote_call_ret;
     if(zt_injector_attach(&session, (pid_t)pid) != 0) {
         fprintf(stderr, "Failed to attach to process with PID %ld\n", pid);
         exit(EXIT_FAILURE);
@@ -232,14 +301,37 @@ int main(int argc, char *argv[]) {
            session.is_pie,
            session.image_base);
 
+    if (realpath("bin/libzt_payload.so", payload_so_path) == NULL) {
+        printf("Failed to resolve payload so path\n");
+        zt_injector_detach(&session);
+        exit(EXIT_FAILURE);
+    }
+
+    {
+        Dl_info dl_info;
+
+        if (dladdr((void *)dlopen, &dl_info) == 0 || dl_info.dli_fname == NULL) {
+            printf("Failed to resolve local dlopen module path\n");
+            zt_injector_detach(&session);
+            exit(EXIT_FAILURE);
+        }
+
+        if (realpath(dl_info.dli_fname, dlopen_module_path) == NULL) {
+            strncpy(dlopen_module_path, dl_info.dli_fname, sizeof(dlopen_module_path) - 1);
+            dlopen_module_path[sizeof(dlopen_module_path) - 1] = '\0';
+        }
+    }
+
     if (zt_find_remote_symbol_addr(session.pid,
-                                   session.exe_path,
-                                   "entry_stub",
-                                   &remote_entry_stub_addr) == 0) {
-        printf("Remote entry_stub addr: 0x%llx\n",
-               (unsigned long long)remote_entry_stub_addr);
+                                   dlopen_module_path,
+                                   "dlopen",
+                                   &remote_dlopen_addr) == 0) {
+        printf("Remote dlopen addr: 0x%llx\n",
+               (unsigned long long)remote_dlopen_addr);
     } else {
-        printf("Failed to resolve remote entry_stub addr from %s\n", session.exe_path);
+        printf("Failed to resolve remote dlopen addr from %s\n", dlopen_module_path);
+        zt_injector_detach(&session);
+        exit(EXIT_FAILURE);
     }
 
     if (zt_remote_mmap(session.pid,
@@ -250,6 +342,117 @@ int main(int argc, char *argv[]) {
         printf("Remote mmap addr: 0x%llx\n", (unsigned long long)remote_thunk_addr);
     } else {
         printf("Failed to mmap remote thunk page\n");
+    }
+
+    if (zt_remote_mmap(session.pid,
+                       strlen(payload_so_path) + 1,
+                       PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS,
+                       &remote_payload_path_addr) == 0) {
+        printf("Remote payload path addr: 0x%llx\n",
+               (unsigned long long)remote_payload_path_addr);
+    } else {
+        printf("Failed to mmap remote payload path\n");
+        zt_injector_detach(&session);
+        exit(EXIT_FAILURE);
+    }
+
+    if (zt_write_remote_memory(session.pid,
+                               remote_payload_path_addr,
+                               payload_so_path,
+                               strlen(payload_so_path) + 1) != 0) {
+        printf("Failed to write remote payload path\n");
+        zt_injector_detach(&session);
+        exit(EXIT_FAILURE);
+    }
+
+    if (zt_remote_call2(session.pid,
+                        remote_dlopen_addr,
+                        remote_payload_path_addr,
+                        RTLD_NOW | RTLD_GLOBAL,
+                        &remote_call_ret) == 0 && remote_call_ret != 0) {
+        printf("Remote dlopen handle: 0x%llx\n",
+               (unsigned long long)remote_call_ret);
+    } else {
+        printf("Failed to call remote dlopen for %s\n", payload_so_path);
+        zt_injector_detach(&session);
+        exit(EXIT_FAILURE);
+    }
+
+    if (zt_find_remote_symbol_addr(session.pid,
+                                   payload_so_path,
+                                   "entry_stub",
+                                   &remote_entry_stub_addr) == 0) {
+        printf("Remote entry_stub addr: 0x%llx\n",
+               (unsigned long long)remote_entry_stub_addr);
+    } else {
+        printf("Failed to resolve remote entry_stub addr from %s\n", payload_so_path);
+        zt_injector_detach(&session);
+        exit(EXIT_FAILURE);
+    }
+
+    if (zt_find_remote_symbol_addr(session.pid,
+                                   payload_so_path,
+                                   "zt_payload_init",
+                                   &remote_payload_init_addr) == 0) {
+        printf("Remote zt_payload_init addr: 0x%llx\n",
+               (unsigned long long)remote_payload_init_addr);
+    } else {
+        printf("Failed to resolve remote zt_payload_init addr from %s\n", payload_so_path);
+        zt_injector_detach(&session);
+        exit(EXIT_FAILURE);
+    }
+
+    if (zt_remote_mmap(session.pid,
+                       sizeof(zt_trace_buffer_t),
+                       PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS,
+                       &remote_trace_buffer_addr) == 0) {
+        printf("Remote trace buffer addr: 0x%llx\n",
+               (unsigned long long)remote_trace_buffer_addr);
+    } else {
+        printf("Failed to mmap remote trace buffer\n");
+        zt_injector_detach(&session);
+        exit(EXIT_FAILURE);
+    }
+
+    if (zt_remote_mmap(session.pid,
+                       sizeof(zt_payload_config_t),
+                       PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS,
+                       &remote_payload_config_addr) == 0) {
+        zt_payload_config_t config = {
+            .shared_buffer_addr = remote_trace_buffer_addr,
+            .shared_buffer_size = sizeof(zt_trace_buffer_t),
+        };
+
+        printf("Remote payload config addr: 0x%llx\n",
+               (unsigned long long)remote_payload_config_addr);
+
+        if (zt_write_remote_memory(session.pid,
+                                   remote_payload_config_addr,
+                                   &config,
+                                   sizeof(config)) != 0) {
+            printf("Failed to write remote payload config\n");
+            zt_injector_detach(&session);
+            exit(EXIT_FAILURE);
+        }
+    } else {
+        printf("Failed to mmap remote payload config\n");
+        zt_injector_detach(&session);
+        exit(EXIT_FAILURE);
+    }
+
+    if (zt_remote_call1(session.pid,
+                        remote_payload_init_addr,
+                        remote_payload_config_addr,
+                        &remote_call_ret) == 0) {
+        printf("Remote zt_payload_init returned: %llu\n",
+               (unsigned long long)remote_call_ret);
+    } else {
+        printf("Failed to call remote zt_payload_init\n");
+        zt_injector_detach(&session);
+        exit(EXIT_FAILURE);
     }
 
     zt_probe_info_t *probe = zt_register_probe(&session, symbol);
@@ -294,10 +497,44 @@ int main(int argc, char *argv[]) {
             printf("\n");
             zt_test_remote_thunk_rw(session.pid, remote_thunk_addr, thunk_buf, thunk_size);
             if (zt_install_probe_patch(&session, probe->probe_id, remote_thunk_addr) == 0) {
+                zt_trace_buffer_t trace_buffer;
+                int status;
+
                 printf("probe patch installed at 0x%llx -> thunk 0x%llx\n",
                        (unsigned long long)probe->symbol_addr,
                        (unsigned long long)remote_thunk_addr);
-                zt_dump_remote_patch_bytes(session.pid, probe->symbol_addr);
+                zt_dump_remote_patch_bytes(session.pid,
+                                           probe->symbol_addr,
+                                           ZT_PROBE_PATCH_LEN);
+
+                if (ptrace(PTRACE_CONT, session.pid, NULL, NULL) == 0) {
+                    sleep(2);
+                    kill(session.pid, SIGSTOP);
+                    if (waitpid(session.pid, &status, 0) > 0 && WIFSTOPPED(status)) {
+                        if (zt_read_remote_memory(session.pid,
+                                                  remote_trace_buffer_addr,
+                                                  &trace_buffer,
+                                                  sizeof(trace_buffer)) == 0) {
+                            zt_dump_trace_events(&trace_buffer, 8);
+                        } else {
+                            printf("Failed to read remote trace buffer\n");
+                        }
+                    } else {
+                        printf("Failed to stop target process for trace readback\n");
+                    }
+                } else {
+                    printf("Failed to continue target process for trace capture\n");
+                }
+
+                if (zt_uninstall_probe_patch(&session, probe->probe_id) == 0) {
+                    printf("probe patch restored at 0x%llx\n",
+                           (unsigned long long)probe->symbol_addr);
+                    zt_dump_remote_patch_bytes(session.pid,
+                                               probe->symbol_addr,
+                                               probe->orig_len);
+                } else {
+                    printf("failed to restore probe patch for probe %lu\n", probe->probe_id);
+                }
             } else {
                 printf("failed to install probe patch for probe %lu\n", probe->probe_id);
             }

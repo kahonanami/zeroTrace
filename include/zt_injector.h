@@ -45,6 +45,15 @@ int zt_remote_mmap(pid_t pid,
                    int prot,
                    int flags,
                    uint64_t *remote_addr_out);
+int zt_remote_call1(pid_t pid,
+                    uint64_t func_addr,
+                    uint64_t arg1,
+                    uint64_t *ret_out);
+int zt_remote_call2(pid_t pid,
+                    uint64_t func_addr,
+                    uint64_t arg1,
+                    uint64_t arg2,
+                    uint64_t *ret_out);
 zt_probe_info_t *zt_probe_find_by_symbol(zt_injector_session_t *session, const char *symbol_name);
 zt_probe_info_t *zt_probe_find_by_id(zt_injector_session_t *session, uint64_t probe_id);
 zt_probe_info_t *zt_probe_alloc(zt_injector_session_t *session, const char *symbol_name, uint64_t symbol_addr);
@@ -54,3 +63,4 @@ int zt_enable_probe(zt_injector_session_t *session, uint64_t probe_id);
 int zt_install_probe_patch(zt_injector_session_t *session,
                            uint64_t probe_id,
                            uint64_t thunk_addr);
+int zt_uninstall_probe_patch(zt_injector_session_t *session, uint64_t probe_id);
