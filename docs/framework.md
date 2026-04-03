@@ -84,6 +84,16 @@ jmp qword ptr [rip + disp32]
 - `continue_addr` 指向 `原函数地址 + orig_len`
 - 由于相对寻址范围的问题，在 thunk 末尾存放两个符号的绝对地址，通过 `call/jmp` 间接跳转到目标地址
 
+当前 thunk builder 会在复制函数前导指令时做最小重定位和改写，而不是只做裸 `memcpy`：
+
+- 普通指令：直接复制
+- `RIP` 相对内存访问：重新计算并回填新的 `disp32`
+- `call rel32`：改写成绝对调用
+- `jmp rel8/rel32`：改写成绝对跳转
+- `jcc rel8/rel32`：展开成“条件反转 + 绝对跳转”模板
+
+这样可以支持一部分 glibc 入口常见的 `RIP` 相对寻址指令，例如 `read`、`write` 这类函数的入口逻辑。
+
 ### 1.5 `zt_payload`
 
 `zt_payload` 会被编译成 `libzt_payload.so` 并注入目标进程。
@@ -118,6 +128,26 @@ jmp qword ptr [rip + disp32]
 - 一份 payload config
 
 多个 probe 共享这套运行时，只是各自拥有不同的 thunk 和 patch。
+
+### 1.8 `zt_sigconf`
+
+`zt_sigconf` 是运行时函数签名解释模块，会加载：
+
+- `conf/zttrace.conf`
+
+这个配置文件由 `ltrace.conf` 思路适配而来，但只实现了 `zeroTrace` 当前需要的简化子集。它的作用是帮助 trace 日志把原始寄存器值格式化成更接近函数签名的展示结果。
+
+当前支持的典型显示类型包括：
+
+- `int`
+- `long`
+- `unsigned long`
+- `size_t`
+- `ssize_t`
+- `char *` / `const char *`
+- 普通指针
+
+trace 输出时会优先按签名格式化；如果没有找到函数签名，或者类型暂时不支持，则回退到原始寄存器打印。
 
 ---
 
@@ -160,7 +190,7 @@ trace <symbol>
 9. 用 Capstone 累计完整指令长度，得到 `orig_len`
 10. 保存原始字节到 probe
 11. 为该 probe 远程 `mmap` 一页 thunk 空间
-12. 构造 thunk
+12. 基于真实 `thunk_addr` 构造 thunk，并在需要时对前导指令做重定位 / 改写
 13. 写入 thunk 到目标进程
 14. 把目标函数入口 patch 到 thunk
 15. `PTRACE_CONT` 恢复目标进程运行
@@ -188,6 +218,13 @@ zt_trace_poll()
 ```text
 [entry ] add_loop(rdi=0x1, rsi=0x2, ...)
 [return] add_loop -> 0x3
+```
+
+如果函数签名能在 `conf/zttrace.conf` 中找到，则会优先输出更接近 `ltrace` 风格的结果，例如：
+
+```text
+[entry ] puts("hello")
+[return] strlen -> 21
 ```
 
 ### 2.4 disable / enable
@@ -224,12 +261,20 @@ zt_trace_poll()
 probe 表定义在 `zt_injector_session_t` 中，每个 probe 包含：
 
 - `probe_id`
-- `symbol`
-- `symbol_addr`
+- `target.symbol`
+- `target.module_path`
+- `target.remote_addr`
 - `thunk_addr`
 - `orig_code`
 - `orig_len`
-- `enabled`
+- `state`
+
+其中 `state` 当前显式区分为：
+
+- `resolved`
+- `prepared`
+- `installed`
+- `disabled`
 
 ### 3.2 trace buffer
 
@@ -256,7 +301,7 @@ payload 和 tracer 之间通过共享内存中的 ring buffer 传递事件。
 - 远程 payload 相关地址
 - 日志文件句柄
 - `last_seq`
-- `target_running`
+- 运行态（`inactive / stopped / running`）
 
 ---
 

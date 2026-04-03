@@ -13,6 +13,7 @@
 
 #include "../include/zt_injector.h"
 #include "../include/zt_payload.h"
+#include "../include/zt_sigconf.h"
 #include "../include/zt_thunk_manager.h"
 #include "../include/zt_trace_runner.h"
 
@@ -41,6 +42,13 @@ typedef struct {
 } zt_active_trace_t;
 
 static zt_active_trace_t g_active_trace;
+
+typedef struct {
+    uint64_t call_id;
+    zt_trace_event_t event;
+} zt_entry_cache_slot_t;
+
+static zt_entry_cache_slot_t g_entry_cache[ZT_TRACE_EVENT_CAPACITY];
 
 static int zt_trace_install_probe(zt_injector_session_t *session,
                                   zt_runtime_state_t *runtime,
@@ -91,6 +99,7 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
 
     if (zt_build_thunk(probe,
                        runtime->remote_entry_stub_addr,
+                       remote_thunk_addr,
                        thunk_buf,
                        sizeof(thunk_buf),
                        &thunk_size) != 0) {
@@ -172,8 +181,10 @@ static void zt_dump_trace_events_since(zt_injector_session_t *session,
 
     for (seq = start_seq; seq <= write_seq; ++seq) {
         const zt_trace_event_t *event = &buffer->events[(seq - 1) % ZT_TRACE_EVENT_CAPACITY];
+        const zt_trace_event_t *matched_entry = NULL;
         const zt_probe_info_t *probe;
         const char *symbol_name;
+        char formatted[512];
 
         if (event->committed_seq != seq) {
             continue;
@@ -181,6 +192,24 @@ static void zt_dump_trace_events_since(zt_injector_session_t *session,
 
         probe = zt_probe_find_by_id(session, event->probe_id);
         symbol_name = probe != NULL ? probe->target.symbol : "<unknown>";
+
+        if (event->event_type == ZT_TRACE_EVENT_ENTRY && event->call_id != 0) {
+            zt_entry_cache_slot_t *slot = &g_entry_cache[event->call_id % ZT_TRACE_EVENT_CAPACITY];
+            slot->call_id = event->call_id;
+            slot->event = *event;
+        } else if (event->event_type == ZT_TRACE_EVENT_RETURN && event->call_id != 0) {
+            zt_entry_cache_slot_t *slot = &g_entry_cache[event->call_id % ZT_TRACE_EVENT_CAPACITY];
+            if (slot->call_id == event->call_id) {
+                matched_entry = &slot->event;
+                slot->call_id = 0;
+            }
+        }
+
+        if (probe != NULL &&
+            zt_format_trace_event_with_sig(session, probe, matched_entry, event, formatted, sizeof(formatted)) == 0) {
+            fputs(formatted, out);
+            continue;
+        }
 
         if (event->event_type == ZT_TRACE_EVENT_ENTRY) {
             fprintf(out,
@@ -561,6 +590,7 @@ static int zt_trace_stop(void) {
     }
 
     memset(&g_active_trace, 0, sizeof(g_active_trace));
+    memset(g_entry_cache, 0, sizeof(g_entry_cache));
     return ret;
 }
 
@@ -607,7 +637,10 @@ int zt_trace_start_in_session(zt_injector_session_t *session,
         return -1;
     }
 
+    zt_sigconf_load_default();
+
     memset(&g_active_trace, 0, sizeof(g_active_trace));
+    memset(g_entry_cache, 0, sizeof(g_entry_cache));
     printf("Tracing target PID %d, %s, is_pie: %d, image_base: 0x%lX\n",
            session->pid,
            session->exe_path,

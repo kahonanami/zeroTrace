@@ -836,9 +836,11 @@ int zt_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
         return -1;
     }
 
-    if (has_rip_relative || patch_len > ZT_PROBE_ORIG_CODE_MAX) {
+    if (patch_len > ZT_PROBE_ORIG_CODE_MAX) {
         return -1;
     }
+
+    (void)has_rip_relative;
 
     memcpy(probe->orig_code, code, patch_len);
     probe->orig_len = (uint8_t)patch_len;

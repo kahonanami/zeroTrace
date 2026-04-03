@@ -36,6 +36,7 @@ typedef struct {
     uint64_t committed_seq;
     uint64_t probe_id;
     uint64_t event_type;
+    uint64_t call_id;
     uint64_t value0;
     uint64_t value1;
     uint64_t value2;
@@ -61,4 +62,5 @@ void zt_handle_entry(ctx_t *context);
 void zt_handle_return(ctx_t *context);
 uint64_t save_probe_frame_c(uint64_t ret_addr, uint64_t func_id);
 uint64_t peek_probe_id_c(void);
+uint64_t peek_call_id_c(void);
 uint64_t get_ret_addr_c(void);
