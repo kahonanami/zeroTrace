@@ -78,10 +78,6 @@ void *zt_payload_get_entry_stub_addr(void) {
     return (void *)entry_stub;
 }
 
-void *zt_payload_get_exit_stub_addr(void) {
-    return (void *)exit_stub;
-}
-
 void zt_handle_entry(ctx_t *context) {
     zt_trace_event_t event;
 

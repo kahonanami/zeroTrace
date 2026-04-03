@@ -5,25 +5,27 @@
 
 int main(void) {
     zt_injector_session_t session = {0};
+    zt_symbol_target_t target1 = {.symbol = "foo", .module_path = "/tmp/a.so", .remote_addr = 0x1234};
+    zt_symbol_target_t target2 = {.symbol = "bar", .module_path = "/tmp/b.so", .remote_addr = 0x5678};
     zt_probe_info_t *probe1;
     zt_probe_info_t *probe1_dup;
     zt_probe_info_t *probe2;
 
     session.next_probe_id = 1;
 
-    probe1 = zt_probe_alloc(&session, "foo", 0x1234);
+    probe1 = zt_probe_alloc(&session, &target1);
     if (probe1 == NULL || probe1->probe_id != 1 || session.probe_count != 1) {
         fprintf(stderr, "failed to allocate first probe\n");
         return 1;
     }
 
-    probe1_dup = zt_probe_alloc(&session, "foo", 0x1234);
+    probe1_dup = zt_probe_alloc(&session, &target1);
     if (probe1_dup != probe1 || session.probe_count != 1) {
         fprintf(stderr, "duplicate probe allocation changed state\n");
         return 1;
     }
 
-    probe2 = zt_probe_alloc(&session, "bar", 0x5678);
+    probe2 = zt_probe_alloc(&session, &target2);
     if (probe2 == NULL || probe2->probe_id != 2 || session.probe_count != 2) {
         fprintf(stderr, "failed to allocate second probe\n");
         return 1;

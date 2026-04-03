@@ -15,7 +15,7 @@ int main(void) {
     size_t continue_slot_offset;
 
     probe.probe_id = 7;
-    probe.symbol_addr = 0x401000;
+    probe.target.remote_addr = 0x401000;
     probe.orig_len = 5;
     probe.orig_code[0] = 0x55;
     probe.orig_code[1] = 0x48;
@@ -44,7 +44,7 @@ int main(void) {
     memcpy(&entry_stub_addr, thunk + entry_slot_offset, sizeof(entry_stub_addr));
     memcpy(&continue_addr, thunk + continue_slot_offset, sizeof(continue_addr));
 
-    if (entry_stub_addr != 0x500000 || continue_addr != probe.symbol_addr + probe.orig_len) {
+    if (entry_stub_addr != 0x500000 || continue_addr != probe.target.remote_addr + probe.orig_len) {
         fprintf(stderr,
                 "wrong thunk tail addresses: entry=0x%llx continue=0x%llx\n",
                 (unsigned long long)entry_stub_addr,

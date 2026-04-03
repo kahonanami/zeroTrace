@@ -37,7 +37,7 @@ int zt_build_thunk(const zt_probe_info_t *probe,
         return -1;
     }
 
-    continue_addr = probe->symbol_addr + probe->orig_len;
+    continue_addr = probe->target.remote_addr + probe->orig_len;
     offset = 0;
 
     needed_size =

@@ -523,10 +523,11 @@ static int cmd_info(char *args) {
                 continue;
             }
 
-            printf("id=%lu symbol=%s addr=0x%lx enabled=%d orig_len=%u\n",
+            printf("id=%lu symbol=%s module=%s addr=0x%lx enabled=%d orig_len=%u\n",
                    probe->probe_id,
-                   probe->symbol,
-                   probe->symbol_addr,
+                   probe->target.symbol,
+                   probe->target.module_path,
+                   probe->target.remote_addr,
                    probe->enabled,
                    probe->orig_len);
         }

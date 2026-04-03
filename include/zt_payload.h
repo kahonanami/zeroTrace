@@ -57,7 +57,6 @@ typedef struct {
 
 int zt_payload_init(const zt_payload_config_t *config);
 void *zt_payload_get_entry_stub_addr(void);
-void *zt_payload_get_exit_stub_addr(void);
 void zt_handle_entry(ctx_t *context);
 void zt_handle_return(ctx_t *context);
 uint64_t save_probe_frame_c(uint64_t ret_addr, uint64_t func_id);

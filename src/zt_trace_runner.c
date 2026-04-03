@@ -5,7 +5,6 @@
 #include <string.h>
 #include <limits.h>
 #include <unistd.h>
-#include <signal.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <sys/mman.h>
@@ -36,7 +35,6 @@ typedef struct {
     int active;
 } zt_active_trace_t;
 
-static volatile sig_atomic_t g_stop_requested;
 static zt_active_trace_t g_active_trace;
 
 static int zt_trace_install_probe(zt_injector_session_t *session,
@@ -63,8 +61,8 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
 
     printf("Registered probe: id=%lu, symbol=%s, addr=0x%lX\n",
            probe->probe_id,
-           probe->symbol,
-           probe->symbol_addr);
+           probe->target.symbol,
+           probe->target.remote_addr);
 
     if (zt_enable_probe(session, probe->probe_id) != 0) {
         printf("zt_enable_probe failed for probe %lu\n", probe->probe_id);
@@ -110,7 +108,7 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
     }
 
     printf("probe patch installed at 0x%llx -> thunk 0x%llx\n",
-           (unsigned long long)probe->symbol_addr,
+           (unsigned long long)probe->target.remote_addr,
            (unsigned long long)remote_thunk_addr);
 
     if (probe_out != NULL) {
@@ -118,11 +116,6 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
     }
 
     return 0;
-}
-
-static void zt_handle_stop_signal(int signo) {
-    (void)signo;
-    g_stop_requested = 1;
 }
 
 static int zt_wait_for_tracee_stop(pid_t pid) {
@@ -182,7 +175,7 @@ static void zt_dump_trace_events_since(zt_injector_session_t *session,
         }
 
         probe = zt_probe_find_by_id(session, event->probe_id);
-        symbol_name = probe != NULL ? probe->symbol : "<unknown>";
+        symbol_name = probe != NULL ? probe->target.symbol : "<unknown>";
 
         if (event->event_type == ZT_TRACE_EVENT_ENTRY) {
             fprintf(out,
@@ -452,7 +445,7 @@ int zt_trace_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
     }
     g_active_trace.target_running = 0;
 
-    if (zt_trace_install_probe(session, &g_active_trace.runtime, probe->symbol, NULL) != 0) {
+    if (zt_trace_install_probe(session, &g_active_trace.runtime, probe->target.symbol, NULL) != 0) {
         return -1;
     }
 
@@ -498,7 +491,7 @@ int zt_trace_resume(zt_injector_session_t *session) {
     return 0;
 }
 
-int zt_trace_stop(void) {
+static int zt_trace_stop(void) {
     int ret;
     int i;
 
@@ -606,40 +599,6 @@ int zt_trace_start_in_session(zt_injector_session_t *session,
     return 0;
 }
 
-int zt_trace_symbol_in_session(zt_injector_session_t *session, const char *symbol) {
-    zt_probe_info_t *probe;
-    uint64_t probe_addr;
-
-    if (session == NULL || symbol == NULL) {
-        return -1;
-    }
-
-    if (zt_trace_start_in_session(session, symbol, "/dev/null") != 0) {
-        return -1;
-    }
-
-    probe = zt_probe_find_by_symbol(session, symbol);
-    probe_addr = probe != NULL ? probe->symbol_addr : 0;
-    printf("Tracing... press Ctrl+C to stop.\n");
-    g_stop_requested = 0;
-    signal(SIGINT, zt_handle_stop_signal);
-    while (!g_stop_requested) {
-        sleep(1);
-        if (zt_trace_poll() != 0) {
-            break;
-        }
-    }
-    signal(SIGINT, SIG_DFL);
-
-    if (g_active_trace.active && zt_trace_stop() != 0) {
-        return -1;
-    }
-
-    printf("probe patch restored at 0x%llx\n",
-           (unsigned long long)probe_addr);
-    return 0;
-}
-
 int zt_trace_remove_probe(zt_injector_session_t *session, uint64_t probe_id) {
     zt_probe_info_t *probe;
 
@@ -687,22 +646,4 @@ int zt_trace_remove_probe(zt_injector_session_t *session, uint64_t probe_id) {
     }
     g_active_trace.target_running = 1;
     return 0;
-}
-
-int zt_trace_symbol_once(pid_t pid, const char *symbol) {
-    zt_injector_session_t session;
-    int ret;
-
-    if (symbol == NULL) {
-        return -1;
-    }
-
-    if (zt_injector_attach(&session, pid) != 0) {
-        fprintf(stderr, "Failed to attach to process with PID %d\n", pid);
-        return -1;
-    }
-
-    ret = zt_trace_symbol_in_session(&session, symbol);
-    zt_injector_detach(&session);
-    return ret;
 }
