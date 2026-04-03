@@ -29,6 +29,7 @@ typedef struct{
     uint64_t probe_id;
     zt_symbol_target_t target;
     uint64_t thunk_addr;
+    int thunk_slot;
     uint8_t orig_code[ZT_PROBE_ORIG_CODE_MAX];
     uint8_t orig_len;
     zt_probe_state_t state;
@@ -61,6 +62,9 @@ int zt_remote_mmap(pid_t pid,
                    int prot,
                    int flags,
                    uint64_t *remote_addr_out);
+int zt_remote_munmap(pid_t pid,
+                     uint64_t remote_addr,
+                     size_t size);
 int zt_remote_call1(pid_t pid,
                     uint64_t func_addr,
                     uint64_t arg1,
