@@ -42,7 +42,7 @@ static struct {
     {"trace", "Register and enable a probe: trace <symbol>", cmd_trace},
     {"stop", "Stop the target process and keep probes unchanged", cmd_stop},
     {"enable", "Enable a probe again: enable <symbol|id>", cmd_enable},
-    {"disable", "Disable a probe: disable <symbol|id>", cmd_disable},
+    {"disable", "Disable probe(s): disable <symbol|id|all>", cmd_disable},
     {"untrace", "Remove a probe: untrace <symbol|id>", cmd_untrace},
     {"info", "Show info: info target | info probes", cmd_info},
     {"continue", "Continue the stopped target process", cmd_continue},
@@ -409,6 +409,9 @@ static int cmd_disable(char *args) {
     char *target;
     zt_probe_info_t *probe;
     uint64_t probe_id;
+    int i;
+    int disabled_count;
+    int failed_count;
 
     if (!g_cli_attached) {
         printf("No target attached\n");
@@ -422,7 +425,40 @@ static int cmd_disable(char *args) {
 
     target = zt_next_arg(args);
     if (target == NULL) {
-        printf("Usage: disable <symbol|id>\n");
+        printf("Usage: disable <symbol|id|all>\n");
+        return 0;
+    }
+
+    if (strcmp(target, "all") == 0) {
+        disabled_count = 0;
+        failed_count = 0;
+
+        for (i = 0; i < ZT_PROBES_CAPACITY; ++i) {
+            probe = &g_cli_session.probes[i];
+
+            if (probe->probe_id == 0 || probe->state != ZT_PROBE_INSTALLED) {
+                continue;
+            }
+
+            if (zt_trace_disable_probe(&g_cli_session, probe->probe_id) != 0) {
+                ++failed_count;
+                printf("Failed to disable probe %s\n", probe->target.symbol);
+                continue;
+            }
+
+            ++disabled_count;
+        }
+
+        if (disabled_count == 0 && failed_count == 0) {
+            printf("No installed probes to disable\n");
+            return 0;
+        }
+
+        printf("Disabled %d probe(s)", disabled_count);
+        if (failed_count > 0) {
+            printf(", %d failed", failed_count);
+        }
+        printf("\n");
         return 0;
     }
 

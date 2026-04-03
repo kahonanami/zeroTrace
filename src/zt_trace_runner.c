@@ -13,6 +13,7 @@
 
 #include "../include/zt_injector.h"
 #include "../include/zt_payload.h"
+#include "../include/zt_sigconf.h"
 #include "../include/zt_thunk_manager.h"
 #include "../include/zt_trace_runner.h"
 
@@ -24,6 +25,7 @@ typedef struct {
     uint64_t remote_payload_init_addr;
     uint64_t remote_trace_buffer_addr;
     uint64_t remote_payload_config_addr;
+    zt_thunk_pool_t thunk_pool;
 } zt_runtime_state_t;
 
 typedef enum {
@@ -41,6 +43,13 @@ typedef struct {
 } zt_active_trace_t;
 
 static zt_active_trace_t g_active_trace;
+
+typedef struct {
+    uint64_t call_id;
+    zt_trace_event_t event;
+} zt_entry_cache_slot_t;
+
+static zt_entry_cache_slot_t g_entry_cache[ZT_TRACE_EVENT_CAPACITY];
 
 static int zt_trace_install_probe(zt_injector_session_t *session,
                                   zt_runtime_state_t *runtime,
@@ -78,23 +87,24 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
            probe->probe_id,
            probe->orig_len);
 
-    if (zt_remote_mmap(session->pid,
-                       4096,
-                       PROT_READ | PROT_WRITE | PROT_EXEC,
-                       MAP_PRIVATE | MAP_ANONYMOUS,
-                       &remote_thunk_addr) != 0) {
-        printf("Failed to mmap remote thunk page\n");
+    if (zt_thunk_pool_alloc(session, &runtime->thunk_pool, probe, &remote_thunk_addr) != 0) {
+        printf("Failed to allocate remote thunk slot\n");
         return -1;
     }
-    printf("Remote mmap addr: 0x%llx\n",
+    printf("Remote thunk slot %d addr: 0x%llx\n",
+           probe->thunk_slot,
            (unsigned long long)remote_thunk_addr);
 
     if (zt_build_thunk(probe,
                        runtime->remote_entry_stub_addr,
+                       remote_thunk_addr,
                        thunk_buf,
                        sizeof(thunk_buf),
                        &thunk_size) != 0) {
         printf("zt_build_thunk failed for probe %lu\n", probe->probe_id);
+        if (probe->state != ZT_PROBE_INSTALLED) {
+            zt_thunk_pool_release(session, &runtime->thunk_pool, probe);
+        }
         return -1;
     }
 
@@ -104,11 +114,17 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
                                thunk_size) != 0) {
         printf("failed to write thunk to 0x%llx\n",
                (unsigned long long)remote_thunk_addr);
+        if (probe->state != ZT_PROBE_INSTALLED) {
+            zt_thunk_pool_release(session, &runtime->thunk_pool, probe);
+        }
         return -1;
     }
 
     if (zt_install_probe_patch(session, probe->probe_id, remote_thunk_addr) != 0) {
         printf("failed to install probe patch for probe %lu\n", probe->probe_id);
+        if (probe->state != ZT_PROBE_INSTALLED) {
+            zt_thunk_pool_release(session, &runtime->thunk_pool, probe);
+        }
         return -1;
     }
 
@@ -172,8 +188,10 @@ static void zt_dump_trace_events_since(zt_injector_session_t *session,
 
     for (seq = start_seq; seq <= write_seq; ++seq) {
         const zt_trace_event_t *event = &buffer->events[(seq - 1) % ZT_TRACE_EVENT_CAPACITY];
+        const zt_trace_event_t *matched_entry = NULL;
         const zt_probe_info_t *probe;
         const char *symbol_name;
+        char formatted[512];
 
         if (event->committed_seq != seq) {
             continue;
@@ -181,6 +199,24 @@ static void zt_dump_trace_events_since(zt_injector_session_t *session,
 
         probe = zt_probe_find_by_id(session, event->probe_id);
         symbol_name = probe != NULL ? probe->target.symbol : "<unknown>";
+
+        if (event->event_type == ZT_TRACE_EVENT_ENTRY && event->call_id != 0) {
+            zt_entry_cache_slot_t *slot = &g_entry_cache[event->call_id % ZT_TRACE_EVENT_CAPACITY];
+            slot->call_id = event->call_id;
+            slot->event = *event;
+        } else if (event->event_type == ZT_TRACE_EVENT_RETURN && event->call_id != 0) {
+            zt_entry_cache_slot_t *slot = &g_entry_cache[event->call_id % ZT_TRACE_EVENT_CAPACITY];
+            if (slot->call_id == event->call_id) {
+                matched_entry = &slot->event;
+                slot->call_id = 0;
+            }
+        }
+
+        if (probe != NULL &&
+            zt_format_trace_event_with_sig(session, probe, matched_entry, event, formatted, sizeof(formatted)) == 0) {
+            fputs(formatted, out);
+            continue;
+        }
 
         if (event->event_type == ZT_TRACE_EVENT_ENTRY) {
             fprintf(out,
@@ -553,6 +589,7 @@ static int zt_trace_stop(void) {
             ret = -1;
         }
 
+        zt_thunk_pool_release(g_active_trace.session, &g_active_trace.runtime.thunk_pool, probe);
         zt_unregister_probe(g_active_trace.session, probe->probe_id);
     }
 
@@ -561,6 +598,7 @@ static int zt_trace_stop(void) {
     }
 
     memset(&g_active_trace, 0, sizeof(g_active_trace));
+    memset(g_entry_cache, 0, sizeof(g_entry_cache));
     return ret;
 }
 
@@ -607,7 +645,10 @@ int zt_trace_start_in_session(zt_injector_session_t *session,
         return -1;
     }
 
+    zt_sigconf_load_default();
+
     memset(&g_active_trace, 0, sizeof(g_active_trace));
+    memset(g_entry_cache, 0, sizeof(g_entry_cache));
     printf("Tracing target PID %d, %s, is_pie: %d, image_base: 0x%lX\n",
            session->pid,
            session->exe_path,
@@ -664,6 +705,8 @@ int zt_trace_remove_probe(zt_injector_session_t *session, uint64_t probe_id) {
         zt_uninstall_probe_patch(session, probe_id) != 0) {
         return -1;
     }
+
+    zt_thunk_pool_release(session, &g_active_trace.runtime.thunk_pool, probe);
 
     if (zt_unregister_probe(session, probe_id) != 0) {
         return -1;

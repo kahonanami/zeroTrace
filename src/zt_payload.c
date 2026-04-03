@@ -6,12 +6,15 @@
 typedef struct {
     uint64_t ret_addr;
     uint64_t probe_id;
+    uint64_t call_id;
 } zt_saved_probe_frame_t;
 
 static __thread zt_saved_probe_frame_t saved_frames[MAX_SAVED_RET_ADDR];
 static __thread int call_stack_idx;
+static __thread uint64_t last_call_id;
 
 static zt_payload_config_t g_payload_config;
+static uint64_t g_call_id_seq;
 
 static zt_trace_buffer_t *zt_get_trace_buffer(void) {
     if (g_payload_config.shared_buffer_addr == 0 ||
@@ -46,6 +49,7 @@ static void zt_publish_event(const zt_trace_event_t *event) {
     slot->committed_seq = 0;
     slot->probe_id = event->probe_id;
     slot->event_type = event->event_type;
+    slot->call_id = event->call_id;
     slot->value0 = event->value0;
     slot->value1 = event->value1;
     slot->value2 = event->value2;
@@ -71,6 +75,8 @@ int zt_payload_init(const zt_payload_config_t *config) {
         buffer->write_seq = 0;
     }
 
+    __atomic_store_n(&g_call_id_seq, 0, __ATOMIC_RELAXED);
+
     return 0;
 }
 
@@ -80,15 +86,20 @@ void *zt_payload_get_entry_stub_addr(void) {
 
 void zt_handle_entry(ctx_t *context) {
     zt_trace_event_t event;
+    uint64_t call_id;
 
     if (context == NULL) {
         return;
     }
 
+    call_id = __atomic_fetch_add(&g_call_id_seq, 1, __ATOMIC_RELAXED) + 1;
+    last_call_id = call_id;
+
     event = (zt_trace_event_t){
         .committed_seq = 0,
         .probe_id = context->func_id,
         .event_type = ZT_TRACE_EVENT_ENTRY,
+        .call_id = call_id,
         .value0 = context->rdi,
         .value1 = context->rsi,
         .value2 = context->rdx,
@@ -111,6 +122,7 @@ void zt_handle_return(ctx_t *context) {
         .committed_seq = 0,
         .probe_id = context->func_id,
         .event_type = ZT_TRACE_EVENT_RETURN,
+        .call_id = peek_call_id_c(),
         .value0 = context->rax,
     };
 
@@ -124,6 +136,7 @@ uint64_t save_probe_frame_c(uint64_t ret_addr, uint64_t func_id) {
 
     saved_frames[call_stack_idx].ret_addr = ret_addr;
     saved_frames[call_stack_idx].probe_id = func_id;
+    saved_frames[call_stack_idx].call_id = last_call_id;
     ++call_stack_idx;
 
     return 0;
@@ -135,6 +148,14 @@ uint64_t peek_probe_id_c(void) {
     }
 
     return saved_frames[call_stack_idx - 1].probe_id;
+}
+
+uint64_t peek_call_id_c(void) {
+    if (call_stack_idx <= 0) {
+        return 0;
+    }
+
+    return saved_frames[call_stack_idx - 1].call_id;
 }
 
 uint64_t get_ret_addr_c(void) {

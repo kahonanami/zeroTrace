@@ -321,6 +321,34 @@ int zt_remote_mmap(pid_t pid,
     return 0;
 }
 
+int zt_remote_munmap(pid_t pid,
+                     uint64_t remote_addr,
+                     size_t size) {
+    uint64_t ret;
+
+    if (remote_addr == 0 || size == 0) {
+        return -1;
+    }
+
+    if (zt_remote_syscall6(pid,
+                           SYS_munmap,
+                           remote_addr,
+                           size,
+                           0,
+                           0,
+                           0,
+                           0,
+                           &ret) != 0) {
+        return -1;
+    }
+
+    if ((int64_t)ret < 0 && (int64_t)ret >= -4095) {
+        return -1;
+    }
+
+    return 0;
+}
+
 int zt_remote_call2(pid_t pid,
                     uint64_t func_addr,
                     uint64_t arg1,
@@ -756,6 +784,7 @@ zt_probe_info_t *zt_probe_alloc(zt_injector_session_t *session, const zt_symbol_
 
         session->probes[i].target = *target;
         session->probes[i].thunk_addr = 0;
+        session->probes[i].thunk_slot = -1;
         session->probes[i].orig_len = 0;
         session->probes[i].state = ZT_PROBE_RESOLVED;
         ++session->probe_count;
@@ -836,9 +865,11 @@ int zt_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
         return -1;
     }
 
-    if (has_rip_relative || patch_len > ZT_PROBE_ORIG_CODE_MAX) {
+    if (patch_len > ZT_PROBE_ORIG_CODE_MAX) {
         return -1;
     }
+
+    (void)has_rip_relative;
 
     memcpy(probe->orig_code, code, patch_len);
     probe->orig_len = (uint8_t)patch_len;
@@ -907,7 +938,6 @@ int zt_uninstall_probe_patch(zt_injector_session_t *session, uint64_t probe_id) 
         return -1;
     }
 
-    probe->thunk_addr = 0;
     probe->state = ZT_PROBE_DISABLED;
     return 0;
 }

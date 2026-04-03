@@ -73,7 +73,7 @@ static char *zt_test_read_file(const char *path) {
     return buffer;
 }
 
-static int zt_test_count_substring(const char *text, const char *needle) {
+static __attribute__((unused)) int zt_test_count_substring(const char *text, const char *needle) {
     const char *p;
     int count = 0;
 
