@@ -1,8 +1,8 @@
-# zeroTrace
+# zeroTrace: A Lightweight Dynamic probe for User Space
 
-`zeroTrace` 是一个基于 `ptrace` 的用户态函数追踪工具。它会把 `libzt_payload.so` 注入到目标进程，给指定函数安装探针，并在 CLI 中持续输出函数入口参数和返回值。
+> proj40 题目要求见 [题面.md](./docs/题面.md)
 
-当前版本的主要使用方式是交互式 CLI。
+`zeroTrace` 是一个基于 `ptrace` 的用户态函数追踪工具。它会通过 `dlopen` 把 `libzt_payload.so` 注入到目标进程，并搜索符号表给指定函数安装探针，通过 CLI 中持续输出函数入口参数和返回值。
 
 ## 功能
 
@@ -42,6 +42,10 @@ make
   注入到目标进程中的 payload
 - `bin/tests/test_loop`
   独立测试目标程序
+- `bin/tests/test_benchmark_target`
+  benchmark 目标程序
+- `bin/tests/test_benchmark_runner`
+  benchmark 使用的非交互 trace runner
 
 清理构建产物：
 
@@ -98,7 +102,7 @@ CLI 常用命令：
 先启动测试程序：
 
 ```bash
-./bin/tests/add_loop
+./bin/tests/test_loop
 ```
 
 记下它的 PID，然后启动 `ztrace`：
@@ -142,6 +146,68 @@ ztrace.<pid>.log
 ```text
 ztrace.1473057.log
 ```
+
+## 自动化测试
+
+项目内置自动化测试，直接运行：
+
+```bash
+make test
+```
+
+当前测试覆盖：
+
+- probe 表和符号解析
+- thunk 构造
+- 16 个并发 probe 的生命周期测试
+- 多线程目标函数追踪稳定性测试
+
+## Benchmark
+
+项目提供了一键 benchmark：
+
+```bash
+make benchmark
+```
+
+脚本会自动完成三组测试：
+
+- baseline：无探针
+- kernel uprobe：使用 `bpftrace` 挂 `bench_getpid`
+- zeroTrace：使用 `zeroTrace` 安装用户态 probe
+
+benchmark 目标函数是 `bench_getpid()`，它是测试程序中的一个 `noinline` wrapper，内部调用 `syscall(SYS_getpid)`，这样可以避免 libc/vDSO 细节干扰测量。
+
+运行完成后，结果会写到被忽略的 `benchmark/` 目录中，主要包括：
+
+- `benchmark/baseline.out`
+- `benchmark/uprobe.out`
+- `benchmark/uprobe.bpftrace.out`
+- `benchmark/ztrace.out`
+- `benchmark/ztrace.runner.out`
+- `benchmark/ztrace.benchmark.log`
+- `benchmark/report.txt`
+
+一组最新的 benchmark 结果如下：
+
+```text
+iterations            : 1000000
+baseline total ns     : 63492697
+baseline per call     : 63.49 ns
+uprobe total ns       : 2124504413
+uprobe per call       : 2124.50 ns
+uprobe overhead/call  : 2061.01 ns
+ztrace total ns       : 189246417
+ztrace per call       : 189.25 ns
+ztrace overhead/call  : 125.75 ns
+ztrace vs uprobe      : 16.39x lower overhead
+```
+
+从这组数据可以看到：
+
+- `zeroTrace` 单次额外开销约为 `125.75 ns`
+- 明显低于题目要求的 `< 1000 ns`
+- 相比 `uprobe`，额外开销约低 `16.39x`
 
 ## 项目结构
 

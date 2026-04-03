@@ -85,6 +85,35 @@ static int zt_cli_stop_target(void) {
     return zt_cli_wait_for_stop(g_cli_session.pid);
 }
 
+static zt_probe_info_t *zt_cli_find_probe(char *target, uint64_t *probe_id_out) {
+    char *endptr;
+    long probe_id;
+    zt_probe_info_t *probe;
+
+    if (target == NULL || probe_id_out == NULL) {
+        return NULL;
+    }
+
+    probe_id = strtol(target, &endptr, 10);
+    if (target != endptr && *endptr == '\0' && probe_id > 0) {
+        probe = zt_probe_find_by_id(&g_cli_session, (uint64_t)probe_id);
+        if (probe == NULL) {
+            return NULL;
+        }
+
+        *probe_id_out = (uint64_t)probe_id;
+        return probe;
+    }
+
+    probe = zt_probe_find_by_symbol(&g_cli_session, target);
+    if (probe == NULL) {
+        return NULL;
+    }
+
+    *probe_id_out = probe->probe_id;
+    return probe;
+}
+
 static char *zt_next_arg(char *args) {
     (void)args;
 
@@ -342,9 +371,8 @@ static int cmd_stop(char *args) {
 
 static int cmd_enable(char *args) {
     char *target;
-    char *endptr;
-    long probe_id;
     zt_probe_info_t *probe;
+    uint64_t probe_id;
 
     if (!g_cli_attached) {
         printf("No target attached\n");
@@ -362,24 +390,13 @@ static int cmd_enable(char *args) {
         return 0;
     }
 
-    probe_id = strtol(target, &endptr, 10);
-    if (target != endptr && *endptr == '\0' && probe_id > 0) {
-        if (zt_trace_enable_probe(&g_cli_session, (uint64_t)probe_id) != 0) {
-            printf("Failed to enable probe id %ld\n", probe_id);
-            return 0;
-        }
-
-        printf("Enabled probe id %ld\n", probe_id);
-        return 0;
-    }
-
-    probe = zt_probe_find_by_symbol(&g_cli_session, target);
+    probe = zt_cli_find_probe(target, &probe_id);
     if (probe == NULL) {
         printf("Probe not found: %s\n", target);
         return 0;
     }
 
-    if (zt_trace_enable_probe(&g_cli_session, probe->probe_id) != 0) {
+    if (zt_trace_enable_probe(&g_cli_session, probe_id) != 0) {
         printf("Failed to enable probe %s\n", target);
         return 0;
     }
@@ -390,9 +407,8 @@ static int cmd_enable(char *args) {
 
 static int cmd_disable(char *args) {
     char *target;
-    char *endptr;
-    long probe_id;
     zt_probe_info_t *probe;
+    uint64_t probe_id;
 
     if (!g_cli_attached) {
         printf("No target attached\n");
@@ -410,24 +426,13 @@ static int cmd_disable(char *args) {
         return 0;
     }
 
-    probe_id = strtol(target, &endptr, 10);
-    if (target != endptr && *endptr == '\0' && probe_id > 0) {
-        if (zt_trace_disable_probe(&g_cli_session, (uint64_t)probe_id) != 0) {
-            printf("Failed to disable probe id %ld\n", probe_id);
-            return 0;
-        }
-
-        printf("Disabled probe id %ld\n", probe_id);
-        return 0;
-    }
-
-    probe = zt_probe_find_by_symbol(&g_cli_session, target);
+    probe = zt_cli_find_probe(target, &probe_id);
     if (probe == NULL) {
         printf("Probe not found: %s\n", target);
         return 0;
     }
 
-    if (zt_trace_disable_probe(&g_cli_session, probe->probe_id) != 0) {
+    if (zt_trace_disable_probe(&g_cli_session, probe_id) != 0) {
         printf("Failed to disable probe %s\n", target);
         return 0;
     }
@@ -438,9 +443,8 @@ static int cmd_disable(char *args) {
 
 static int cmd_untrace(char *args) {
     char *target;
-    char *endptr;
-    long probe_id;
     zt_probe_info_t *probe;
+    uint64_t probe_id;
 
     if (!g_cli_attached) {
         printf("No target attached\n");
@@ -453,29 +457,13 @@ static int cmd_untrace(char *args) {
         return 0;
     }
 
-    probe_id = strtol(target, &endptr, 10);
-    if (target != endptr && *endptr == '\0' && probe_id > 0) {
-        if (zt_trace_remove_probe(&g_cli_session, (uint64_t)probe_id) != 0) {
-            printf("Failed to remove probe id %ld\n", probe_id);
-            return 0;
-        }
-
-        if (!zt_trace_is_active()) {
-            g_cli_log_path[0] = '\0';
-            g_cli_log_offset = 0;
-            g_cli_last_poll = 0;
-        }
-        printf("Removed probe id %ld\n", probe_id);
-        return 0;
-    }
-
-    probe = zt_probe_find_by_symbol(&g_cli_session, target);
+    probe = zt_cli_find_probe(target, &probe_id);
     if (probe == NULL) {
         printf("Probe not found: %s\n", target);
         return 0;
     }
 
-    if (zt_trace_remove_probe(&g_cli_session, probe->probe_id) != 0) {
+    if (zt_trace_remove_probe(&g_cli_session, probe_id) != 0) {
         printf("Failed to remove probe %s\n", target);
         return 0;
     }
@@ -516,6 +504,21 @@ static int cmd_info(char *args) {
             return 0;
         }
 
+        printf("%-4s %-20s %-10s %-5s %-18s %s\n",
+               "id",
+               "symbol",
+               "state",
+               "len",
+               "addr",
+               "module");
+        printf("%-4s %-20s %-10s %-5s %-18s %s\n",
+               "--",
+               "--------------------",
+               "----------",
+               "-----",
+               "------------------",
+               "------");
+
         for (i = 0; i < ZT_PROBES_CAPACITY; ++i) {
             zt_probe_info_t *probe = &g_cli_session.probes[i];
 
@@ -523,12 +526,13 @@ static int cmd_info(char *args) {
                 continue;
             }
 
-            printf("id=%lu symbol=%s addr=0x%lx enabled=%d orig_len=%u\n",
+            printf("%-4lu %-20.20s %-10s %-5u 0x%016lx %s\n",
                    probe->probe_id,
-                   probe->symbol,
-                   probe->symbol_addr,
-                   probe->enabled,
-                   probe->orig_len);
+                   probe->target.symbol,
+                   zt_probe_state_name(probe->state),
+                   probe->orig_len,
+                   probe->target.remote_addr,
+                   probe->target.module_path);
         }
         return 0;
     }

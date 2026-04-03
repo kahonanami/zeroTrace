@@ -5,7 +5,6 @@
 #include <string.h>
 #include <limits.h>
 #include <unistd.h>
-#include <signal.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <sys/mman.h>
@@ -27,16 +26,20 @@ typedef struct {
     uint64_t remote_payload_config_addr;
 } zt_runtime_state_t;
 
+typedef enum {
+    ZT_TRACE_RUNTIME_INACTIVE = 0,
+    ZT_TRACE_RUNTIME_STOPPED,
+    ZT_TRACE_RUNTIME_RUNNING,
+} zt_trace_runtime_status_t;
+
 typedef struct {
     zt_injector_session_t *session;
     zt_runtime_state_t runtime;
     FILE *log_fp;
     uint64_t last_seq;
-    int target_running;
-    int active;
+    zt_trace_runtime_status_t state;
 } zt_active_trace_t;
 
-static volatile sig_atomic_t g_stop_requested;
 static zt_active_trace_t g_active_trace;
 
 static int zt_trace_install_probe(zt_injector_session_t *session,
@@ -54,7 +57,7 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
         return -1;
     }
 
-    if (probe->thunk_addr != 0) {
+    if (probe->state == ZT_PROBE_INSTALLED) {
         if (probe_out != NULL) {
             *probe_out = probe;
         }
@@ -63,8 +66,8 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
 
     printf("Registered probe: id=%lu, symbol=%s, addr=0x%lX\n",
            probe->probe_id,
-           probe->symbol,
-           probe->symbol_addr);
+           probe->target.symbol,
+           probe->target.remote_addr);
 
     if (zt_enable_probe(session, probe->probe_id) != 0) {
         printf("zt_enable_probe failed for probe %lu\n", probe->probe_id);
@@ -110,7 +113,7 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
     }
 
     printf("probe patch installed at 0x%llx -> thunk 0x%llx\n",
-           (unsigned long long)probe->symbol_addr,
+           (unsigned long long)probe->target.remote_addr,
            (unsigned long long)remote_thunk_addr);
 
     if (probe_out != NULL) {
@@ -118,11 +121,6 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
     }
 
     return 0;
-}
-
-static void zt_handle_stop_signal(int signo) {
-    (void)signo;
-    g_stop_requested = 1;
 }
 
 static int zt_wait_for_tracee_stop(pid_t pid) {
@@ -182,7 +180,7 @@ static void zt_dump_trace_events_since(zt_injector_session_t *session,
         }
 
         probe = zt_probe_find_by_id(session, event->probe_id);
-        symbol_name = probe != NULL ? probe->symbol : "<unknown>";
+        symbol_name = probe != NULL ? probe->target.symbol : "<unknown>";
 
         if (event->event_type == ZT_TRACE_EVENT_ENTRY) {
             fprintf(out,
@@ -214,8 +212,9 @@ static void zt_dump_trace_events_since(zt_injector_session_t *session,
 
 static int zt_setup_remote_payload(zt_injector_session_t *session,
                                    zt_runtime_state_t *runtime) {
-    char dlopen_module_path[PATH_MAX];
     uint64_t remote_call_ret;
+    zt_symbol_target_t target;
+    int embedded_payload;
 
     if (session == NULL || runtime == NULL) {
         return -1;
@@ -226,77 +225,77 @@ static int zt_setup_remote_payload(zt_injector_session_t *session,
         return -1;
     }
 
-    {
-        Dl_info dl_info;
+    embedded_payload =
+        zt_find_remote_symbol_addr(session->pid,
+                                   session->exe_path,
+                                   "entry_stub",
+                                   &runtime->remote_entry_stub_addr) == 0 &&
+        zt_find_remote_symbol_addr(session->pid,
+                                   session->exe_path,
+                                   "zt_payload_init",
+                                   &runtime->remote_payload_init_addr) == 0;
 
-        if (dladdr((void *)dlopen, &dl_info) == 0 || dl_info.dli_fname == NULL) {
-            printf("Failed to resolve local dlopen module path\n");
+    if (embedded_payload) {
+        printf("Using embedded payload from target executable\n");
+    } else {
+        memset(&target, 0, sizeof(target));
+        if (zt_resolve_symbol_target(session, "dlopen", &target) != 0) {
+            printf("Failed to resolve remote dlopen addr\n");
+            return -1;
+        }
+        runtime->remote_dlopen_addr = target.remote_addr;
+        printf("Remote dlopen addr: 0x%llx\n",
+               (unsigned long long)runtime->remote_dlopen_addr);
+
+        if (zt_remote_mmap(session->pid,
+                           strlen(runtime->payload_so_path) + 1,
+                           PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS,
+                           &runtime->remote_payload_path_addr) != 0) {
+            printf("Failed to mmap remote payload path\n");
+            return -1;
+        }
+        printf("Remote payload path addr: 0x%llx\n",
+               (unsigned long long)runtime->remote_payload_path_addr);
+
+        if (zt_write_remote_memory(session->pid,
+                                   runtime->remote_payload_path_addr,
+                                   runtime->payload_so_path,
+                                   strlen(runtime->payload_so_path) + 1) != 0) {
+            printf("Failed to write remote payload path\n");
             return -1;
         }
 
-        if (realpath(dl_info.dli_fname, dlopen_module_path) == NULL) {
-            strncpy(dlopen_module_path, dl_info.dli_fname, sizeof(dlopen_module_path) - 1);
-            dlopen_module_path[sizeof(dlopen_module_path) - 1] = '\0';
+        if (zt_remote_call2(session->pid,
+                            runtime->remote_dlopen_addr,
+                            runtime->remote_payload_path_addr,
+                            RTLD_NOW | RTLD_GLOBAL,
+                            &remote_call_ret) != 0 || remote_call_ret == 0) {
+            printf("Failed to call remote dlopen for %s\n", runtime->payload_so_path);
+            return -1;
+        }
+        printf("Remote dlopen handle: 0x%llx\n",
+               (unsigned long long)remote_call_ret);
+
+        if (zt_find_remote_symbol_addr(session->pid,
+                                       runtime->payload_so_path,
+                                       "entry_stub",
+                                       &runtime->remote_entry_stub_addr) != 0) {
+            printf("Failed to resolve remote entry_stub addr from %s\n", runtime->payload_so_path);
+            return -1;
+        }
+
+        if (zt_find_remote_symbol_addr(session->pid,
+                                       runtime->payload_so_path,
+                                       "zt_payload_init",
+                                       &runtime->remote_payload_init_addr) != 0) {
+            printf("Failed to resolve remote zt_payload_init addr from %s\n", runtime->payload_so_path);
+            return -1;
         }
     }
 
-    if (zt_find_remote_symbol_addr(session->pid,
-                                   dlopen_module_path,
-                                   "dlopen",
-                                   &runtime->remote_dlopen_addr) != 0) {
-        printf("Failed to resolve remote dlopen addr from %s\n", dlopen_module_path);
-        return -1;
-    }
-    printf("Remote dlopen addr: 0x%llx\n",
-           (unsigned long long)runtime->remote_dlopen_addr);
-
-    if (zt_remote_mmap(session->pid,
-                       strlen(runtime->payload_so_path) + 1,
-                       PROT_READ | PROT_WRITE,
-                       MAP_PRIVATE | MAP_ANONYMOUS,
-                       &runtime->remote_payload_path_addr) != 0) {
-        printf("Failed to mmap remote payload path\n");
-        return -1;
-    }
-    printf("Remote payload path addr: 0x%llx\n",
-           (unsigned long long)runtime->remote_payload_path_addr);
-
-    if (zt_write_remote_memory(session->pid,
-                               runtime->remote_payload_path_addr,
-                               runtime->payload_so_path,
-                               strlen(runtime->payload_so_path) + 1) != 0) {
-        printf("Failed to write remote payload path\n");
-        return -1;
-    }
-
-    if (zt_remote_call2(session->pid,
-                        runtime->remote_dlopen_addr,
-                        runtime->remote_payload_path_addr,
-                        RTLD_NOW | RTLD_GLOBAL,
-                        &remote_call_ret) != 0 || remote_call_ret == 0) {
-        printf("Failed to call remote dlopen for %s\n", runtime->payload_so_path);
-        return -1;
-    }
-    printf("Remote dlopen handle: 0x%llx\n",
-           (unsigned long long)remote_call_ret);
-
-    if (zt_find_remote_symbol_addr(session->pid,
-                                   runtime->payload_so_path,
-                                   "entry_stub",
-                                   &runtime->remote_entry_stub_addr) != 0) {
-        printf("Failed to resolve remote entry_stub addr from %s\n", runtime->payload_so_path);
-        return -1;
-    }
     printf("Remote entry_stub addr: 0x%llx\n",
            (unsigned long long)runtime->remote_entry_stub_addr);
-
-    if (zt_find_remote_symbol_addr(session->pid,
-                                   runtime->payload_so_path,
-                                   "zt_payload_init",
-                                   &runtime->remote_payload_init_addr) != 0) {
-        printf("Failed to resolve remote zt_payload_init addr from %s\n", runtime->payload_so_path);
-        return -1;
-    }
     printf("Remote zt_payload_init addr: 0x%llx\n",
            (unsigned long long)runtime->remote_payload_init_addr);
 
@@ -366,22 +365,92 @@ static int zt_stop_target(zt_injector_session_t *session) {
     return 0;
 }
 
-int zt_trace_poll(void) {
-    zt_trace_buffer_t trace_buffer;
-
-    if (!g_active_trace.active) {
+static int zt_trace_ensure_stopped(zt_injector_session_t *session) {
+    if (session == NULL ||
+        g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE ||
+        g_active_trace.session != session) {
         return -1;
     }
 
-    if (!g_active_trace.target_running) {
+    if (g_active_trace.state == ZT_TRACE_RUNTIME_STOPPED) {
         return 0;
     }
 
-    if (zt_stop_target(g_active_trace.session) != 0) {
+    if (zt_stop_target(session) != 0) {
         return -1;
     }
 
-    g_active_trace.target_running = 0;
+    g_active_trace.state = ZT_TRACE_RUNTIME_STOPPED;
+    return 0;
+}
+
+static int zt_trace_ensure_running(zt_injector_session_t *session) {
+    if (session == NULL ||
+        g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE ||
+        g_active_trace.session != session) {
+        return -1;
+    }
+
+    if (g_active_trace.state == ZT_TRACE_RUNTIME_RUNNING) {
+        return 0;
+    }
+
+    if (ptrace(PTRACE_CONT, session->pid, NULL, NULL) != 0) {
+        return -1;
+    }
+
+    g_active_trace.state = ZT_TRACE_RUNTIME_RUNNING;
+    return 0;
+}
+
+static int zt_trace_check_exit_event(void) {
+    int status;
+    pid_t pid;
+
+    if (g_active_trace.state != ZT_TRACE_RUNTIME_RUNNING ||
+        g_active_trace.session == NULL) {
+        return 0;
+    }
+
+    pid = waitpid(g_active_trace.session->pid, &status, WNOHANG);
+    if (pid <= 0) {
+        return 0;
+    }
+
+    if (WIFEXITED(status) || WIFSIGNALED(status)) {
+        if (g_active_trace.log_fp != NULL) {
+            fclose(g_active_trace.log_fp);
+        }
+        memset(&g_active_trace, 0, sizeof(g_active_trace));
+        return 1;
+    }
+
+    if (WIFSTOPPED(status)) {
+        g_active_trace.state = ZT_TRACE_RUNTIME_STOPPED;
+    }
+
+    return 0;
+}
+
+int zt_trace_poll(void) {
+    zt_trace_buffer_t trace_buffer;
+
+    if (g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE) {
+        return -1;
+    }
+
+    if (g_active_trace.state != ZT_TRACE_RUNTIME_RUNNING) {
+        return 0;
+    }
+
+    if (zt_trace_check_exit_event() != 0) {
+        return 1;
+    }
+
+    if (zt_trace_ensure_stopped(g_active_trace.session) != 0) {
+        return -1;
+    }
+
     if (zt_read_remote_memory(g_active_trace.session->pid,
                               g_active_trace.runtime.remote_trace_buffer_addr,
                               &trace_buffer,
@@ -394,47 +463,40 @@ int zt_trace_poll(void) {
                                &g_active_trace.last_seq,
                                g_active_trace.log_fp);
 
-    if (ptrace(PTRACE_CONT, g_active_trace.session->pid, NULL, NULL) != 0) {
-        return -1;
-    }
-
-    g_active_trace.target_running = 1;
-    return 0;
+    return zt_trace_ensure_running(g_active_trace.session);
 }
 
 int zt_trace_disable_probe(zt_injector_session_t *session, uint64_t probe_id) {
     zt_probe_info_t *probe;
 
-    if (session == NULL || probe_id == 0 || !g_active_trace.active || g_active_trace.session != session) {
+    if (session == NULL || probe_id == 0 ||
+        g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE ||
+        g_active_trace.session != session) {
         return -1;
     }
 
     probe = zt_probe_find_by_id(session, probe_id);
-    if (probe == NULL || probe->thunk_addr == 0) {
+    if (probe == NULL || probe->state != ZT_PROBE_INSTALLED) {
         return -1;
     }
 
-    if (g_active_trace.target_running && zt_stop_target(session) != 0) {
+    if (zt_trace_ensure_stopped(session) != 0) {
         return -1;
     }
-    g_active_trace.target_running = 0;
 
     if (zt_uninstall_probe_patch(session, probe_id) != 0) {
         return -1;
     }
 
-    if (ptrace(PTRACE_CONT, session->pid, NULL, NULL) != 0) {
-        return -1;
-    }
-
-    g_active_trace.target_running = 1;
-    return 0;
+    return zt_trace_ensure_running(session);
 }
 
 int zt_trace_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
     zt_probe_info_t *probe;
 
-    if (session == NULL || probe_id == 0 || !g_active_trace.active || g_active_trace.session != session) {
+    if (session == NULL || probe_id == 0 ||
+        g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE ||
+        g_active_trace.session != session) {
         return -1;
     }
 
@@ -443,74 +505,41 @@ int zt_trace_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
         return -1;
     }
 
-    if (probe->thunk_addr != 0) {
+    if (probe->state == ZT_PROBE_INSTALLED) {
         return 0;
     }
 
-    if (g_active_trace.target_running && zt_stop_target(session) != 0) {
-        return -1;
-    }
-    g_active_trace.target_running = 0;
-
-    if (zt_trace_install_probe(session, &g_active_trace.runtime, probe->symbol, NULL) != 0) {
+    if (zt_trace_ensure_stopped(session) != 0) {
         return -1;
     }
 
-    if (ptrace(PTRACE_CONT, session->pid, NULL, NULL) != 0) {
+    if (zt_trace_install_probe(session, &g_active_trace.runtime, probe->target.symbol, NULL) != 0) {
         return -1;
     }
 
-    g_active_trace.target_running = 1;
-    return 0;
+    return zt_trace_ensure_running(session);
 }
 
 int zt_trace_pause(zt_injector_session_t *session) {
-    if (session == NULL || !g_active_trace.active || g_active_trace.session != session) {
-        return -1;
-    }
-
-    if (!g_active_trace.target_running) {
-        return 0;
-    }
-
-    if (zt_stop_target(session) != 0) {
-        return -1;
-    }
-
-    g_active_trace.target_running = 0;
-    return 0;
+    return zt_trace_ensure_stopped(session);
 }
 
 int zt_trace_resume(zt_injector_session_t *session) {
-    if (session == NULL || !g_active_trace.active || g_active_trace.session != session) {
-        return -1;
-    }
-
-    if (g_active_trace.target_running) {
-        return 0;
-    }
-
-    if (ptrace(PTRACE_CONT, session->pid, NULL, NULL) != 0) {
-        return -1;
-    }
-
-    g_active_trace.target_running = 1;
-    return 0;
+    return zt_trace_ensure_running(session);
 }
 
-int zt_trace_stop(void) {
+static int zt_trace_stop(void) {
     int ret;
     int i;
 
-    if (!g_active_trace.active) {
+    if (g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE) {
         return -1;
     }
 
-    if (g_active_trace.target_running && zt_stop_target(g_active_trace.session) != 0) {
+    if (zt_trace_ensure_stopped(g_active_trace.session) != 0) {
         return -1;
     }
 
-    g_active_trace.target_running = 0;
     ret = 0;
     for (i = 0; i < ZT_PROBES_CAPACITY; ++i) {
         zt_probe_info_t *probe = &g_active_trace.session->probes[i];
@@ -519,7 +548,7 @@ int zt_trace_stop(void) {
             continue;
         }
 
-        if (probe->thunk_addr != 0 &&
+        if (probe->state == ZT_PROBE_INSTALLED &&
             zt_uninstall_probe_patch(g_active_trace.session, probe->probe_id) != 0) {
             ret = -1;
         }
@@ -536,7 +565,15 @@ int zt_trace_stop(void) {
 }
 
 int zt_trace_is_active(void) {
-    return g_active_trace.active;
+    return g_active_trace.state != ZT_TRACE_RUNTIME_INACTIVE;
+}
+
+int zt_trace_shutdown(void) {
+    if (g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE) {
+        return 0;
+    }
+
+    return zt_trace_stop();
 }
 
 int zt_trace_start_in_session(zt_injector_session_t *session,
@@ -549,26 +586,20 @@ int zt_trace_start_in_session(zt_injector_session_t *session,
         return -1;
     }
 
-    if (g_active_trace.active) {
+    if (g_active_trace.state != ZT_TRACE_RUNTIME_INACTIVE) {
         if (g_active_trace.session != session) {
             return -1;
         }
 
-        if (g_active_trace.target_running && zt_stop_target(session) != 0) {
+        if (zt_trace_ensure_stopped(session) != 0) {
             return -1;
         }
-        g_active_trace.target_running = 0;
 
         if (zt_trace_install_probe(session, &g_active_trace.runtime, symbol, &probe) != 0) {
             return -1;
         }
 
-        if (ptrace(PTRACE_CONT, session->pid, NULL, NULL) != 0) {
-            return -1;
-        }
-
-        g_active_trace.target_running = 1;
-        return 0;
+        return zt_trace_ensure_running(session);
     }
 
     log_fp = fopen(log_path, "w");
@@ -595,48 +626,13 @@ int zt_trace_start_in_session(zt_injector_session_t *session,
 
     g_active_trace.session = session;
     g_active_trace.log_fp = log_fp;
-    g_active_trace.active = 1;
+    g_active_trace.state = ZT_TRACE_RUNTIME_STOPPED;
 
-    if (ptrace(PTRACE_CONT, session->pid, NULL, NULL) != 0) {
+    if (zt_trace_ensure_running(session) != 0) {
         zt_trace_stop();
         return -1;
     }
 
-    g_active_trace.target_running = 1;
-    return 0;
-}
-
-int zt_trace_symbol_in_session(zt_injector_session_t *session, const char *symbol) {
-    zt_probe_info_t *probe;
-    uint64_t probe_addr;
-
-    if (session == NULL || symbol == NULL) {
-        return -1;
-    }
-
-    if (zt_trace_start_in_session(session, symbol, "/dev/null") != 0) {
-        return -1;
-    }
-
-    probe = zt_probe_find_by_symbol(session, symbol);
-    probe_addr = probe != NULL ? probe->symbol_addr : 0;
-    printf("Tracing... press Ctrl+C to stop.\n");
-    g_stop_requested = 0;
-    signal(SIGINT, zt_handle_stop_signal);
-    while (!g_stop_requested) {
-        sleep(1);
-        if (zt_trace_poll() != 0) {
-            break;
-        }
-    }
-    signal(SIGINT, SIG_DFL);
-
-    if (g_active_trace.active && zt_trace_stop() != 0) {
-        return -1;
-    }
-
-    printf("probe patch restored at 0x%llx\n",
-           (unsigned long long)probe_addr);
     return 0;
 }
 
@@ -652,7 +648,7 @@ int zt_trace_remove_probe(zt_injector_session_t *session, uint64_t probe_id) {
         return -1;
     }
 
-    if (!g_active_trace.active) {
+    if (g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE) {
         return zt_unregister_probe(session, probe_id);
     }
 
@@ -660,12 +656,11 @@ int zt_trace_remove_probe(zt_injector_session_t *session, uint64_t probe_id) {
         return -1;
     }
 
-    if (g_active_trace.target_running && zt_stop_target(session) != 0) {
+    if (zt_trace_ensure_stopped(session) != 0) {
         return -1;
     }
-    g_active_trace.target_running = 0;
 
-    if (probe->thunk_addr != 0 &&
+    if (probe->state == ZT_PROBE_INSTALLED &&
         zt_uninstall_probe_patch(session, probe_id) != 0) {
         return -1;
     }
@@ -682,27 +677,5 @@ int zt_trace_remove_probe(zt_injector_session_t *session, uint64_t probe_id) {
         return 0;
     }
 
-    if (ptrace(PTRACE_CONT, session->pid, NULL, NULL) != 0) {
-        return -1;
-    }
-    g_active_trace.target_running = 1;
-    return 0;
-}
-
-int zt_trace_symbol_once(pid_t pid, const char *symbol) {
-    zt_injector_session_t session;
-    int ret;
-
-    if (symbol == NULL) {
-        return -1;
-    }
-
-    if (zt_injector_attach(&session, pid) != 0) {
-        fprintf(stderr, "Failed to attach to process with PID %d\n", pid);
-        return -1;
-    }
-
-    ret = zt_trace_symbol_in_session(&session, symbol);
-    zt_injector_detach(&session);
-    return ret;
+    return zt_trace_ensure_running(session);
 }

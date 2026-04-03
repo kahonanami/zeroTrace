@@ -549,13 +549,23 @@ int zt_find_symbol_addr(const char *elf_path, const char *symbol_name, uint64_t 
         symbol_count = symtab->sh_size / symtab->sh_entsize;
         for (j = 0; j < symbol_count; ++j) {
             const char *name;
+            unsigned char type;
 
             if (symbols[j].st_name >= strtab->sh_size) {
                 continue;
             }
 
             name = strings + symbols[j].st_name;
+            type = ELF64_ST_TYPE(symbols[j].st_info);
             if (strcmp(name, symbol_name) == 0) {
+                if (symbols[j].st_shndx == SHN_UNDEF || symbols[j].st_value == 0) {
+                    continue;
+                }
+
+                if (type != STT_FUNC && type != STT_GNU_IFUNC && type != STT_NOTYPE) {
+                    continue;
+                }
+
                 *symbol_addr_out = symbols[j].st_value;
                 free(symbols);
                 free(strings);
@@ -606,6 +616,84 @@ int zt_find_remote_symbol_addr(pid_t pid,
     return 0;
 }
 
+const char *zt_probe_state_name(zt_probe_state_t state) {
+    switch (state) {
+        case ZT_PROBE_EMPTY:
+            return "empty";
+        case ZT_PROBE_RESOLVED:
+            return "resolved";
+        case ZT_PROBE_PREPARED:
+            return "prepared";
+        case ZT_PROBE_INSTALLED:
+            return "installed";
+        case ZT_PROBE_DISABLED:
+            return "disabled";
+        default:
+            return "unknown";
+    }
+}
+
+int zt_resolve_symbol_target(zt_injector_session_t *session,
+                             const char *symbol_name,
+                             zt_symbol_target_t *target_out) {
+    char maps_path[64];
+    FILE *fp;
+    char line[PATH_MAX + 128];
+    uint64_t remote_addr;
+
+    if (session == NULL || symbol_name == NULL || target_out == NULL) {
+        return -1;
+    }
+
+    memset(target_out, 0, sizeof(*target_out));
+    strncpy(target_out->symbol, symbol_name, sizeof(target_out->symbol) - 1);
+
+    if (zt_find_symbol_addr(session->exe_path, symbol_name, &remote_addr) == 0) {
+        strncpy(target_out->module_path, session->exe_path, sizeof(target_out->module_path) - 1);
+        target_out->remote_addr = session->is_pie ? remote_addr + session->image_base : remote_addr;
+        return 0;
+    }
+
+    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", session->pid);
+    fp = fopen(maps_path, "r");
+    if (fp == NULL) {
+        return -1;
+    }
+
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        unsigned long start = 0;
+        unsigned long end = 0;
+        unsigned long offset = 0;
+        char perms[8] = {0};
+        char path[PATH_MAX] = {0};
+        int fields = sscanf(line, "%lx-%lx %7s %lx %*s %*s %s",
+                            &start,
+                            &end,
+                            perms,
+                            &offset,
+                            path);
+
+        (void)start;
+        (void)end;
+
+        if (fields != 5 || path[0] != '/') {
+            continue;
+        }
+
+        if (zt_find_remote_symbol_addr(session->pid, path, symbol_name, &remote_addr) != 0) {
+            continue;
+        }
+
+        fclose(fp);
+        strncpy(target_out->module_path, path, sizeof(target_out->module_path) - 1);
+        target_out->remote_addr = remote_addr;
+        return 0;
+    }
+
+    fclose(fp);
+    return -1;
+}
+
 zt_probe_info_t *zt_probe_find_by_symbol(zt_injector_session_t *session, const char *symbol_name) {
     int i;
 
@@ -618,7 +706,7 @@ zt_probe_info_t *zt_probe_find_by_symbol(zt_injector_session_t *session, const c
             continue;
         }
 
-        if (strcmp(session->probes[i].symbol, symbol_name) == 0) {
+        if (strcmp(session->probes[i].target.symbol, symbol_name) == 0) {
             return &session->probes[i];
         }
     }
@@ -642,15 +730,15 @@ zt_probe_info_t *zt_probe_find_by_id(zt_injector_session_t *session, uint64_t pr
     return NULL;
 }
 
-zt_probe_info_t *zt_probe_alloc(zt_injector_session_t *session, const char *symbol_name, uint64_t symbol_addr) {
+zt_probe_info_t *zt_probe_alloc(zt_injector_session_t *session, const zt_symbol_target_t *target) {
     zt_probe_info_t *probe;
     int i;
 
-    if (session == NULL || symbol_name == NULL) {
+    if (session == NULL || target == NULL || target->symbol[0] == '\0') {
         return NULL;
     }
 
-    probe = zt_probe_find_by_symbol(session, symbol_name);
+    probe = zt_probe_find_by_symbol(session, target->symbol);
     if (probe != NULL) {
         return probe;
     }
@@ -666,11 +754,10 @@ zt_probe_info_t *zt_probe_alloc(zt_injector_session_t *session, const char *symb
             session->probes[i].probe_id = session->next_probe_id++;
         }
 
-        strncpy(session->probes[i].symbol, symbol_name, ZT_PROBE_SYMBOL_MAX - 1);
-        session->probes[i].symbol_addr = symbol_addr;
+        session->probes[i].target = *target;
         session->probes[i].thunk_addr = 0;
         session->probes[i].orig_len = 0;
-        session->probes[i].enabled = false;
+        session->probes[i].state = ZT_PROBE_RESOLVED;
         ++session->probe_count;
         return &session->probes[i];
     }
@@ -680,8 +767,7 @@ zt_probe_info_t *zt_probe_alloc(zt_injector_session_t *session, const char *symb
 
 zt_probe_info_t *zt_register_probe(zt_injector_session_t *session, const char *symbol_name) {
     zt_probe_info_t *probe;
-    uint64_t symbol_value;
-    uint64_t remote_addr;
+    zt_symbol_target_t target;
 
     if (session == NULL || symbol_name == NULL) {
         return NULL;
@@ -692,16 +778,11 @@ zt_probe_info_t *zt_register_probe(zt_injector_session_t *session, const char *s
         return probe;
     }
 
-    if (zt_find_symbol_addr(session->exe_path, symbol_name, &symbol_value) != 0) {
+    if (zt_resolve_symbol_target(session, symbol_name, &target) != 0) {
         return NULL;
     }
 
-    remote_addr = symbol_value;
-    if (session->is_pie) {
-        remote_addr += session->image_base;
-    }
-
-    return zt_probe_alloc(session, symbol_name, remote_addr);
+    return zt_probe_alloc(session, &target);
 }
 
 int zt_unregister_probe(zt_injector_session_t *session, uint64_t probe_id) {
@@ -739,11 +820,11 @@ int zt_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
         return -1;
     }
 
-    if (probe->enabled) {
+    if (probe->state == ZT_PROBE_PREPARED || probe->state == ZT_PROBE_INSTALLED) {
         return 0;
     }
 
-    if (zt_read_remote_memory(session->pid, probe->symbol_addr, code, sizeof(code)) != 0) {
+    if (zt_read_remote_memory(session->pid, probe->target.remote_addr, code, sizeof(code)) != 0) {
         return -1;
     }
 
@@ -761,7 +842,7 @@ int zt_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
 
     memcpy(probe->orig_code, code, patch_len);
     probe->orig_len = (uint8_t)patch_len;
-    probe->enabled = true;
+    probe->state = ZT_PROBE_PREPARED;
     return 0;
 }
 
@@ -780,7 +861,7 @@ int zt_install_probe_patch(zt_injector_session_t *session,
         return -1;
     }
 
-    if (!probe->enabled || probe->orig_len < ZT_PROBE_PATCH_LEN) {
+    if (probe->state != ZT_PROBE_PREPARED || probe->orig_len < ZT_PROBE_PATCH_LEN) {
         return -1;
     }
 
@@ -792,13 +873,14 @@ int zt_install_probe_patch(zt_injector_session_t *session,
     patch[11] = 0xE0;
 
     if (zt_write_remote_memory(session->pid,
-                               probe->symbol_addr,
+                               probe->target.remote_addr,
                                patch,
                                sizeof(patch)) != 0) {
         return -1;
     }
 
     probe->thunk_addr = thunk_addr;
+    probe->state = ZT_PROBE_INSTALLED;
     return 0;
 }
 
@@ -819,14 +901,14 @@ int zt_uninstall_probe_patch(zt_injector_session_t *session, uint64_t probe_id) 
     }
 
     if (zt_write_remote_memory(session->pid,
-                               probe->symbol_addr,
+                               probe->target.remote_addr,
                                probe->orig_code,
                                probe->orig_len) != 0) {
         return -1;
     }
 
     probe->thunk_addr = 0;
-    probe->enabled = false;
+    probe->state = ZT_PROBE_DISABLED;
     return 0;
 }
 
@@ -858,8 +940,6 @@ int zt_injector_attach(zt_injector_session_t *session, pid_t pid) {
         return -1;
     }
 
-    session->is_attached = true;
-
     snprintf(link_path, sizeof(link_path), "/proc/%d/exe", pid);
     path_len = readlink(link_path, session->exe_path, sizeof(session->exe_path) - 1);
     if (path_len <= 0) {
@@ -888,7 +968,7 @@ void zt_injector_detach(zt_injector_session_t *session) {
         return;
     }
 
-    if (session->is_attached) {
+    if (session->pid > 0) {
         ptrace(PTRACE_DETACH, session->pid, NULL, NULL);
     }
 

@@ -7,17 +7,31 @@
 
 #define ZT_PROBES_CAPACITY 32
 #define ZT_PROBE_SYMBOL_MAX 64
+#define ZT_PROBE_MODULE_MAX 512
 #define ZT_PROBE_ORIG_CODE_MAX 32
 #define ZT_PROBE_PATCH_LEN 12
 
+typedef struct {
+    char symbol[ZT_PROBE_SYMBOL_MAX];
+    char module_path[ZT_PROBE_MODULE_MAX];
+    uint64_t remote_addr;
+} zt_symbol_target_t;
+
+typedef enum {
+    ZT_PROBE_EMPTY = 0,
+    ZT_PROBE_RESOLVED,
+    ZT_PROBE_PREPARED,
+    ZT_PROBE_INSTALLED,
+    ZT_PROBE_DISABLED,
+} zt_probe_state_t;
+
 typedef struct{
     uint64_t probe_id;
-    char symbol[ZT_PROBE_SYMBOL_MAX];
-    uint64_t symbol_addr;
+    zt_symbol_target_t target;
     uint64_t thunk_addr;
     uint8_t orig_code[ZT_PROBE_ORIG_CODE_MAX];
     uint8_t orig_len;
-    bool enabled;
+    zt_probe_state_t state;
 } zt_probe_info_t;
 
 typedef struct {
@@ -25,7 +39,6 @@ typedef struct {
     char exe_path[512];
     uint64_t image_base;
     bool is_pie;
-    bool is_attached;
     uint64_t next_probe_id;
     int probe_count;
     zt_probe_info_t probes[ZT_PROBES_CAPACITY];
@@ -38,6 +51,9 @@ int zt_find_remote_symbol_addr(pid_t pid,
                                const char *module_path,
                                const char *symbol_name,
                                uint64_t *remote_addr_out);
+int zt_resolve_symbol_target(zt_injector_session_t *session,
+                             const char *symbol_name,
+                             zt_symbol_target_t *target_out);
 int zt_read_remote_memory(pid_t pid, uint64_t remote_addr, void *buffer, size_t size);
 int zt_write_remote_memory(pid_t pid, uint64_t remote_addr, const void *buffer, size_t size);
 int zt_remote_mmap(pid_t pid,
@@ -56,8 +72,9 @@ int zt_remote_call2(pid_t pid,
                     uint64_t *ret_out);
 zt_probe_info_t *zt_probe_find_by_symbol(zt_injector_session_t *session, const char *symbol_name);
 zt_probe_info_t *zt_probe_find_by_id(zt_injector_session_t *session, uint64_t probe_id);
-zt_probe_info_t *zt_probe_alloc(zt_injector_session_t *session, const char *symbol_name, uint64_t symbol_addr);
+zt_probe_info_t *zt_probe_alloc(zt_injector_session_t *session, const zt_symbol_target_t *target);
 zt_probe_info_t *zt_register_probe(zt_injector_session_t *session, const char *symbol_name);
+const char *zt_probe_state_name(zt_probe_state_t state);
 int zt_unregister_probe(zt_injector_session_t *session, uint64_t probe_id);
 int zt_enable_probe(zt_injector_session_t *session, uint64_t probe_id);
 int zt_install_probe_patch(zt_injector_session_t *session,
