@@ -11,6 +11,7 @@ from pathlib import Path
 
 
 ITERATIONS = int(os.environ.get("ZT_BENCH_ITERATIONS", "1000000"))
+LATENCY_ROUNDS = int(os.environ.get("ZT_BENCH_LATENCY_ROUNDS", "1000"))
 ROOT_DIR = Path(__file__).resolve().parent.parent
 TARGET = ROOT_DIR / "bin" / "tests" / "test_benchmark_target"
 BENCH_RUNNER = ROOT_DIR / "bin" / "tests" / "test_benchmark_runner"
@@ -228,7 +229,7 @@ def run_latency() -> tuple[int, int]:
     )
 
     latency_proc = subprocess.run(
-        [str(LATENCY_RUNNER), str(target_proc.pid), "bench_getpid", str(ZTRACE_LOG_OUT)],
+        [str(LATENCY_RUNNER), str(target_proc.pid), "bench_getpid", str(ZTRACE_LOG_OUT), str(LATENCY_ROUNDS)],
         cwd=ROOT_DIR,
         check=True,
         stdout=subprocess.PIPE,
@@ -278,8 +279,8 @@ def format_report(baseline_ns: int,
         f"ztrace vs uprobe      : {ztrace_vs_uprobe:.2f}x lower overhead\n\n"
         "Probe lifecycle latency\n"
         "-----------------------\n"
-        f"install latency       : {install_ns} ns ({install_ns / 1000000.0:.3f} ms)\n"
-        f"uninstall latency     : {uninstall_ns} ns ({uninstall_ns / 1000000.0:.3f} ms)\n\n"
+        f"install latency avg   : {install_ns} ns ({install_ns / 1000000.0:.3f} ms) over {LATENCY_ROUNDS} rounds\n"
+        f"uninstall latency avg : {uninstall_ns} ns ({uninstall_ns / 1000000.0:.3f} ms) over {LATENCY_ROUNDS} rounds\n\n"
         "Files\n"
         "-----\n"
         f"baseline output : {BASELINE_OUT}\n"
