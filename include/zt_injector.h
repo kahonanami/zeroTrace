@@ -11,5 +11,5 @@ typedef struct {
     bool is_pie;
 } zt_injector_session_t;
 
-extern int zt_injector_attach(zt_injector_session_t *session, pid_t pid);
-extern void zt_injector_detach(zt_injector_session_t *session);
+int zt_injector_attach(zt_injector_session_t *session, pid_t pid);
+void zt_injector_detach(zt_injector_session_t *session);
