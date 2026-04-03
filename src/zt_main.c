@@ -123,6 +123,7 @@ int main(int argc, char *argv[]) {
     printf("ztrace get symbol: %s\n", symbol);
 
     zt_injector_session_t session;
+    uint64_t remote_entry_stub_addr;
     if(zt_injector_attach(&session, (pid_t)pid) != 0) {
         fprintf(stderr, "Failed to attach to process with PID %ld\n", pid);
         exit(EXIT_FAILURE);
@@ -133,6 +134,16 @@ int main(int argc, char *argv[]) {
            session.exe_path,
            session.is_pie,
            session.image_base);
+
+    if (zt_find_remote_symbol_addr(session.pid,
+                                   session.exe_path,
+                                   "entry_stub",
+                                   &remote_entry_stub_addr) == 0) {
+        printf("Remote entry_stub addr: 0x%llx\n",
+               (unsigned long long)remote_entry_stub_addr);
+    } else {
+        printf("Failed to resolve remote entry_stub addr from %s\n", session.exe_path);
+    }
 
     zt_probe_info_t *probe = zt_register_probe(&session, symbol);
     if (probe == NULL) {
@@ -152,16 +163,17 @@ int main(int argc, char *argv[]) {
         int i;
         uint8_t thunk_buf[ZT_THUNK_MAX_SIZE];
         size_t thunk_size;
-        uint64_t entry_stub_addr;
-
         printf("zt_enable_probe ok: orig_len=%u, orig_code=", probe->orig_len);
         for (i = 0; i < probe->orig_len; ++i) {
             printf("%02x ", probe->orig_code[i]);
         }
         printf("\n");
 
-        entry_stub_addr = (uint64_t)(uintptr_t)zt_payload_get_entry_stub_addr();
-        if (zt_build_thunk(probe, entry_stub_addr, thunk_buf, sizeof(thunk_buf), &thunk_size) != 0) {
+        if (zt_build_thunk(probe,
+                           remote_entry_stub_addr,
+                           thunk_buf,
+                           sizeof(thunk_buf),
+                           &thunk_size) != 0) {
             printf("zt_build_thunk failed for probe %lu\n", probe->probe_id);
         } else {
             size_t thunk_code_size = thunk_size - 16;

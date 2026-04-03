@@ -34,6 +34,10 @@ typedef struct {
 int zt_injector_attach(zt_injector_session_t *session, pid_t pid);
 void zt_injector_detach(zt_injector_session_t *session);
 int zt_find_symbol_addr(const char *elf_path, const char *symbol_name, uint64_t *symbol_addr_out);
+int zt_find_remote_symbol_addr(pid_t pid,
+                               const char *module_path,
+                               const char *symbol_name,
+                               uint64_t *remote_addr_out);
 zt_probe_info_t *zt_probe_find_by_symbol(zt_injector_session_t *session, const char *symbol_name);
 zt_probe_info_t *zt_probe_find_by_id(zt_injector_session_t *session, uint64_t probe_id);
 zt_probe_info_t *zt_probe_alloc(zt_injector_session_t *session, const char *symbol_name, uint64_t symbol_addr);

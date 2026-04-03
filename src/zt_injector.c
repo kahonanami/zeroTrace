@@ -310,6 +310,38 @@ int zt_find_symbol_addr(const char *elf_path, const char *symbol_name, uint64_t 
     return -1;
 }
 
+int zt_find_remote_symbol_addr(pid_t pid,
+                               const char *module_path,
+                               const char *symbol_name,
+                               uint64_t *remote_addr_out) {
+    uint64_t symbol_value;
+    uint64_t module_base;
+    bool is_dyn;
+
+    if (module_path == NULL || symbol_name == NULL || remote_addr_out == NULL) {
+        return -1;
+    }
+
+    if (zt_find_symbol_addr(module_path, symbol_name, &symbol_value) != 0) {
+        return -1;
+    }
+
+    if (zt_check_is_pie(module_path, &is_dyn) != 0) {
+        return -1;
+    }
+
+    if (is_dyn) {
+        if (zt_read_image_base(pid, module_path, &module_base) != 0) {
+            return -1;
+        }
+        *remote_addr_out = module_base + symbol_value;
+    } else {
+        *remote_addr_out = symbol_value;
+    }
+
+    return 0;
+}
+
 zt_probe_info_t *zt_probe_find_by_symbol(zt_injector_session_t *session, const char *symbol_name) {
     int i;
 
