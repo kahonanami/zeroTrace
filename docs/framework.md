@@ -6,7 +6,7 @@ zt_main 主要用于实现程序的初始化
 
 用 ptrace 调试进程，mmap 映射地址，并进行地址的初始化
 
-将 stub.S 和 zt_stub_handlers.c 编译成 so 文件，并注入子进程中，代码可以参考[linux-inject](https://github.com/gaffe23/linux-inject)
+将 stub.S 和 zt_payload.c 编译成 so 文件，并注入子进程中，代码可以参考[linux-inject](https://github.com/gaffe23/linux-inject)
 
 1. 将 so 文件注入子进程，获取相关符号的地址
 
@@ -32,7 +32,12 @@ zt_main 主要用于实现程序的初始化
 
 用 new_thunk 申请一个 thunk，获取 thunk 地址
 
-修改函数开头为 jmp thunk
+修改函数开头为 
+
+```asm
+mov rax, thunk
+jmp rax
+```
 
 如果是 untrace 函数，恢复函数开头，free_thunk
 
@@ -47,15 +52,14 @@ zt_main 主要用于实现程序的初始化
 ```asm
 thunk_func1:
     push <function id>
-    call Entry_stub
+    mov rax, entry_stub_addr
+    call rax
     lea rsp, [rsp + 8]
     <func1 的原始机器码>
     jmp (func1 + ins_len)
-    .quad Entry_stub_addr
-    .quad (func1 + ins_len)_addr
 ```
 
-由于寻址范围问题，可以把 Entry_stub 和 (func1 + ins_len) 的绝对地址写入每个 thunk 的末尾
+由于寻址范围问题，可以有如上写法
 
 new_thunk 需要参数 function_offset origin_inst origin_inst_len，根据以上参数从 pool 中申请并初始化一个 thunk，返回 thunk 的地址
 
