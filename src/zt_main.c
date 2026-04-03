@@ -12,174 +12,17 @@
 #include <sys/ptrace.h>
 #include <sys/wait.h>
 #include <sys/mman.h>
-#include <capstone/capstone.h>
 
 #include "../include/zt_log.h"
 #include "../include/zt_injector.h"
 #include "../include/zt_payload.h"
 #include "../include/zt_thunk_manager.h"
 
-#define ZT_THUNK_SUFFIX_SIZE 22
-
 static void print_usage(const char *prog) {
     fprintf(stderr,
             "Usage:\n"
             "  %s -p <pid> -s <symbol>\n",
             prog);
-}
-
-static void zt_dump_thunk_disasm(const uint8_t *code, size_t code_size) {
-    csh handle;
-    cs_insn *insn;
-    size_t count;
-    size_t i;
-
-    if (code == NULL || code_size == 0) {
-        return;
-    }
-
-    if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) != CS_ERR_OK) {
-        printf("failed to open capstone for thunk disassembly\n");
-        return;
-    }
-
-    count = cs_disasm(handle, code, code_size, 0, 0, &insn);
-    if (count == 0) {
-        printf("failed to disassemble thunk bytes\n");
-        cs_close(&handle);
-        return;
-    }
-
-    printf("Thunk disassembly:\n");
-    for (i = 0; i < count; ++i) {
-        printf("  0x%04llx: %-8s %s\n",
-               (unsigned long long)insn[i].address,
-               insn[i].mnemonic,
-               insn[i].op_str);
-    }
-
-    cs_free(insn, count);
-    cs_close(&handle);
-}
-
-static void zt_dump_thunk_tail(const uint8_t *thunk_buf, size_t thunk_size) {
-    uint64_t entry_stub_addr;
-    uint64_t continue_addr;
-
-    if (thunk_buf == NULL || thunk_size < ZT_THUNK_SUFFIX_SIZE) {
-        return;
-    }
-
-    memcpy(&entry_stub_addr,
-           thunk_buf + thunk_size - 16,
-           sizeof(entry_stub_addr));
-    memcpy(&continue_addr,
-           thunk_buf + thunk_size - 8,
-           sizeof(continue_addr));
-
-    printf("Thunk data tail:\n");
-    printf("  entry_stub_addr = 0x%llx\n", (unsigned long long)entry_stub_addr);
-    printf("  continue_addr   = 0x%llx\n", (unsigned long long)continue_addr);
-}
-
-static void zt_test_remote_rw(pid_t pid, uint64_t remote_addr) {
-    uint8_t before[16];
-    uint8_t after[16];
-    int i;
-
-    if (zt_read_remote_memory(pid, remote_addr, before, sizeof(before)) != 0) {
-        printf("zt_read_remote_memory failed at 0x%llx\n", (unsigned long long)remote_addr);
-        return;
-    }
-
-    printf("Remote bytes before write: ");
-    for (i = 0; i < (int)sizeof(before); ++i) {
-        printf("%02x ", before[i]);
-    }
-    printf("\n");
-
-    if (zt_write_remote_memory(pid, remote_addr, before, sizeof(before)) != 0) {
-        printf("zt_write_remote_memory failed at 0x%llx\n", (unsigned long long)remote_addr);
-        return;
-    }
-
-    if (zt_read_remote_memory(pid, remote_addr, after, sizeof(after)) != 0) {
-        printf("zt_read_remote_memory(after) failed at 0x%llx\n", (unsigned long long)remote_addr);
-        return;
-    }
-
-    printf("Remote bytes after write:  ");
-    for (i = 0; i < (int)sizeof(after); ++i) {
-        printf("%02x ", after[i]);
-    }
-    printf("\n");
-
-    if (memcmp(before, after, sizeof(before)) == 0) {
-        printf("remote read/write roundtrip ok\n");
-    } else {
-        printf("remote read/write roundtrip mismatch\n");
-    }
-}
-
-static void zt_test_remote_thunk_rw(pid_t pid,
-                                    uint64_t remote_addr,
-                                    const uint8_t *thunk_buf,
-                                    size_t thunk_size) {
-    uint8_t remote_buf[ZT_THUNK_MAX_SIZE];
-    int i;
-
-    if (thunk_buf == NULL || thunk_size == 0 || thunk_size > sizeof(remote_buf)) {
-        printf("invalid thunk buffer for remote write test\n");
-        return;
-    }
-
-    if (zt_write_remote_memory(pid, remote_addr, thunk_buf, thunk_size) != 0) {
-        printf("failed to write thunk to remote addr 0x%llx\n",
-               (unsigned long long)remote_addr);
-        return;
-    }
-
-    if (zt_read_remote_memory(pid, remote_addr, remote_buf, thunk_size) != 0) {
-        printf("failed to read thunk back from remote addr 0x%llx\n",
-               (unsigned long long)remote_addr);
-        return;
-    }
-
-    printf("Remote thunk bytes (%zu): ", thunk_size);
-    for (i = 0; i < (int)thunk_size; ++i) {
-        printf("%02x ", remote_buf[i]);
-    }
-    printf("\n");
-
-    if (memcmp(thunk_buf, remote_buf, thunk_size) == 0) {
-        printf("remote thunk write/readback ok at 0x%llx\n",
-               (unsigned long long)remote_addr);
-    } else {
-        printf("remote thunk write/readback mismatch at 0x%llx\n",
-               (unsigned long long)remote_addr);
-    }
-}
-
-static void zt_dump_remote_patch_bytes(pid_t pid, uint64_t remote_addr, size_t size) {
-    uint8_t patch[ZT_PROBE_ORIG_CODE_MAX];
-    int i;
-
-    if (size == 0 || size > sizeof(patch)) {
-        printf("invalid patch size: %zu\n", size);
-        return;
-    }
-
-    if (zt_read_remote_memory(pid, remote_addr, patch, size) != 0) {
-        printf("failed to read installed patch at 0x%llx\n",
-               (unsigned long long)remote_addr);
-        return;
-    }
-
-    printf("Installed patch bytes: ");
-    for (i = 0; i < (int)size; ++i) {
-        printf("%02x ", patch[i]);
-    }
-    printf("\n");
 }
 
 static void zt_dump_trace_events(const zt_trace_buffer_t *buffer, size_t max_events) {
@@ -465,21 +308,15 @@ int main(int argc, char *argv[]) {
            probe->probe_id,
            probe->symbol,
            probe->symbol_addr);
-    printf("Current probe count: %d\n", session.probe_count);
-
-    zt_test_remote_rw(session.pid, probe->symbol_addr);
 
     if (zt_enable_probe(&session, probe->probe_id) != 0) {
         printf("zt_enable_probe failed for probe %lu\n", probe->probe_id);
     } else {
-        int i;
         uint8_t thunk_buf[ZT_THUNK_MAX_SIZE];
         size_t thunk_size;
-        printf("zt_enable_probe ok: orig_len=%u, orig_code=", probe->orig_len);
-        for (i = 0; i < probe->orig_len; ++i) {
-            printf("%02x ", probe->orig_code[i]);
-        }
-        printf("\n");
+        printf("Probe enabled: id=%lu, patch_len=%u\n",
+               probe->probe_id,
+               probe->orig_len);
 
         if (zt_build_thunk(probe,
                            remote_entry_stub_addr,
@@ -488,14 +325,13 @@ int main(int argc, char *argv[]) {
                            &thunk_size) != 0) {
             printf("zt_build_thunk failed for probe %lu\n", probe->probe_id);
         } else {
-            size_t thunk_code_size = thunk_size - 16;
-
-            printf("Thunk bytes (%zu): ", thunk_size);
-            for (i = 0; i < (int)thunk_size; ++i) {
-                printf("%02x ", thunk_buf[i]);
+            if (zt_write_remote_memory(session.pid, remote_thunk_addr, thunk_buf, thunk_size) != 0) {
+                printf("failed to write thunk to 0x%llx\n",
+                       (unsigned long long)remote_thunk_addr);
+                zt_injector_detach(&session);
+                exit(EXIT_FAILURE);
             }
-            printf("\n");
-            zt_test_remote_thunk_rw(session.pid, remote_thunk_addr, thunk_buf, thunk_size);
+
             if (zt_install_probe_patch(&session, probe->probe_id, remote_thunk_addr) == 0) {
                 zt_trace_buffer_t trace_buffer;
                 int status;
@@ -503,9 +339,6 @@ int main(int argc, char *argv[]) {
                 printf("probe patch installed at 0x%llx -> thunk 0x%llx\n",
                        (unsigned long long)probe->symbol_addr,
                        (unsigned long long)remote_thunk_addr);
-                zt_dump_remote_patch_bytes(session.pid,
-                                           probe->symbol_addr,
-                                           ZT_PROBE_PATCH_LEN);
 
                 if (ptrace(PTRACE_CONT, session.pid, NULL, NULL) == 0) {
                     sleep(2);
@@ -529,17 +362,12 @@ int main(int argc, char *argv[]) {
                 if (zt_uninstall_probe_patch(&session, probe->probe_id) == 0) {
                     printf("probe patch restored at 0x%llx\n",
                            (unsigned long long)probe->symbol_addr);
-                    zt_dump_remote_patch_bytes(session.pid,
-                                               probe->symbol_addr,
-                                               probe->orig_len);
                 } else {
                     printf("failed to restore probe patch for probe %lu\n", probe->probe_id);
                 }
             } else {
                 printf("failed to install probe patch for probe %lu\n", probe->probe_id);
             }
-            zt_dump_thunk_disasm(thunk_buf, thunk_code_size);
-            zt_dump_thunk_tail(thunk_buf, thunk_size);
         }
     }
 
