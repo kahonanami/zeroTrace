@@ -516,6 +516,21 @@ static int cmd_info(char *args) {
             return 0;
         }
 
+        printf("%-4s %-20s %-10s %-5s %-18s %s\n",
+               "id",
+               "symbol",
+               "state",
+               "len",
+               "addr",
+               "module");
+        printf("%-4s %-20s %-10s %-5s %-18s %s\n",
+               "--",
+               "--------------------",
+               "----------",
+               "-----",
+               "------------------",
+               "------");
+
         for (i = 0; i < ZT_PROBES_CAPACITY; ++i) {
             zt_probe_info_t *probe = &g_cli_session.probes[i];
 
@@ -523,13 +538,13 @@ static int cmd_info(char *args) {
                 continue;
             }
 
-            printf("id=%lu symbol=%s module=%s addr=0x%lx enabled=%d orig_len=%u\n",
+            printf("%-4lu %-20.20s %-10s %-5u 0x%016lx %s\n",
                    probe->probe_id,
                    probe->target.symbol,
-                   probe->target.module_path,
+                   zt_probe_state_name(probe->state),
+                   probe->orig_len,
                    probe->target.remote_addr,
-                   probe->enabled,
-                   probe->orig_len);
+                   probe->target.module_path);
         }
         return 0;
     }

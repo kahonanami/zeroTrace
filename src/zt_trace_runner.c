@@ -52,7 +52,7 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
         return -1;
     }
 
-    if (probe->thunk_addr != 0) {
+    if (probe->state == ZT_PROBE_INSTALLED) {
         if (probe_out != NULL) {
             *probe_out = probe;
         }
@@ -403,7 +403,7 @@ int zt_trace_disable_probe(zt_injector_session_t *session, uint64_t probe_id) {
     }
 
     probe = zt_probe_find_by_id(session, probe_id);
-    if (probe == NULL || probe->thunk_addr == 0) {
+    if (probe == NULL || probe->state != ZT_PROBE_INSTALLED) {
         return -1;
     }
 
@@ -436,7 +436,7 @@ int zt_trace_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
         return -1;
     }
 
-    if (probe->thunk_addr != 0) {
+    if (probe->state == ZT_PROBE_INSTALLED) {
         return 0;
     }
 
@@ -512,7 +512,7 @@ static int zt_trace_stop(void) {
             continue;
         }
 
-        if (probe->thunk_addr != 0 &&
+        if (probe->state == ZT_PROBE_INSTALLED &&
             zt_uninstall_probe_patch(g_active_trace.session, probe->probe_id) != 0) {
             ret = -1;
         }
@@ -624,7 +624,7 @@ int zt_trace_remove_probe(zt_injector_session_t *session, uint64_t probe_id) {
     }
     g_active_trace.target_running = 0;
 
-    if (probe->thunk_addr != 0 &&
+    if (probe->state == ZT_PROBE_INSTALLED &&
         zt_uninstall_probe_patch(session, probe_id) != 0) {
         return -1;
     }

@@ -17,13 +17,21 @@ typedef struct {
     uint64_t remote_addr;
 } zt_symbol_target_t;
 
+typedef enum {
+    ZT_PROBE_EMPTY = 0,
+    ZT_PROBE_RESOLVED,
+    ZT_PROBE_PREPARED,
+    ZT_PROBE_INSTALLED,
+    ZT_PROBE_DISABLED,
+} zt_probe_state_t;
+
 typedef struct{
     uint64_t probe_id;
     zt_symbol_target_t target;
     uint64_t thunk_addr;
     uint8_t orig_code[ZT_PROBE_ORIG_CODE_MAX];
     uint8_t orig_len;
-    bool enabled;
+    zt_probe_state_t state;
 } zt_probe_info_t;
 
 typedef struct {
@@ -66,6 +74,7 @@ zt_probe_info_t *zt_probe_find_by_symbol(zt_injector_session_t *session, const c
 zt_probe_info_t *zt_probe_find_by_id(zt_injector_session_t *session, uint64_t probe_id);
 zt_probe_info_t *zt_probe_alloc(zt_injector_session_t *session, const zt_symbol_target_t *target);
 zt_probe_info_t *zt_register_probe(zt_injector_session_t *session, const char *symbol_name);
+const char *zt_probe_state_name(zt_probe_state_t state);
 int zt_unregister_probe(zt_injector_session_t *session, uint64_t probe_id);
 int zt_enable_probe(zt_injector_session_t *session, uint64_t probe_id);
 int zt_install_probe_patch(zt_injector_session_t *session,

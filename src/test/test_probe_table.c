@@ -14,7 +14,8 @@ int main(void) {
     session.next_probe_id = 1;
 
     probe1 = zt_probe_alloc(&session, &target1);
-    if (probe1 == NULL || probe1->probe_id != 1 || session.probe_count != 1) {
+    if (probe1 == NULL || probe1->probe_id != 1 || session.probe_count != 1 ||
+        probe1->state != ZT_PROBE_RESOLVED) {
         fprintf(stderr, "failed to allocate first probe\n");
         return 1;
     }
@@ -26,7 +27,8 @@ int main(void) {
     }
 
     probe2 = zt_probe_alloc(&session, &target2);
-    if (probe2 == NULL || probe2->probe_id != 2 || session.probe_count != 2) {
+    if (probe2 == NULL || probe2->probe_id != 2 || session.probe_count != 2 ||
+        probe2->state != ZT_PROBE_RESOLVED) {
         fprintf(stderr, "failed to allocate second probe\n");
         return 1;
     }

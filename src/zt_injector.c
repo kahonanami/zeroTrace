@@ -616,6 +616,23 @@ int zt_find_remote_symbol_addr(pid_t pid,
     return 0;
 }
 
+const char *zt_probe_state_name(zt_probe_state_t state) {
+    switch (state) {
+        case ZT_PROBE_EMPTY:
+            return "empty";
+        case ZT_PROBE_RESOLVED:
+            return "resolved";
+        case ZT_PROBE_PREPARED:
+            return "prepared";
+        case ZT_PROBE_INSTALLED:
+            return "installed";
+        case ZT_PROBE_DISABLED:
+            return "disabled";
+        default:
+            return "unknown";
+    }
+}
+
 int zt_resolve_symbol_target(zt_injector_session_t *session,
                              const char *symbol_name,
                              zt_symbol_target_t *target_out) {
@@ -740,7 +757,7 @@ zt_probe_info_t *zt_probe_alloc(zt_injector_session_t *session, const zt_symbol_
         session->probes[i].target = *target;
         session->probes[i].thunk_addr = 0;
         session->probes[i].orig_len = 0;
-        session->probes[i].enabled = false;
+        session->probes[i].state = ZT_PROBE_RESOLVED;
         ++session->probe_count;
         return &session->probes[i];
     }
@@ -803,7 +820,7 @@ int zt_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
         return -1;
     }
 
-    if (probe->enabled) {
+    if (probe->state == ZT_PROBE_PREPARED || probe->state == ZT_PROBE_INSTALLED) {
         return 0;
     }
 
@@ -825,7 +842,7 @@ int zt_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
 
     memcpy(probe->orig_code, code, patch_len);
     probe->orig_len = (uint8_t)patch_len;
-    probe->enabled = true;
+    probe->state = ZT_PROBE_PREPARED;
     return 0;
 }
 
@@ -844,7 +861,7 @@ int zt_install_probe_patch(zt_injector_session_t *session,
         return -1;
     }
 
-    if (!probe->enabled || probe->orig_len < ZT_PROBE_PATCH_LEN) {
+    if (probe->state != ZT_PROBE_PREPARED || probe->orig_len < ZT_PROBE_PATCH_LEN) {
         return -1;
     }
 
@@ -863,6 +880,7 @@ int zt_install_probe_patch(zt_injector_session_t *session,
     }
 
     probe->thunk_addr = thunk_addr;
+    probe->state = ZT_PROBE_INSTALLED;
     return 0;
 }
 
@@ -890,7 +908,7 @@ int zt_uninstall_probe_patch(zt_injector_session_t *session, uint64_t probe_id) 
     }
 
     probe->thunk_addr = 0;
-    probe->enabled = false;
+    probe->state = ZT_PROBE_DISABLED;
     return 0;
 }
 
