@@ -84,6 +84,7 @@ int main(int argc, char *argv[]) {
            probe->probe_id,
            probe->symbol,
            probe->symbol_addr);
+    printf("Current probe count: %d\n", session.probe_count);
 
     return 0;
 }

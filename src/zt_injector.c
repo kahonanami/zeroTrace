@@ -301,6 +301,26 @@ zt_probe_info_t *zt_register_probe(zt_injector_session_t *session, const char *s
     return zt_probe_alloc(session, symbol_name, remote_addr);
 }
 
+int zt_unregister_probe(zt_injector_session_t *session, uint64_t probe_id) {
+    zt_probe_info_t *probe;
+
+    if (session == NULL || probe_id == 0) {
+        return -1;
+    }
+
+    probe = zt_probe_find_by_id(session, probe_id);
+    if (probe == NULL) {
+        return -1;
+    }
+
+    memset(probe, 0, sizeof(*probe));
+    if (session->probe_count > 0) {
+        --session->probe_count;
+    }
+
+    return 0;
+}
+
 int zt_injector_attach(zt_injector_session_t *session, pid_t pid) {
     int ret;
     size_t path_len;

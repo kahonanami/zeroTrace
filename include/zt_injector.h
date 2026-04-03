@@ -35,3 +35,4 @@ zt_probe_info_t *zt_probe_find_by_symbol(zt_injector_session_t *session, const c
 zt_probe_info_t *zt_probe_find_by_id(zt_injector_session_t *session, uint64_t probe_id);
 zt_probe_info_t *zt_probe_alloc(zt_injector_session_t *session, const char *symbol_name, uint64_t symbol_addr);
 zt_probe_info_t *zt_register_probe(zt_injector_session_t *session, const char *symbol_name);
+int zt_unregister_probe(zt_injector_session_t *session, uint64_t probe_id);
