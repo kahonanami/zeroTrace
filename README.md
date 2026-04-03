@@ -1,8 +1,6 @@
-# zeroTrace
+# zeroTrace: A Lightweight Dynamic probe for User Space
 
 `zeroTrace` 是一个基于 `ptrace` 的用户态函数追踪工具。它会把 `libzt_payload.so` 注入到目标进程，给指定函数安装探针，并在 CLI 中持续输出函数入口参数和返回值。
-
-当前版本的主要使用方式是交互式 CLI。
 
 ## 功能
 
