@@ -278,28 +278,33 @@ static int cmd_trace(char *args) {
         return 0;
     }
 
-    if (zt_cli_stop_target() != 0) {
+    if (!zt_trace_is_active() && zt_cli_stop_target() != 0) {
         printf("Failed to stop pid %d before tracing\n", g_cli_session.pid);
         return 0;
     }
 
-    if (getcwd(cwd, sizeof(cwd)) == NULL ||
-        snprintf(g_cli_log_path,
-                 sizeof(g_cli_log_path),
-                 "%s/ztrace.%d.log",
-                 cwd,
-                 g_cli_session.pid) >= (int)sizeof(g_cli_log_path)) {
-        printf("Failed to build trace log path\n");
-        return 0;
-    }
+    if (!zt_trace_is_active()) {
+        if (getcwd(cwd, sizeof(cwd)) == NULL ||
+            snprintf(g_cli_log_path,
+                     sizeof(g_cli_log_path),
+                     "%s/ztrace.%d.log",
+                     cwd,
+                     g_cli_session.pid) >= (int)sizeof(g_cli_log_path)) {
+            printf("Failed to build trace log path\n");
+            return 0;
+        }
 
-    g_cli_log_offset = 0;
-    g_cli_last_poll = 0;
-    if (zt_trace_start_in_session(&g_cli_session, symbol, g_cli_log_path) != 0) {
-        printf("Failed to trace %s\n", symbol);
-        g_cli_log_path[0] = '\0';
         g_cli_log_offset = 0;
         g_cli_last_poll = 0;
+    }
+
+    if (zt_trace_start_in_session(&g_cli_session, symbol, g_cli_log_path) != 0) {
+        printf("Failed to trace %s\n", symbol);
+        if (!zt_trace_is_active()) {
+            g_cli_log_path[0] = '\0';
+            g_cli_log_offset = 0;
+            g_cli_last_poll = 0;
+        }
         return 0;
     }
 
@@ -348,29 +353,18 @@ static int cmd_untrace(char *args) {
         return 0;
     }
 
-    if (zt_trace_is_active()) {
-        if (zt_trace_stop() != 0) {
-            printf("Failed to stop active trace before untrace\n");
-            return 0;
-        }
-
-        if (ptrace(PTRACE_CONT, g_cli_session.pid, NULL, NULL) != 0) {
-            printf("Trace stopped, but failed to continue pid %d\n", g_cli_session.pid);
-            return 0;
-        }
-
-        g_cli_log_path[0] = '\0';
-        g_cli_log_offset = 0;
-        g_cli_last_poll = 0;
-    }
-
     probe_id = strtol(target, &endptr, 10);
     if (target != endptr && *endptr == '\0' && probe_id > 0) {
-        if (zt_unregister_probe(&g_cli_session, (uint64_t)probe_id) != 0) {
+        if (zt_trace_remove_probe(&g_cli_session, (uint64_t)probe_id) != 0) {
             printf("Failed to remove probe id %ld\n", probe_id);
             return 0;
         }
 
+        if (!zt_trace_is_active()) {
+            g_cli_log_path[0] = '\0';
+            g_cli_log_offset = 0;
+            g_cli_last_poll = 0;
+        }
         printf("Removed probe id %ld\n", probe_id);
         return 0;
     }
@@ -381,11 +375,16 @@ static int cmd_untrace(char *args) {
         return 0;
     }
 
-    if (zt_unregister_probe(&g_cli_session, probe->probe_id) != 0) {
+    if (zt_trace_remove_probe(&g_cli_session, probe->probe_id) != 0) {
         printf("Failed to remove probe %s\n", target);
         return 0;
     }
 
+    if (!zt_trace_is_active()) {
+        g_cli_log_path[0] = '\0';
+        g_cli_log_offset = 0;
+        g_cli_last_poll = 0;
+    }
     printf("Removed probe %s\n", target);
     return 0;
 }
