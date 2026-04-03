@@ -4,6 +4,9 @@
 #include <stdbool.h>
 #include <errno.h>
 #include <signal.h>
+#include <limits.h>
+#include <time.h>
+#include <unistd.h>
 #include <sys/ptrace.h>
 #include <sys/wait.h>
 
@@ -19,6 +22,7 @@ static int cmd_exit(char *args);
 static int cmd_attach(char *args);
 static int cmd_detach(char *args);
 static int cmd_trace(char *args);
+static int cmd_stop(char *args);
 static int cmd_untrace(char *args);
 static int cmd_info(char *args);
 static int cmd_continue(char *args);
@@ -34,6 +38,7 @@ static struct {
     {"attach", "Attach to target process: attach <pid>", cmd_attach},
     {"detach", "Detach from current target", cmd_detach},
     {"trace", "Register and enable a probe: trace <symbol>", cmd_trace},
+    {"stop", "Stop current trace", cmd_stop},
     {"untrace", "Remove a probe: untrace <symbol|id>", cmd_untrace},
     {"info", "Show info: info target | info probes", cmd_info},
     {"continue", "Continue the stopped target process", cmd_continue},
@@ -41,6 +46,9 @@ static struct {
 
 static zt_injector_session_t g_cli_session;
 static bool g_cli_attached;
+static char g_cli_log_path[PATH_MAX];
+static long g_cli_log_offset;
+static time_t g_cli_last_poll;
 
 static int zt_cli_wait_for_stop(pid_t pid) {
     int status;
@@ -94,6 +102,78 @@ static char *rl_gets(void) {
     }
 
     return line_read;
+}
+
+static void zt_cli_print_log_updates(void) {
+    FILE *fp;
+    char line[512];
+    char *saved_line;
+    int saved_point;
+    long offset;
+    int printed;
+
+    if (g_cli_log_path[0] == '\0') {
+        return;
+    }
+
+    fp = fopen(g_cli_log_path, "r");
+    if (fp == NULL) {
+        return;
+    }
+
+    if (fseek(fp, g_cli_log_offset, SEEK_SET) != 0) {
+        fclose(fp);
+        return;
+    }
+
+    saved_line = rl_copy_text(0, rl_end);
+    saved_point = rl_point;
+    printed = 0;
+
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        if (!printed) {
+            printf("\r\033[2K");
+            printed = 1;
+        }
+        fputs(line, stdout);
+    }
+
+    offset = ftell(fp);
+    fclose(fp);
+
+    if (offset >= 0) {
+        g_cli_log_offset = offset;
+    }
+
+    if (printed) {
+        rl_on_new_line();
+        rl_replace_line(saved_line, 0);
+        rl_point = saved_point <= rl_end ? saved_point : rl_end;
+        rl_redisplay();
+        fflush(stdout);
+    }
+
+    free(saved_line);
+}
+
+static int zt_cli_event_hook(void) {
+    time_t now;
+
+    if (!zt_trace_is_active()) {
+        return 0;
+    }
+
+    now = time(NULL);
+    if (now == g_cli_last_poll) {
+        return 0;
+    }
+
+    g_cli_last_poll = now;
+    if (zt_trace_poll() == 0) {
+        zt_cli_print_log_updates();
+    }
+
+    return 0;
 }
 
 static int cmd_help(char *args) {
@@ -185,6 +265,7 @@ static int cmd_detach(char *args) {
 
 static int cmd_trace(char *args) {
     char *symbol;
+    char cwd[PATH_MAX];
 
     if (!g_cli_attached) {
         printf("No target attached\n");
@@ -202,10 +283,51 @@ static int cmd_trace(char *args) {
         return 0;
     }
 
-    if (zt_trace_symbol_in_session(&g_cli_session, symbol) != 0) {
-        printf("Failed to trace %s\n", symbol);
+    if (getcwd(cwd, sizeof(cwd)) == NULL ||
+        snprintf(g_cli_log_path,
+                 sizeof(g_cli_log_path),
+                 "%s/ztrace.%d.log",
+                 cwd,
+                 g_cli_session.pid) >= (int)sizeof(g_cli_log_path)) {
+        printf("Failed to build trace log path\n");
+        return 0;
     }
 
+    g_cli_log_offset = 0;
+    g_cli_last_poll = 0;
+    if (zt_trace_start_in_session(&g_cli_session, symbol, g_cli_log_path) != 0) {
+        printf("Failed to trace %s\n", symbol);
+        g_cli_log_path[0] = '\0';
+        g_cli_log_offset = 0;
+        g_cli_last_poll = 0;
+        return 0;
+    }
+
+    printf("Tracing %s, log file: %s\n", symbol, g_cli_log_path);
+    return 0;
+}
+
+static int cmd_stop(char *args) {
+    (void)args;
+
+    if (!zt_trace_is_active()) {
+        printf("No active trace\n");
+        return 0;
+    }
+
+    if (zt_trace_stop() != 0) {
+        printf("Failed to stop trace\n");
+        return 0;
+    }
+
+    if (ptrace(PTRACE_CONT, g_cli_session.pid, NULL, NULL) != 0) {
+        printf("Trace stopped, but failed to continue pid %d\n", g_cli_session.pid);
+        return 0;
+    }
+
+    g_cli_log_path[0] = '\0';
+    g_cli_log_offset = 0;
+    printf("Trace stopped\n");
     return 0;
 }
 
@@ -224,6 +346,22 @@ static int cmd_untrace(char *args) {
     if (target == NULL) {
         printf("Usage: untrace <symbol|id>\n");
         return 0;
+    }
+
+    if (zt_trace_is_active()) {
+        if (zt_trace_stop() != 0) {
+            printf("Failed to stop active trace before untrace\n");
+            return 0;
+        }
+
+        if (ptrace(PTRACE_CONT, g_cli_session.pid, NULL, NULL) != 0) {
+            printf("Trace stopped, but failed to continue pid %d\n", g_cli_session.pid);
+            return 0;
+        }
+
+        g_cli_log_path[0] = '\0';
+        g_cli_log_offset = 0;
+        g_cli_last_poll = 0;
     }
 
     probe_id = strtol(target, &endptr, 10);
@@ -320,6 +458,7 @@ static int cmd_continue(char *args) {
 void zt_cli_main_loop(void) {
     char *input;
 
+    rl_event_hook = zt_cli_event_hook;
     while ((input = rl_gets()) != NULL) {
         char *cmd;
         char *args;
