@@ -54,12 +54,14 @@ static int zt_wait_for_tracee_stop(pid_t pid) {
     }
 }
 
-static void zt_dump_trace_events_since(const zt_trace_buffer_t *buffer, uint64_t *last_seq) {
+static void zt_dump_trace_events_since(zt_injector_session_t *session,
+                                       const zt_trace_buffer_t *buffer,
+                                       uint64_t *last_seq) {
     uint64_t write_seq;
     uint64_t start_seq;
     uint64_t seq;
 
-    if (buffer == NULL || last_seq == NULL) {
+    if (session == NULL || buffer == NULL || last_seq == NULL) {
         return;
     }
 
@@ -69,9 +71,7 @@ static void zt_dump_trace_events_since(const zt_trace_buffer_t *buffer, uint64_t
     }
 
     write_seq = buffer->write_seq;
-    printf("Trace buffer write_seq: %llu\n", (unsigned long long)write_seq);
     if (write_seq == 0 || write_seq <= *last_seq) {
-        printf("No trace events captured yet\n");
         return;
     }
 
@@ -80,24 +80,37 @@ static void zt_dump_trace_events_since(const zt_trace_buffer_t *buffer, uint64_t
         start_seq = write_seq - ZT_TRACE_EVENT_CAPACITY + 1;
     }
 
-    printf("Trace events:\n");
     for (seq = start_seq; seq <= write_seq; ++seq) {
         const zt_trace_event_t *event = &buffer->events[(seq - 1) % ZT_TRACE_EVENT_CAPACITY];
+        const zt_probe_info_t *probe;
+        const char *symbol_name;
 
         if (event->committed_seq != seq) {
             continue;
         }
 
-        printf("  seq=%zu probe=%llu type=%s values=[0x%llx 0x%llx 0x%llx 0x%llx 0x%llx 0x%llx]\n",
-               (size_t)seq,
-               (unsigned long long)event->probe_id,
-               event->event_type == ZT_TRACE_EVENT_ENTRY ? "entry" : "return",
-               (unsigned long long)event->value0,
-               (unsigned long long)event->value1,
-               (unsigned long long)event->value2,
-               (unsigned long long)event->value3,
-               (unsigned long long)event->value4,
-               (unsigned long long)event->value5);
+        probe = zt_probe_find_by_id(session, event->probe_id);
+        symbol_name = probe != NULL ? probe->symbol : "<unknown>";
+
+        if (event->event_type == ZT_TRACE_EVENT_ENTRY) {
+            printf("[entry ] %s(rdi=0x%llx, rsi=0x%llx, rdx=0x%llx, rcx=0x%llx, r8=0x%llx, r9=0x%llx)\n",
+                   symbol_name,
+                   (unsigned long long)event->value0,
+                   (unsigned long long)event->value1,
+                   (unsigned long long)event->value2,
+                   (unsigned long long)event->value3,
+                   (unsigned long long)event->value4,
+                   (unsigned long long)event->value5);
+        } else if (event->event_type == ZT_TRACE_EVENT_RETURN) {
+            printf("[return] %s -> 0x%llx\n",
+                   symbol_name,
+                   (unsigned long long)event->value0);
+        } else {
+            printf("[event  ] %s type=%llu seq=%zu\n",
+                   symbol_name,
+                   (unsigned long long)event->event_type,
+                   (size_t)seq);
+        }
     }
 
     *last_seq = write_seq;
@@ -310,7 +323,7 @@ static void zt_capture_trace_loop(zt_injector_session_t *session,
             break;
         }
 
-        zt_dump_trace_events_since(&trace_buffer, &last_seq);
+        zt_dump_trace_events_since(session, &trace_buffer, &last_seq);
     }
 
     signal(SIGINT, SIG_IGN);
