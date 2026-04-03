@@ -209,19 +209,27 @@ ztrace vs uprobe      : 16.39x lower overhead
 - 明显低于题目要求的 `< 1000 ns`
 - 相比 `uprobe`，额外开销约低 `16.39x`
 
+## TODO List
+
+- [ ] 对于已知开源库函数，优化输出格式，支持解析字符串等参数/结构体
+- [ ] 补充浮点寄存器 / SIMD 上下文保存与恢复验证
+- [ ] 增强信号安全测试，覆盖目标进程收到异步信号时的 trace 行为
+- [ ] 优化 `zt_trace_poll()` 的轮询策略，减少对目标进程的打断
+- [ ] 补充探针安装 / 清理延迟的自动化测量
+
 ## 项目结构
 
-- [src/zt_cli.c](/home/azusaq/zeroTrace/src/zt_cli.c)
+- [src/zt_cli.c](./src/zt_cli.c)
   CLI 命令入口
-- [src/zt_injector.c](/home/azusaq/zeroTrace/src/zt_injector.c)
+- [src/zt_injector.c](./src/zt_injector.c)
   `ptrace`、远程内存读写、远程调用、probe 管理
-- [src/zt_trace_runner.c](/home/azusaq/zeroTrace/src/zt_trace_runner.c)
+- [src/zt_trace_runner.c](./src/zt_trace_runner.c)
   payload 初始化、trace 轮询、probe 安装/卸载
-- [src/zt_thunk_manager.c](/home/azusaq/zeroTrace/src/zt_thunk_manager.c)
+- [src/zt_thunk_manager.c](./src/zt_thunk_manager.c)
   thunk 构造
-- [src/zt_payload.c](/home/azusaq/zeroTrace/src/zt_payload.c)
+- [src/zt_payload.c](./src/zt_payload.c)
   注入到目标进程中的 payload
-- [src/zt_stub.S](/home/azusaq/zeroTrace/src/zt_stub.S)
+- [src/zt_stub.S](./src/zt_stub.S)
   入口 / 返回 stub
 
 ## 说明
@@ -232,4 +240,4 @@ ztrace vs uprobe      : 16.39x lower overhead
 
 更底层的设计说明可以参考：
 
-- [docs/framework.md](/home/azusaq/zeroTrace/docs/framework.md)
+- [docs/framework.md](./docs/framework.md)
