@@ -68,7 +68,22 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    printf("Successfully attached to process with PID %d, %s\n, %d, image_base: 0x%lX", session.pid, session.exe_path, session.is_pie, session.image_base);
+    printf("Successfully attached to process with PID %d, %s, is_pie: %d, image_base: 0x%lX\n",
+           session.pid,
+           session.exe_path,
+           session.is_pie,
+           session.image_base);
+
+    zt_probe_info_t *probe = zt_register_probe(&session, symbol);
+    if (probe == NULL) {
+        fprintf(stderr, "Failed to register probe for symbol %s\n", symbol);
+        exit(EXIT_FAILURE);
+    }
+
+    printf("Registered probe: id=%lu, symbol=%s, addr=0x%lX\n",
+           probe->probe_id,
+           probe->symbol,
+           probe->symbol_addr);
 
     return 0;
 }

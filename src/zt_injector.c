@@ -8,51 +8,76 @@
 #include <errno.h>
 #include <limits.h>
 #include <sys/types.h>
+#include <stdlib.h>
 
 #include "../include/zt_injector.h"
 
-/*Created by Gemini*/
-static int zt_check_is_pie(const char* exe_path, bool* is_pie) {
-    if (!exe_path || !is_pie) {
-        return -1;
+static int zt_read_elf_header(const char *exe_path, Elf64_Ehdr *header) {
+    int fd;
+    ssize_t bytes_read;
+
+    if (exe_path == NULL || header == NULL) {
+        return -EINVAL;
     }
 
-    int fd = open(exe_path, O_RDONLY);
+    fd = open(exe_path, O_RDONLY);
     if (fd < 0) {
-        return -1;
+        return -errno;
     }
 
-    Elf64_Ehdr header;
-    ssize_t bytes_read = read(fd, &header, sizeof(header));
+    bytes_read = pread(fd, header, sizeof(*header), 0);
     close(fd);
 
-    if (bytes_read < (ssize_t)sizeof(header)) {
-        return -1;
+    if (bytes_read != (ssize_t)sizeof(*header)) {
+        return bytes_read < 0 ? -errno : -EINVAL;
     }
 
-    if (header.e_ident[EI_MAG0] != ELFMAG0 ||
-        header.e_ident[EI_MAG1] != ELFMAG1 ||
-        header.e_ident[EI_MAG2] != ELFMAG2 ||
-        header.e_ident[EI_MAG3] != ELFMAG3) {
-        return -1;
+    if (memcmp(header->e_ident, ELFMAG, SELFMAG) != 0) {
+        return -EINVAL;
     }
 
-    if (header.e_type == ET_DYN) {
-        *is_pie = true;
-        return 0;
-    } else if (header.e_type == ET_EXEC) {
-        *is_pie = false;
-        return 0;
+    if (header->e_ident[EI_CLASS] != ELFCLASS64 ||
+        header->e_ident[EI_DATA] != ELFDATA2LSB ||
+        header->e_ident[EI_VERSION] != EV_CURRENT) {
+        return -EINVAL;
     }
 
-    return -1;
+    return 0;
 }
 
-/*Created by Gemini*/
+static int zt_check_is_pie(const char *exe_path, bool *is_pie) {
+    Elf64_Ehdr header;
+    int ret;
+
+    if (is_pie == NULL) {
+        return -EINVAL;
+    }
+
+    ret = zt_read_elf_header(exe_path, &header);
+    if (ret != 0) {
+        return ret;
+    }
+
+    switch (header.e_type) {
+        case ET_DYN:
+            *is_pie = true;
+            return 0;
+        case ET_EXEC:
+            *is_pie = false;
+            return 0;
+        default:
+            return -EINVAL;
+    }
+}
+
 static int zt_read_image_base(pid_t pid, const char *image_path, uint64_t *base_out) {
     char maps_path[64];
     FILE *fp;
     char line[PATH_MAX + 128];
+
+    if (image_path == NULL || base_out == NULL) {
+        return -EINVAL;
+    }
 
     snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
     fp = fopen(maps_path, "r");
@@ -82,6 +107,200 @@ static int zt_read_image_base(pid_t pid, const char *image_path, uint64_t *base_
     return -ENOENT;
 }
 
+int zt_find_symbol_addr(const char *elf_path, const char *symbol_name, uint64_t *symbol_addr_out) {
+    int fd;
+    Elf64_Ehdr ehdr;
+    Elf64_Shdr *shdrs;
+    int i;
+    int ret;
+
+    if (elf_path == NULL || symbol_name == NULL || symbol_addr_out == NULL) {
+        return -1;
+    }
+
+    ret = zt_read_elf_header(elf_path, &ehdr);
+    if (ret != 0) {
+        return -1;
+    }
+
+    fd = open(elf_path, O_RDONLY);
+    if (fd < 0) {
+        return -1;
+    }
+
+    shdrs = malloc(ehdr.e_shentsize * ehdr.e_shnum);
+    if (shdrs == NULL) {
+        close(fd);
+        return -1;
+    }
+
+    if (pread(fd, shdrs, ehdr.e_shentsize * ehdr.e_shnum, ehdr.e_shoff) !=
+        (ssize_t)(ehdr.e_shentsize * ehdr.e_shnum)) {
+        free(shdrs);
+        close(fd);
+        return -1;
+    }
+
+    for (i = 0; i < ehdr.e_shnum; ++i) {
+        Elf64_Shdr *symtab = &shdrs[i];
+        Elf64_Shdr *strtab;
+        Elf64_Sym *symbols;
+        char *strings;
+        size_t symbol_count;
+        size_t j;
+
+        if (symtab->sh_type != SHT_SYMTAB && symtab->sh_type != SHT_DYNSYM) {
+            continue;
+        }
+
+        if (symtab->sh_link >= ehdr.e_shnum || symtab->sh_entsize == 0) {
+            continue;
+        }
+
+        strtab = &shdrs[symtab->sh_link];
+        symbols = malloc(symtab->sh_size);
+        strings = malloc(strtab->sh_size);
+        if (symbols == NULL || strings == NULL) {
+            free(symbols);
+            free(strings);
+            free(shdrs);
+            close(fd);
+            return -1;
+        }
+
+        if (pread(fd, symbols, symtab->sh_size, symtab->sh_offset) != (ssize_t)symtab->sh_size ||
+            pread(fd, strings, strtab->sh_size, strtab->sh_offset) != (ssize_t)strtab->sh_size) {
+            free(symbols);
+            free(strings);
+            continue;
+        }
+
+        symbol_count = symtab->sh_size / symtab->sh_entsize;
+        for (j = 0; j < symbol_count; ++j) {
+            const char *name;
+
+            if (symbols[j].st_name >= strtab->sh_size) {
+                continue;
+            }
+
+            name = strings + symbols[j].st_name;
+            if (strcmp(name, symbol_name) == 0) {
+                *symbol_addr_out = symbols[j].st_value;
+                free(symbols);
+                free(strings);
+                free(shdrs);
+                close(fd);
+                return 0;
+            }
+        }
+
+        free(symbols);
+        free(strings);
+    }
+
+    free(shdrs);
+    close(fd);
+    return -1;
+}
+
+zt_probe_info_t *zt_probe_find_by_symbol(zt_injector_session_t *session, const char *symbol_name) {
+    int i;
+
+    if (session == NULL || symbol_name == NULL) {
+        return NULL;
+    }
+
+    for (i = 0; i < ZT_PROBES_CAPACITY; ++i) {
+        if (session->probes[i].probe_id == 0) {
+            continue;
+        }
+
+        if (strcmp(session->probes[i].symbol, symbol_name) == 0) {
+            return &session->probes[i];
+        }
+    }
+
+    return NULL;
+}
+
+zt_probe_info_t *zt_probe_find_by_id(zt_injector_session_t *session, uint64_t probe_id) {
+    int i;
+
+    if (session == NULL || probe_id == 0) {
+        return NULL;
+    }
+
+    for (i = 0; i < ZT_PROBES_CAPACITY; ++i) {
+        if (session->probes[i].probe_id == probe_id) {
+            return &session->probes[i];
+        }
+    }
+
+    return NULL;
+}
+
+zt_probe_info_t *zt_probe_alloc(zt_injector_session_t *session, const char *symbol_name, uint64_t symbol_addr) {
+    zt_probe_info_t *probe;
+    int i;
+
+    if (session == NULL || symbol_name == NULL) {
+        return NULL;
+    }
+
+    probe = zt_probe_find_by_symbol(session, symbol_name);
+    if (probe != NULL) {
+        return probe;
+    }
+
+    for (i = 0; i < ZT_PROBES_CAPACITY; ++i) {
+        if (session->probes[i].probe_id != 0) {
+            continue;
+        }
+
+        memset(&session->probes[i], 0, sizeof(session->probes[i]));
+        session->probes[i].probe_id = session->next_probe_id++;
+        if (session->probes[i].probe_id == 0) {
+            session->probes[i].probe_id = session->next_probe_id++;
+        }
+
+        strncpy(session->probes[i].symbol, symbol_name, ZT_PROBE_SYMBOL_MAX - 1);
+        session->probes[i].symbol_addr = symbol_addr;
+        session->probes[i].thunk_addr = 0;
+        session->probes[i].orig_len = 0;
+        session->probes[i].enabled = false;
+        ++session->probe_count;
+        return &session->probes[i];
+    }
+
+    return NULL;
+}
+
+zt_probe_info_t *zt_register_probe(zt_injector_session_t *session, const char *symbol_name) {
+    zt_probe_info_t *probe;
+    uint64_t symbol_value;
+    uint64_t remote_addr;
+
+    if (session == NULL || symbol_name == NULL) {
+        return NULL;
+    }
+
+    probe = zt_probe_find_by_symbol(session, symbol_name);
+    if (probe != NULL) {
+        return probe;
+    }
+
+    if (zt_find_symbol_addr(session->exe_path, symbol_name, &symbol_value) != 0) {
+        return NULL;
+    }
+
+    remote_addr = symbol_value;
+    if (session->is_pie) {
+        remote_addr += session->image_base;
+    }
+
+    return zt_probe_alloc(session, symbol_name, remote_addr);
+}
+
 int zt_injector_attach(zt_injector_session_t *session, pid_t pid) {
     int ret;
     size_t path_len;
@@ -89,6 +308,7 @@ int zt_injector_attach(zt_injector_session_t *session, pid_t pid) {
 
     memset(session, 0, sizeof(*session));
     session->pid = pid;
+    session->next_probe_id = 1;
 
     snprintf(link_path, sizeof(link_path), "/proc/%d/exe", pid);
     path_len = readlink(link_path, session->exe_path, sizeof(session->exe_path) - 1);
