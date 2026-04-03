@@ -40,7 +40,7 @@ static struct {
     {"attach", "Attach to target process: attach <pid>", cmd_attach},
     {"detach", "Detach from current target", cmd_detach},
     {"trace", "Register and enable a probe: trace <symbol>", cmd_trace},
-    {"stop", "Stop current trace", cmd_stop},
+    {"stop", "Stop the target process and keep probes unchanged", cmd_stop},
     {"enable", "Enable a probe again: enable <symbol|id>", cmd_enable},
     {"disable", "Disable a probe: disable <symbol|id>", cmd_disable},
     {"untrace", "Remove a probe: untrace <symbol|id>", cmd_untrace},
@@ -319,24 +319,24 @@ static int cmd_trace(char *args) {
 static int cmd_stop(char *args) {
     (void)args;
 
-    if (!zt_trace_is_active()) {
-        printf("No active trace\n");
+    if (!g_cli_attached) {
+        printf("No target attached\n");
         return 0;
     }
 
-    if (zt_trace_stop() != 0) {
-        printf("Failed to stop trace\n");
-        return 0;
+    if (zt_trace_is_active()) {
+        if (zt_trace_pause(&g_cli_session) != 0) {
+            printf("Failed to stop pid %d\n", g_cli_session.pid);
+            return 0;
+        }
+    } else {
+        if (zt_cli_stop_target() != 0) {
+            printf("Failed to stop pid %d\n", g_cli_session.pid);
+            return 0;
+        }
     }
 
-    if (ptrace(PTRACE_CONT, g_cli_session.pid, NULL, NULL) != 0) {
-        printf("Trace stopped, but failed to continue pid %d\n", g_cli_session.pid);
-        return 0;
-    }
-
-    g_cli_log_path[0] = '\0';
-    g_cli_log_offset = 0;
-    printf("Trace stopped\n");
+    printf("Pid %d stopped\n", g_cli_session.pid);
     return 0;
 }
 
@@ -545,9 +545,16 @@ static int cmd_continue(char *args) {
         return 0;
     }
 
-    if (ptrace(PTRACE_CONT, g_cli_session.pid, NULL, NULL) != 0) {
-        printf("Failed to continue pid %d\n", g_cli_session.pid);
-        return 0;
+    if (zt_trace_is_active()) {
+        if (zt_trace_resume(&g_cli_session) != 0) {
+            printf("Failed to continue pid %d\n", g_cli_session.pid);
+            return 0;
+        }
+    } else {
+        if (ptrace(PTRACE_CONT, g_cli_session.pid, NULL, NULL) != 0) {
+            printf("Failed to continue pid %d\n", g_cli_session.pid);
+            return 0;
+        }
     }
 
     printf("Continued pid %d\n", g_cli_session.pid);

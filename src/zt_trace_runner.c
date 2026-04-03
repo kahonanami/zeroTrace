@@ -464,6 +464,40 @@ int zt_trace_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
     return 0;
 }
 
+int zt_trace_pause(zt_injector_session_t *session) {
+    if (session == NULL || !g_active_trace.active || g_active_trace.session != session) {
+        return -1;
+    }
+
+    if (!g_active_trace.target_running) {
+        return 0;
+    }
+
+    if (zt_stop_target(session) != 0) {
+        return -1;
+    }
+
+    g_active_trace.target_running = 0;
+    return 0;
+}
+
+int zt_trace_resume(zt_injector_session_t *session) {
+    if (session == NULL || !g_active_trace.active || g_active_trace.session != session) {
+        return -1;
+    }
+
+    if (g_active_trace.target_running) {
+        return 0;
+    }
+
+    if (ptrace(PTRACE_CONT, session->pid, NULL, NULL) != 0) {
+        return -1;
+    }
+
+    g_active_trace.target_running = 1;
+    return 0;
+}
+
 int zt_trace_stop(void) {
     int ret;
     int i;
