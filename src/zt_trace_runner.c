@@ -25,12 +25,10 @@ typedef struct {
     uint64_t remote_payload_init_addr;
     uint64_t remote_trace_buffer_addr;
     uint64_t remote_payload_config_addr;
-    uint64_t remote_thunk_addr;
 } zt_runtime_state_t;
 
 typedef struct {
     zt_injector_session_t *session;
-    zt_probe_info_t *probe;
     zt_runtime_state_t runtime;
     FILE *log_fp;
     uint64_t last_seq;
@@ -40,6 +38,87 @@ typedef struct {
 
 static volatile sig_atomic_t g_stop_requested;
 static zt_active_trace_t g_active_trace;
+
+static int zt_trace_install_probe(zt_injector_session_t *session,
+                                  zt_runtime_state_t *runtime,
+                                  const char *symbol,
+                                  zt_probe_info_t **probe_out) {
+    zt_probe_info_t *probe;
+    uint8_t thunk_buf[ZT_THUNK_MAX_SIZE];
+    size_t thunk_size;
+    uint64_t remote_thunk_addr;
+
+    probe = zt_register_probe(session, symbol);
+    if (probe == NULL) {
+        fprintf(stderr, "Failed to register probe for symbol %s\n", symbol);
+        return -1;
+    }
+
+    if (probe->thunk_addr != 0) {
+        if (probe_out != NULL) {
+            *probe_out = probe;
+        }
+        return 0;
+    }
+
+    printf("Registered probe: id=%lu, symbol=%s, addr=0x%lX\n",
+           probe->probe_id,
+           probe->symbol,
+           probe->symbol_addr);
+
+    if (zt_enable_probe(session, probe->probe_id) != 0) {
+        printf("zt_enable_probe failed for probe %lu\n", probe->probe_id);
+        return -1;
+    }
+
+    printf("Probe enabled: id=%lu, patch_len=%u\n",
+           probe->probe_id,
+           probe->orig_len);
+
+    if (zt_remote_mmap(session->pid,
+                       4096,
+                       PROT_READ | PROT_WRITE | PROT_EXEC,
+                       MAP_PRIVATE | MAP_ANONYMOUS,
+                       &remote_thunk_addr) != 0) {
+        printf("Failed to mmap remote thunk page\n");
+        return -1;
+    }
+    printf("Remote mmap addr: 0x%llx\n",
+           (unsigned long long)remote_thunk_addr);
+
+    if (zt_build_thunk(probe,
+                       runtime->remote_entry_stub_addr,
+                       thunk_buf,
+                       sizeof(thunk_buf),
+                       &thunk_size) != 0) {
+        printf("zt_build_thunk failed for probe %lu\n", probe->probe_id);
+        return -1;
+    }
+
+    if (zt_write_remote_memory(session->pid,
+                               remote_thunk_addr,
+                               thunk_buf,
+                               thunk_size) != 0) {
+        printf("failed to write thunk to 0x%llx\n",
+               (unsigned long long)remote_thunk_addr);
+        return -1;
+    }
+
+    if (zt_install_probe_patch(session, probe->probe_id, remote_thunk_addr) != 0) {
+        printf("failed to install probe patch for probe %lu\n", probe->probe_id);
+        return -1;
+    }
+
+    printf("probe patch installed at 0x%llx -> thunk 0x%llx\n",
+           (unsigned long long)probe->symbol_addr,
+           (unsigned long long)remote_thunk_addr);
+
+    if (probe_out != NULL) {
+        *probe_out = probe;
+    }
+
+    return 0;
+}
 
 static void zt_handle_stop_signal(int signo) {
     (void)signo;
@@ -170,17 +249,6 @@ static int zt_setup_remote_payload(zt_injector_session_t *session,
     }
     printf("Remote dlopen addr: 0x%llx\n",
            (unsigned long long)runtime->remote_dlopen_addr);
-
-    if (zt_remote_mmap(session->pid,
-                       4096,
-                       PROT_READ | PROT_WRITE | PROT_EXEC,
-                       MAP_PRIVATE | MAP_ANONYMOUS,
-                       &runtime->remote_thunk_addr) != 0) {
-        printf("Failed to mmap remote thunk page\n");
-        return -1;
-    }
-    printf("Remote mmap addr: 0x%llx\n",
-           (unsigned long long)runtime->remote_thunk_addr);
 
     if (zt_remote_mmap(session->pid,
                        strlen(runtime->payload_so_path) + 1,
@@ -334,8 +402,105 @@ int zt_trace_poll(void) {
     return 0;
 }
 
+int zt_trace_disable_probe(zt_injector_session_t *session, uint64_t probe_id) {
+    zt_probe_info_t *probe;
+
+    if (session == NULL || probe_id == 0 || !g_active_trace.active || g_active_trace.session != session) {
+        return -1;
+    }
+
+    probe = zt_probe_find_by_id(session, probe_id);
+    if (probe == NULL || probe->thunk_addr == 0) {
+        return -1;
+    }
+
+    if (g_active_trace.target_running && zt_stop_target(session) != 0) {
+        return -1;
+    }
+    g_active_trace.target_running = 0;
+
+    if (zt_uninstall_probe_patch(session, probe_id) != 0) {
+        return -1;
+    }
+
+    if (ptrace(PTRACE_CONT, session->pid, NULL, NULL) != 0) {
+        return -1;
+    }
+
+    g_active_trace.target_running = 1;
+    return 0;
+}
+
+int zt_trace_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
+    zt_probe_info_t *probe;
+
+    if (session == NULL || probe_id == 0 || !g_active_trace.active || g_active_trace.session != session) {
+        return -1;
+    }
+
+    probe = zt_probe_find_by_id(session, probe_id);
+    if (probe == NULL) {
+        return -1;
+    }
+
+    if (probe->thunk_addr != 0) {
+        return 0;
+    }
+
+    if (g_active_trace.target_running && zt_stop_target(session) != 0) {
+        return -1;
+    }
+    g_active_trace.target_running = 0;
+
+    if (zt_trace_install_probe(session, &g_active_trace.runtime, probe->symbol, NULL) != 0) {
+        return -1;
+    }
+
+    if (ptrace(PTRACE_CONT, session->pid, NULL, NULL) != 0) {
+        return -1;
+    }
+
+    g_active_trace.target_running = 1;
+    return 0;
+}
+
+int zt_trace_pause(zt_injector_session_t *session) {
+    if (session == NULL || !g_active_trace.active || g_active_trace.session != session) {
+        return -1;
+    }
+
+    if (!g_active_trace.target_running) {
+        return 0;
+    }
+
+    if (zt_stop_target(session) != 0) {
+        return -1;
+    }
+
+    g_active_trace.target_running = 0;
+    return 0;
+}
+
+int zt_trace_resume(zt_injector_session_t *session) {
+    if (session == NULL || !g_active_trace.active || g_active_trace.session != session) {
+        return -1;
+    }
+
+    if (g_active_trace.target_running) {
+        return 0;
+    }
+
+    if (ptrace(PTRACE_CONT, session->pid, NULL, NULL) != 0) {
+        return -1;
+    }
+
+    g_active_trace.target_running = 1;
+    return 0;
+}
+
 int zt_trace_stop(void) {
     int ret;
+    int i;
 
     if (!g_active_trace.active) {
         return -1;
@@ -346,7 +511,21 @@ int zt_trace_stop(void) {
     }
 
     g_active_trace.target_running = 0;
-    ret = zt_uninstall_probe_patch(g_active_trace.session, g_active_trace.probe->probe_id);
+    ret = 0;
+    for (i = 0; i < ZT_PROBES_CAPACITY; ++i) {
+        zt_probe_info_t *probe = &g_active_trace.session->probes[i];
+
+        if (probe->probe_id == 0) {
+            continue;
+        }
+
+        if (probe->thunk_addr != 0 &&
+            zt_uninstall_probe_patch(g_active_trace.session, probe->probe_id) != 0) {
+            ret = -1;
+        }
+
+        zt_unregister_probe(g_active_trace.session, probe->probe_id);
+    }
 
     if (g_active_trace.log_fp != NULL) {
         fclose(g_active_trace.log_fp);
@@ -363,14 +542,33 @@ int zt_trace_is_active(void) {
 int zt_trace_start_in_session(zt_injector_session_t *session,
                               const char *symbol,
                               const char *log_path) {
-    zt_runtime_state_t runtime;
     zt_probe_info_t *probe;
-    uint8_t thunk_buf[ZT_THUNK_MAX_SIZE];
-    size_t thunk_size;
     FILE *log_fp;
 
-    if (session == NULL || symbol == NULL || log_path == NULL || g_active_trace.active) {
+    if (session == NULL || symbol == NULL || log_path == NULL) {
         return -1;
+    }
+
+    if (g_active_trace.active) {
+        if (g_active_trace.session != session) {
+            return -1;
+        }
+
+        if (g_active_trace.target_running && zt_stop_target(session) != 0) {
+            return -1;
+        }
+        g_active_trace.target_running = 0;
+
+        if (zt_trace_install_probe(session, &g_active_trace.runtime, symbol, &probe) != 0) {
+            return -1;
+        }
+
+        if (ptrace(PTRACE_CONT, session->pid, NULL, NULL) != 0) {
+            return -1;
+        }
+
+        g_active_trace.target_running = 1;
+        return 0;
     }
 
     log_fp = fopen(log_path, "w");
@@ -378,74 +576,24 @@ int zt_trace_start_in_session(zt_injector_session_t *session,
         return -1;
     }
 
-    memset(&runtime, 0, sizeof(runtime));
+    memset(&g_active_trace, 0, sizeof(g_active_trace));
     printf("Tracing target PID %d, %s, is_pie: %d, image_base: 0x%lX\n",
            session->pid,
            session->exe_path,
            session->is_pie,
            session->image_base);
 
-    if (zt_setup_remote_payload(session, &runtime) != 0) {
+    if (zt_setup_remote_payload(session, &g_active_trace.runtime) != 0) {
         fclose(log_fp);
         return -1;
     }
 
-    probe = zt_register_probe(session, symbol);
-    if (probe == NULL) {
-        fprintf(stderr, "Failed to register probe for symbol %s\n", symbol);
+    if (zt_trace_install_probe(session, &g_active_trace.runtime, symbol, &probe) != 0) {
         fclose(log_fp);
         return -1;
     }
 
-    printf("Registered probe: id=%lu, symbol=%s, addr=0x%lX\n",
-           probe->probe_id,
-           probe->symbol,
-           probe->symbol_addr);
-
-    if (zt_enable_probe(session, probe->probe_id) != 0) {
-        printf("zt_enable_probe failed for probe %lu\n", probe->probe_id);
-        fclose(log_fp);
-        return -1;
-    }
-
-    printf("Probe enabled: id=%lu, patch_len=%u\n",
-           probe->probe_id,
-           probe->orig_len);
-
-    if (zt_build_thunk(probe,
-                       runtime.remote_entry_stub_addr,
-                       thunk_buf,
-                       sizeof(thunk_buf),
-                       &thunk_size) != 0) {
-        printf("zt_build_thunk failed for probe %lu\n", probe->probe_id);
-        fclose(log_fp);
-        return -1;
-    }
-
-    if (zt_write_remote_memory(session->pid,
-                               runtime.remote_thunk_addr,
-                               thunk_buf,
-                               thunk_size) != 0) {
-        printf("failed to write thunk to 0x%llx\n",
-               (unsigned long long)runtime.remote_thunk_addr);
-        fclose(log_fp);
-        return -1;
-    }
-
-    if (zt_install_probe_patch(session, probe->probe_id, runtime.remote_thunk_addr) != 0) {
-        printf("failed to install probe patch for probe %lu\n", probe->probe_id);
-        fclose(log_fp);
-        return -1;
-    }
-
-    printf("probe patch installed at 0x%llx -> thunk 0x%llx\n",
-           (unsigned long long)probe->symbol_addr,
-           (unsigned long long)runtime.remote_thunk_addr);
-
-    memset(&g_active_trace, 0, sizeof(g_active_trace));
     g_active_trace.session = session;
-    g_active_trace.probe = probe;
-    g_active_trace.runtime = runtime;
     g_active_trace.log_fp = log_fp;
     g_active_trace.active = 1;
 
@@ -459,6 +607,7 @@ int zt_trace_start_in_session(zt_injector_session_t *session,
 }
 
 int zt_trace_symbol_in_session(zt_injector_session_t *session, const char *symbol) {
+    zt_probe_info_t *probe;
     uint64_t probe_addr;
 
     if (session == NULL || symbol == NULL) {
@@ -469,7 +618,8 @@ int zt_trace_symbol_in_session(zt_injector_session_t *session, const char *symbo
         return -1;
     }
 
-    probe_addr = g_active_trace.probe->symbol_addr;
+    probe = zt_probe_find_by_symbol(session, symbol);
+    probe_addr = probe != NULL ? probe->symbol_addr : 0;
     printf("Tracing... press Ctrl+C to stop.\n");
     g_stop_requested = 0;
     signal(SIGINT, zt_handle_stop_signal);
@@ -487,6 +637,55 @@ int zt_trace_symbol_in_session(zt_injector_session_t *session, const char *symbo
 
     printf("probe patch restored at 0x%llx\n",
            (unsigned long long)probe_addr);
+    return 0;
+}
+
+int zt_trace_remove_probe(zt_injector_session_t *session, uint64_t probe_id) {
+    zt_probe_info_t *probe;
+
+    if (session == NULL || probe_id == 0) {
+        return -1;
+    }
+
+    probe = zt_probe_find_by_id(session, probe_id);
+    if (probe == NULL) {
+        return -1;
+    }
+
+    if (!g_active_trace.active) {
+        return zt_unregister_probe(session, probe_id);
+    }
+
+    if (g_active_trace.session != session) {
+        return -1;
+    }
+
+    if (g_active_trace.target_running && zt_stop_target(session) != 0) {
+        return -1;
+    }
+    g_active_trace.target_running = 0;
+
+    if (probe->thunk_addr != 0 &&
+        zt_uninstall_probe_patch(session, probe_id) != 0) {
+        return -1;
+    }
+
+    if (zt_unregister_probe(session, probe_id) != 0) {
+        return -1;
+    }
+
+    if (session->probe_count == 0) {
+        if (g_active_trace.log_fp != NULL) {
+            fclose(g_active_trace.log_fp);
+        }
+        memset(&g_active_trace, 0, sizeof(g_active_trace));
+        return 0;
+    }
+
+    if (ptrace(PTRACE_CONT, session->pid, NULL, NULL) != 0) {
+        return -1;
+    }
+    g_active_trace.target_running = 1;
     return 0;
 }
 

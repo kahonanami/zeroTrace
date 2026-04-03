@@ -23,6 +23,8 @@ static int cmd_attach(char *args);
 static int cmd_detach(char *args);
 static int cmd_trace(char *args);
 static int cmd_stop(char *args);
+static int cmd_enable(char *args);
+static int cmd_disable(char *args);
 static int cmd_untrace(char *args);
 static int cmd_info(char *args);
 static int cmd_continue(char *args);
@@ -38,7 +40,9 @@ static struct {
     {"attach", "Attach to target process: attach <pid>", cmd_attach},
     {"detach", "Detach from current target", cmd_detach},
     {"trace", "Register and enable a probe: trace <symbol>", cmd_trace},
-    {"stop", "Stop current trace", cmd_stop},
+    {"stop", "Stop the target process and keep probes unchanged", cmd_stop},
+    {"enable", "Enable a probe again: enable <symbol|id>", cmd_enable},
+    {"disable", "Disable a probe: disable <symbol|id>", cmd_disable},
     {"untrace", "Remove a probe: untrace <symbol|id>", cmd_untrace},
     {"info", "Show info: info target | info probes", cmd_info},
     {"continue", "Continue the stopped target process", cmd_continue},
@@ -278,28 +282,33 @@ static int cmd_trace(char *args) {
         return 0;
     }
 
-    if (zt_cli_stop_target() != 0) {
+    if (!zt_trace_is_active() && zt_cli_stop_target() != 0) {
         printf("Failed to stop pid %d before tracing\n", g_cli_session.pid);
         return 0;
     }
 
-    if (getcwd(cwd, sizeof(cwd)) == NULL ||
-        snprintf(g_cli_log_path,
-                 sizeof(g_cli_log_path),
-                 "%s/ztrace.%d.log",
-                 cwd,
-                 g_cli_session.pid) >= (int)sizeof(g_cli_log_path)) {
-        printf("Failed to build trace log path\n");
-        return 0;
-    }
+    if (!zt_trace_is_active()) {
+        if (getcwd(cwd, sizeof(cwd)) == NULL ||
+            snprintf(g_cli_log_path,
+                     sizeof(g_cli_log_path),
+                     "%s/ztrace.%d.log",
+                     cwd,
+                     g_cli_session.pid) >= (int)sizeof(g_cli_log_path)) {
+            printf("Failed to build trace log path\n");
+            return 0;
+        }
 
-    g_cli_log_offset = 0;
-    g_cli_last_poll = 0;
-    if (zt_trace_start_in_session(&g_cli_session, symbol, g_cli_log_path) != 0) {
-        printf("Failed to trace %s\n", symbol);
-        g_cli_log_path[0] = '\0';
         g_cli_log_offset = 0;
         g_cli_last_poll = 0;
+    }
+
+    if (zt_trace_start_in_session(&g_cli_session, symbol, g_cli_log_path) != 0) {
+        printf("Failed to trace %s\n", symbol);
+        if (!zt_trace_is_active()) {
+            g_cli_log_path[0] = '\0';
+            g_cli_log_offset = 0;
+            g_cli_last_poll = 0;
+        }
         return 0;
     }
 
@@ -310,24 +319,120 @@ static int cmd_trace(char *args) {
 static int cmd_stop(char *args) {
     (void)args;
 
+    if (!g_cli_attached) {
+        printf("No target attached\n");
+        return 0;
+    }
+
+    if (zt_trace_is_active()) {
+        if (zt_trace_pause(&g_cli_session) != 0) {
+            printf("Failed to stop pid %d\n", g_cli_session.pid);
+            return 0;
+        }
+    } else {
+        if (zt_cli_stop_target() != 0) {
+            printf("Failed to stop pid %d\n", g_cli_session.pid);
+            return 0;
+        }
+    }
+
+    printf("Pid %d stopped\n", g_cli_session.pid);
+    return 0;
+}
+
+static int cmd_enable(char *args) {
+    char *target;
+    char *endptr;
+    long probe_id;
+    zt_probe_info_t *probe;
+
+    if (!g_cli_attached) {
+        printf("No target attached\n");
+        return 0;
+    }
+
     if (!zt_trace_is_active()) {
         printf("No active trace\n");
         return 0;
     }
 
-    if (zt_trace_stop() != 0) {
-        printf("Failed to stop trace\n");
+    target = zt_next_arg(args);
+    if (target == NULL) {
+        printf("Usage: enable <symbol|id>\n");
         return 0;
     }
 
-    if (ptrace(PTRACE_CONT, g_cli_session.pid, NULL, NULL) != 0) {
-        printf("Trace stopped, but failed to continue pid %d\n", g_cli_session.pid);
+    probe_id = strtol(target, &endptr, 10);
+    if (target != endptr && *endptr == '\0' && probe_id > 0) {
+        if (zt_trace_enable_probe(&g_cli_session, (uint64_t)probe_id) != 0) {
+            printf("Failed to enable probe id %ld\n", probe_id);
+            return 0;
+        }
+
+        printf("Enabled probe id %ld\n", probe_id);
         return 0;
     }
 
-    g_cli_log_path[0] = '\0';
-    g_cli_log_offset = 0;
-    printf("Trace stopped\n");
+    probe = zt_probe_find_by_symbol(&g_cli_session, target);
+    if (probe == NULL) {
+        printf("Probe not found: %s\n", target);
+        return 0;
+    }
+
+    if (zt_trace_enable_probe(&g_cli_session, probe->probe_id) != 0) {
+        printf("Failed to enable probe %s\n", target);
+        return 0;
+    }
+
+    printf("Enabled probe %s\n", target);
+    return 0;
+}
+
+static int cmd_disable(char *args) {
+    char *target;
+    char *endptr;
+    long probe_id;
+    zt_probe_info_t *probe;
+
+    if (!g_cli_attached) {
+        printf("No target attached\n");
+        return 0;
+    }
+
+    if (!zt_trace_is_active()) {
+        printf("No active trace\n");
+        return 0;
+    }
+
+    target = zt_next_arg(args);
+    if (target == NULL) {
+        printf("Usage: disable <symbol|id>\n");
+        return 0;
+    }
+
+    probe_id = strtol(target, &endptr, 10);
+    if (target != endptr && *endptr == '\0' && probe_id > 0) {
+        if (zt_trace_disable_probe(&g_cli_session, (uint64_t)probe_id) != 0) {
+            printf("Failed to disable probe id %ld\n", probe_id);
+            return 0;
+        }
+
+        printf("Disabled probe id %ld\n", probe_id);
+        return 0;
+    }
+
+    probe = zt_probe_find_by_symbol(&g_cli_session, target);
+    if (probe == NULL) {
+        printf("Probe not found: %s\n", target);
+        return 0;
+    }
+
+    if (zt_trace_disable_probe(&g_cli_session, probe->probe_id) != 0) {
+        printf("Failed to disable probe %s\n", target);
+        return 0;
+    }
+
+    printf("Disabled probe %s\n", target);
     return 0;
 }
 
@@ -348,29 +453,18 @@ static int cmd_untrace(char *args) {
         return 0;
     }
 
-    if (zt_trace_is_active()) {
-        if (zt_trace_stop() != 0) {
-            printf("Failed to stop active trace before untrace\n");
-            return 0;
-        }
-
-        if (ptrace(PTRACE_CONT, g_cli_session.pid, NULL, NULL) != 0) {
-            printf("Trace stopped, but failed to continue pid %d\n", g_cli_session.pid);
-            return 0;
-        }
-
-        g_cli_log_path[0] = '\0';
-        g_cli_log_offset = 0;
-        g_cli_last_poll = 0;
-    }
-
     probe_id = strtol(target, &endptr, 10);
     if (target != endptr && *endptr == '\0' && probe_id > 0) {
-        if (zt_unregister_probe(&g_cli_session, (uint64_t)probe_id) != 0) {
+        if (zt_trace_remove_probe(&g_cli_session, (uint64_t)probe_id) != 0) {
             printf("Failed to remove probe id %ld\n", probe_id);
             return 0;
         }
 
+        if (!zt_trace_is_active()) {
+            g_cli_log_path[0] = '\0';
+            g_cli_log_offset = 0;
+            g_cli_last_poll = 0;
+        }
         printf("Removed probe id %ld\n", probe_id);
         return 0;
     }
@@ -381,11 +475,16 @@ static int cmd_untrace(char *args) {
         return 0;
     }
 
-    if (zt_unregister_probe(&g_cli_session, probe->probe_id) != 0) {
+    if (zt_trace_remove_probe(&g_cli_session, probe->probe_id) != 0) {
         printf("Failed to remove probe %s\n", target);
         return 0;
     }
 
+    if (!zt_trace_is_active()) {
+        g_cli_log_path[0] = '\0';
+        g_cli_log_offset = 0;
+        g_cli_last_poll = 0;
+    }
     printf("Removed probe %s\n", target);
     return 0;
 }
@@ -446,9 +545,16 @@ static int cmd_continue(char *args) {
         return 0;
     }
 
-    if (ptrace(PTRACE_CONT, g_cli_session.pid, NULL, NULL) != 0) {
-        printf("Failed to continue pid %d\n", g_cli_session.pid);
-        return 0;
+    if (zt_trace_is_active()) {
+        if (zt_trace_resume(&g_cli_session) != 0) {
+            printf("Failed to continue pid %d\n", g_cli_session.pid);
+            return 0;
+        }
+    } else {
+        if (ptrace(PTRACE_CONT, g_cli_session.pid, NULL, NULL) != 0) {
+            printf("Failed to continue pid %d\n", g_cli_session.pid);
+            return 0;
+        }
     }
 
     printf("Continued pid %d\n", g_cli_session.pid);
