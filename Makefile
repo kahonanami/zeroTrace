@@ -4,6 +4,7 @@ ASMFLAGS := -g -Wa,--noexecstack
 PIC_CFLAGS := $(CFLAGS) -fPIC
 PIC_ASMFLAGS := $(ASMFLAGS) -fPIC
 LDFLAGS_SO := -shared
+LDLIBS := -lcapstone
 
 SRC_DIR := src
 TEST_DIR := src/test
@@ -52,7 +53,7 @@ directories:
 	@mkdir -p $(TEST_BIN_DIR)
 
 $(APP_TARGET): $(OBJ_CORE) $(OBJ_MAIN)
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 	@echo "[✓] Built main app: $@"
 
 $(PAYLOAD_SO): $(PAYLOAD_PIC_OBJ)
@@ -60,7 +61,7 @@ $(PAYLOAD_SO): $(PAYLOAD_PIC_OBJ)
 	@echo "[✓] Built payload shared library: $@"
 
 $(TEST_BIN_DIR)/%: $(TEST_DIR)/%.c $(OBJ_CORE) $(OBJ_TEST_HELPERS)
-	$(CC) $(CFLAGS) $< $(OBJ_CORE) $(OBJ_TEST_HELPERS) -o $@
+	$(CC) $(CFLAGS) $< $(OBJ_CORE) $(OBJ_TEST_HELPERS) -o $@ $(LDLIBS)
 	@echo "[✓] Built test: $@"
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c

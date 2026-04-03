@@ -86,5 +86,19 @@ int main(int argc, char *argv[]) {
            probe->symbol_addr);
     printf("Current probe count: %d\n", session.probe_count);
 
+    if (zt_enable_probe(&session, probe->probe_id) != 0) {
+        printf("zt_enable_probe failed for probe %lu\n", probe->probe_id);
+    } else {
+        int i;
+
+        printf("zt_enable_probe ok: orig_len=%u, orig_code=", probe->orig_len);
+        for (i = 0; i < probe->orig_len; ++i) {
+            printf("%02x ", probe->orig_code[i]);
+        }
+        printf("\n");
+    }
+
+    zt_injector_detach(&session);
+
     return 0;
 }

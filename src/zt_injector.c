@@ -9,6 +9,9 @@
 #include <limits.h>
 #include <sys/types.h>
 #include <stdlib.h>
+#include <sys/ptrace.h>
+#include <sys/wait.h>
+#include <capstone/capstone.h>
 
 #include "../include/zt_injector.h"
 
@@ -105,6 +108,110 @@ static int zt_read_image_base(pid_t pid, const char *image_path, uint64_t *base_
 
     fclose(fp);
     return -ENOENT;
+}
+
+static int zt_read_remote_memory(pid_t pid, uint64_t remote_addr, void *buffer, size_t size) {
+    size_t copied;
+    long word;
+    size_t word_size;
+
+    if (buffer == NULL || size == 0) {
+        return -1;
+    }
+
+    copied = 0;
+    word_size = sizeof(long);
+    while (copied < size) {
+        size_t chunk_size;
+
+        errno = 0;
+        word = ptrace(PTRACE_PEEKDATA,
+                      pid,
+                      (void *)(uintptr_t)(remote_addr + copied),
+                      NULL);
+        if (word == -1 && errno != 0) {
+            return -1;
+        }
+
+        chunk_size = size - copied;
+        if (chunk_size > word_size) {
+            chunk_size = word_size;
+        }
+
+        memcpy((uint8_t *)buffer + copied, &word, chunk_size);
+        copied += chunk_size;
+    }
+
+    return 0;
+}
+
+static int zt_insn_has_rip_relative(const cs_insn *insn) {
+    cs_x86 *x86;
+    uint8_t i;
+
+    if (insn == NULL || insn->detail == NULL) {
+        return 0;
+    }
+
+    x86 = &insn->detail->x86;
+    for (i = 0; i < x86->op_count; ++i) {
+        if (x86->operands[i].type == X86_OP_MEM &&
+            x86->operands[i].mem.base == X86_REG_RIP) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int zt_calc_patch_span(const uint8_t *code,
+                              size_t code_size,
+                              size_t min_len,
+                              size_t *patch_len_out,
+                              bool *has_rip_relative_out) {
+    csh handle;
+    cs_insn *insn;
+    size_t count;
+    size_t total_len;
+    size_t i;
+    bool has_rip_relative;
+
+    if (code == NULL || patch_len_out == NULL || has_rip_relative_out == NULL) {
+        return -1;
+    }
+
+    if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) != CS_ERR_OK) {
+        return -1;
+    }
+
+    cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
+
+    count = cs_disasm(handle, code, code_size, 0, 0, &insn);
+    if (count == 0) {
+        cs_close(&handle);
+        return -1;
+    }
+
+    total_len = 0;
+    has_rip_relative = false;
+    for (i = 0; i < count; ++i) {
+        total_len += insn[i].size;
+        if (zt_insn_has_rip_relative(&insn[i])) {
+            has_rip_relative = true;
+        }
+
+        if (total_len >= min_len) {
+            *patch_len_out = total_len;
+            *has_rip_relative_out = has_rip_relative;
+            cs_free(insn, count);
+            cs_close(&handle);
+            return 0;
+        }
+    }
+
+    cs_free(insn, count);
+    cs_close(&handle);
+    return -1;
 }
 
 int zt_find_symbol_addr(const char *elf_path, const char *symbol_name, uint64_t *symbol_addr_out) {
@@ -321,29 +428,94 @@ int zt_unregister_probe(zt_injector_session_t *session, uint64_t probe_id) {
     return 0;
 }
 
+int zt_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
+    zt_probe_info_t *probe;
+    uint8_t code[ZT_PROBE_ORIG_CODE_MAX];
+    size_t patch_len;
+    bool has_rip_relative;
+
+    if (session == NULL) {
+        return -1;
+    }
+
+    probe = zt_probe_find_by_id(session, probe_id);
+    if (probe == NULL) {
+        return -1;
+    }
+
+    if (probe->enabled) {
+        return 0;
+    }
+
+    if (zt_read_remote_memory(session->pid, probe->symbol_addr, code, sizeof(code)) != 0) {
+        return -1;
+    }
+
+    if (zt_calc_patch_span(code,
+                           sizeof(code),
+                           ZT_PROBE_PATCH_LEN,
+                           &patch_len,
+                           &has_rip_relative) != 0) {
+        return -1;
+    }
+
+    if (has_rip_relative || patch_len > ZT_PROBE_ORIG_CODE_MAX) {
+        return -1;
+    }
+
+    memcpy(probe->orig_code, code, patch_len);
+    probe->orig_len = (uint8_t)patch_len;
+    probe->enabled = true;
+    return 0;
+}
+
 int zt_injector_attach(zt_injector_session_t *session, pid_t pid) {
     int ret;
+    int status;
     size_t path_len;
     char link_path[512];
+
+    if (session == NULL) {
+        return -1;
+    }
 
     memset(session, 0, sizeof(*session));
     session->pid = pid;
     session->next_probe_id = 1;
 
+    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) != 0) {
+        return -1;
+    }
+
+    if (waitpid(pid, &status, 0) < 0) {
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return -1;
+    }
+
+    if (!WIFSTOPPED(status)) {
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return -1;
+    }
+
+    session->is_attached = true;
+
     snprintf(link_path, sizeof(link_path), "/proc/%d/exe", pid);
     path_len = readlink(link_path, session->exe_path, sizeof(session->exe_path) - 1);
     if (path_len <= 0) {
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
         return -1;
     }
     session->exe_path[path_len] = '\0';
 
     ret = zt_check_is_pie(session->exe_path, &session->is_pie);
     if(ret != 0){
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
         return -1;
     }
 
     ret = zt_read_image_base(pid, session->exe_path, &session->image_base);
     if (ret != 0) {
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
         return ret;
     }
 
@@ -351,5 +523,13 @@ int zt_injector_attach(zt_injector_session_t *session, pid_t pid) {
 }
 
 void zt_injector_detach(zt_injector_session_t *session) {
+    if (session == NULL) {
+        return;
+    }
+
+    if (session->is_attached) {
+        ptrace(PTRACE_DETACH, session->pid, NULL, NULL);
+    }
+
     memset(session, 0, sizeof(zt_injector_session_t));
 }

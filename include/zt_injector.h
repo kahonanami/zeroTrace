@@ -6,7 +6,8 @@
 
 #define ZT_PROBES_CAPACITY 32
 #define ZT_PROBE_SYMBOL_MAX 64
-#define ZT_PROBE_ORIG_CODE_MAX 16
+#define ZT_PROBE_ORIG_CODE_MAX 32
+#define ZT_PROBE_PATCH_LEN 12
 
 typedef struct{
     uint64_t probe_id;
@@ -23,6 +24,7 @@ typedef struct {
     char exe_path[512];
     uint64_t image_base;
     bool is_pie;
+    bool is_attached;
     uint64_t next_probe_id;
     int probe_count;
     zt_probe_info_t probes[ZT_PROBES_CAPACITY];
@@ -36,3 +38,4 @@ zt_probe_info_t *zt_probe_find_by_id(zt_injector_session_t *session, uint64_t pr
 zt_probe_info_t *zt_probe_alloc(zt_injector_session_t *session, const char *symbol_name, uint64_t symbol_addr);
 zt_probe_info_t *zt_register_probe(zt_injector_session_t *session, const char *symbol_name);
 int zt_unregister_probe(zt_injector_session_t *session, uint64_t probe_id);
+int zt_enable_probe(zt_injector_session_t *session, uint64_t probe_id);
