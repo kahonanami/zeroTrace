@@ -30,8 +30,10 @@ PAYLOAD_PIC_OBJ := $(BUILD_DIR)/zt_payload.pic.o $(BUILD_DIR)/zt_stub.pic.o
 .PRECIOUS: $(BUILD_DIR)/%.o
 
 TEST_BINS := $(patsubst $(TEST_DIR)/%.c, $(TEST_BIN_DIR)/%, $(TEST_C))
-STANDALONE_TEST_BINS := $(TEST_BIN_DIR)/add_loop
+STANDALONE_TEST_BINS := \
+	$(TEST_BIN_DIR)/test_loop
 CORE_TEST_BINS := $(filter-out $(STANDALONE_TEST_BINS), $(TEST_BINS))
+AUTO_TEST_BINS := $(CORE_TEST_BINS)
 APP_TARGET := $(BIN_DIR)/ztrace
 
 .PHONY: all clean directories test run-tests
@@ -44,7 +46,7 @@ run-tests:
 	@echo "\n=============================="
 	@echo "    Running Test Suite        "
 	@echo "=============================="
-	@for t in $(TEST_BINS); do \
+	@for t in $(AUTO_TEST_BINS); do \
 		echo "\n▶ Executing: $$t"; \
 		./$$t || exit 1; \
 	done
@@ -66,7 +68,7 @@ $(CORE_TEST_BINS): $(TEST_BIN_DIR)/%: $(TEST_DIR)/%.c $(OBJ_CORE) $(OBJ_TEST_HEL
 	$(CC) $(CFLAGS) $< $(OBJ_CORE) $(OBJ_TEST_HELPERS) -o $@ $(LDLIBS)
 	@echo "[✓] Built test: $@"
 
-$(TEST_BIN_DIR)/add_loop: $(TEST_DIR)/add_loop.c
+$(STANDALONE_TEST_BINS): $(TEST_BIN_DIR)/%: $(TEST_DIR)/%.c
 	$(CC) $(CFLAGS) $< -o $@
 	@echo "[✓] Built standalone test: $@"
 
