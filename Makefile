@@ -4,7 +4,7 @@ ASMFLAGS := -g -Wa,--noexecstack
 PIC_CFLAGS := $(CFLAGS) -fPIC
 PIC_ASMFLAGS := $(ASMFLAGS) -fPIC
 LDFLAGS_SO := -shared
-LDLIBS := -lcapstone -ldl
+LDLIBS := -lcapstone -ldl -lreadline
 
 SRC_DIR := src
 TEST_DIR := src/test

@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <getopt.h>
 
+#include "../include/zt_cli.h"
 #include "../include/zt_trace_runner.h"
 
 static void print_usage(const char *prog) {
@@ -48,20 +49,15 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    if (!p_flag_provided) {
-        fprintf(stderr, "Error: Missing required '-p' option.\n");
+    if (!p_flag_provided && symbol == NULL) {
+        zt_cli_main_loop();
+        return EXIT_SUCCESS;
+    }
+
+    if (!p_flag_provided || symbol == NULL) {
         print_usage(argv[0]);
         return EXIT_FAILURE;
     }
-
-    if (symbol == NULL) {
-        fprintf(stderr, "Error: Missing required '-s' option.\n");
-        print_usage(argv[0]);
-        return EXIT_FAILURE;
-    }
-
-    printf("ztrace get PID: %ld\n", pid);
-    printf("ztrace get symbol: %s\n", symbol);
 
     if (zt_trace_symbol_once((pid_t)pid, symbol) != 0) {
         return EXIT_FAILURE;

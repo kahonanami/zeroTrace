@@ -337,38 +337,30 @@ static void zt_capture_trace_loop(zt_injector_session_t *session,
     signal(SIGINT, SIG_DFL);
 }
 
-int zt_trace_symbol_once(pid_t pid, const char *symbol) {
-    zt_injector_session_t session;
+int zt_trace_symbol_in_session(zt_injector_session_t *session, const char *symbol) {
     zt_runtime_state_t runtime;
     zt_probe_info_t *probe;
     uint8_t thunk_buf[ZT_THUNK_MAX_SIZE];
     size_t thunk_size;
 
-    if (symbol == NULL) {
+    if (session == NULL || symbol == NULL) {
         return -1;
     }
 
-    if (zt_injector_attach(&session, pid) != 0) {
-        fprintf(stderr, "Failed to attach to process with PID %d\n", pid);
-        return -1;
-    }
-
-    printf("Successfully attached to process with PID %d, %s, is_pie: %d, image_base: 0x%lX\n",
-           session.pid,
-           session.exe_path,
-           session.is_pie,
-           session.image_base);
+    printf("Tracing target PID %d, %s, is_pie: %d, image_base: 0x%lX\n",
+           session->pid,
+           session->exe_path,
+           session->is_pie,
+           session->image_base);
 
     memset(&runtime, 0, sizeof(runtime));
-    if (zt_setup_remote_payload(&session, &runtime) != 0) {
-        zt_injector_detach(&session);
+    if (zt_setup_remote_payload(session, &runtime) != 0) {
         return -1;
     }
 
-    probe = zt_register_probe(&session, symbol);
+    probe = zt_register_probe(session, symbol);
     if (probe == NULL) {
         fprintf(stderr, "Failed to register probe for symbol %s\n", symbol);
-        zt_injector_detach(&session);
         return -1;
     }
 
@@ -377,9 +369,8 @@ int zt_trace_symbol_once(pid_t pid, const char *symbol) {
            probe->symbol,
            probe->symbol_addr);
 
-    if (zt_enable_probe(&session, probe->probe_id) != 0) {
+    if (zt_enable_probe(session, probe->probe_id) != 0) {
         printf("zt_enable_probe failed for probe %lu\n", probe->probe_id);
-        zt_injector_detach(&session);
         return -1;
     }
 
@@ -393,23 +384,20 @@ int zt_trace_symbol_once(pid_t pid, const char *symbol) {
                        sizeof(thunk_buf),
                        &thunk_size) != 0) {
         printf("zt_build_thunk failed for probe %lu\n", probe->probe_id);
-        zt_injector_detach(&session);
         return -1;
     }
 
-    if (zt_write_remote_memory(session.pid,
+    if (zt_write_remote_memory(session->pid,
                                runtime.remote_thunk_addr,
                                thunk_buf,
                                thunk_size) != 0) {
         printf("failed to write thunk to 0x%llx\n",
                (unsigned long long)runtime.remote_thunk_addr);
-        zt_injector_detach(&session);
         return -1;
     }
 
-    if (zt_install_probe_patch(&session, probe->probe_id, runtime.remote_thunk_addr) != 0) {
+    if (zt_install_probe_patch(session, probe->probe_id, runtime.remote_thunk_addr) != 0) {
         printf("failed to install probe patch for probe %lu\n", probe->probe_id);
-        zt_injector_detach(&session);
         return -1;
     }
 
@@ -417,15 +405,32 @@ int zt_trace_symbol_once(pid_t pid, const char *symbol) {
            (unsigned long long)probe->symbol_addr,
            (unsigned long long)runtime.remote_thunk_addr);
 
-    zt_capture_trace_loop(&session, runtime.remote_trace_buffer_addr);
+    zt_capture_trace_loop(session, runtime.remote_trace_buffer_addr);
 
-    if (zt_uninstall_probe_patch(&session, probe->probe_id) == 0) {
+    if (zt_uninstall_probe_patch(session, probe->probe_id) == 0) {
         printf("probe patch restored at 0x%llx\n",
                (unsigned long long)probe->symbol_addr);
     } else {
         printf("failed to restore probe patch for probe %lu\n", probe->probe_id);
     }
 
-    zt_injector_detach(&session);
     return 0;
+}
+
+int zt_trace_symbol_once(pid_t pid, const char *symbol) {
+    zt_injector_session_t session;
+    int ret;
+
+    if (symbol == NULL) {
+        return -1;
+    }
+
+    if (zt_injector_attach(&session, pid) != 0) {
+        fprintf(stderr, "Failed to attach to process with PID %d\n", pid);
+        return -1;
+    }
+
+    ret = zt_trace_symbol_in_session(&session, symbol);
+    zt_injector_detach(&session);
+    return ret;
 }
