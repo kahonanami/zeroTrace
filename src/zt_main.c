@@ -153,6 +153,23 @@ static void zt_test_remote_thunk_rw(pid_t pid,
     }
 }
 
+static void zt_dump_remote_patch_bytes(pid_t pid, uint64_t remote_addr) {
+    uint8_t patch[ZT_PROBE_PATCH_LEN];
+    int i;
+
+    if (zt_read_remote_memory(pid, remote_addr, patch, sizeof(patch)) != 0) {
+        printf("failed to read installed patch at 0x%llx\n",
+               (unsigned long long)remote_addr);
+        return;
+    }
+
+    printf("Installed patch bytes: ");
+    for (i = 0; i < (int)sizeof(patch); ++i) {
+        printf("%02x ", patch[i]);
+    }
+    printf("\n");
+}
+
 int main(int argc, char *argv[]) {
     int opt;
     long pid = -1;
@@ -276,6 +293,14 @@ int main(int argc, char *argv[]) {
             }
             printf("\n");
             zt_test_remote_thunk_rw(session.pid, remote_thunk_addr, thunk_buf, thunk_size);
+            if (zt_install_probe_patch(&session, probe->probe_id, remote_thunk_addr) == 0) {
+                printf("probe patch installed at 0x%llx -> thunk 0x%llx\n",
+                       (unsigned long long)probe->symbol_addr,
+                       (unsigned long long)remote_thunk_addr);
+                zt_dump_remote_patch_bytes(session.pid, probe->symbol_addr);
+            } else {
+                printf("failed to install probe patch for probe %lu\n", probe->probe_id);
+            }
             zt_dump_thunk_disasm(thunk_buf, thunk_code_size);
             zt_dump_thunk_tail(thunk_buf, thunk_size);
         }

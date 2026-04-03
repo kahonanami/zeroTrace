@@ -677,6 +677,43 @@ int zt_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
     return 0;
 }
 
+int zt_install_probe_patch(zt_injector_session_t *session,
+                           uint64_t probe_id,
+                           uint64_t thunk_addr) {
+    zt_probe_info_t *probe;
+    uint8_t patch[ZT_PROBE_PATCH_LEN];
+
+    if (session == NULL || thunk_addr == 0) {
+        return -1;
+    }
+
+    probe = zt_probe_find_by_id(session, probe_id);
+    if (probe == NULL) {
+        return -1;
+    }
+
+    if (!probe->enabled || probe->orig_len < ZT_PROBE_PATCH_LEN) {
+        return -1;
+    }
+
+    memset(patch, 0x90, sizeof(patch));
+    patch[0] = 0x48; /* movabs rax, imm64 */
+    patch[1] = 0xB8;
+    memcpy(patch + 2, &thunk_addr, sizeof(thunk_addr));
+    patch[10] = 0xFF; /* jmp rax */
+    patch[11] = 0xE0;
+
+    if (zt_write_remote_memory(session->pid,
+                               probe->symbol_addr,
+                               patch,
+                               sizeof(patch)) != 0) {
+        return -1;
+    }
+
+    probe->thunk_addr = thunk_addr;
+    return 0;
+}
+
 int zt_injector_attach(zt_injector_session_t *session, pid_t pid) {
     int ret;
     int status;

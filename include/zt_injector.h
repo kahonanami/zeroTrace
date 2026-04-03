@@ -51,3 +51,6 @@ zt_probe_info_t *zt_probe_alloc(zt_injector_session_t *session, const char *symb
 zt_probe_info_t *zt_register_probe(zt_injector_session_t *session, const char *symbol_name);
 int zt_unregister_probe(zt_injector_session_t *session, uint64_t probe_id);
 int zt_enable_probe(zt_injector_session_t *session, uint64_t probe_id);
+int zt_install_probe_patch(zt_injector_session_t *session,
+                           uint64_t probe_id,
+                           uint64_t thunk_addr);
