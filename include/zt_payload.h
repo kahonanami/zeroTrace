@@ -37,6 +37,9 @@ typedef struct {
     uint64_t probe_id;
     uint64_t event_type;
     uint64_t call_id;
+    uint64_t timestamp_ns;
+    uint64_t tid;
+    uint64_t cpu_id;
     uint64_t value0;
     uint64_t value1;
     uint64_t value2;

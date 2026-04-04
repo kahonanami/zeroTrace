@@ -83,10 +83,10 @@ int main(void) {
         goto cleanup_trace;
     }
 
-    add_entry_count = zt_test_count_substring(log_text, "[entry ] thread_add");
-    add_return_count = zt_test_count_substring(log_text, "[return] thread_add");
-    mix_entry_count = zt_test_count_substring(log_text, "[entry ] thread_mix");
-    mix_return_count = zt_test_count_substring(log_text, "[return] thread_mix");
+    add_entry_count = zt_test_count_substring(log_text, "ztrace:entry: thread_add");
+    add_return_count = zt_test_count_substring(log_text, "ztrace:return: thread_add");
+    mix_entry_count = zt_test_count_substring(log_text, "ztrace:entry: thread_mix");
+    mix_return_count = zt_test_count_substring(log_text, "ztrace:return: thread_mix");
     if (add_entry_count < 8 || add_return_count < 8 ||
         mix_entry_count < 8 || mix_return_count < 8) {
         fprintf(stderr,

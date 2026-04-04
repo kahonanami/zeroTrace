@@ -80,8 +80,8 @@ int main(void) {
         goto cleanup_trace;
     }
 
-    entry_count = zt_test_count_substring(log_text, "[entry ] signal_work");
-    return_count = zt_test_count_substring(log_text, "[return] signal_work");
+    entry_count = zt_test_count_substring(log_text, "ztrace:entry: signal_work");
+    return_count = zt_test_count_substring(log_text, "ztrace:return: signal_work");
     if (entry_count < 16 || return_count < 16) {
         fprintf(stderr,
                 "signal trace log too sparse: entry=%d return=%d\n",
