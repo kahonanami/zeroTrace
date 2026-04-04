@@ -1,3 +1,10 @@
+#define _GNU_SOURCE
+
+#include <time.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+#include <sched.h>
+
 #include <string.h>
 
 #include "../include/zt_payload.h"
@@ -15,6 +22,26 @@ static __thread uint64_t last_call_id;
 
 static zt_payload_config_t g_payload_config;
 static uint64_t g_call_id_seq;
+
+static uint64_t zt_clock_monotonic_ns(void) {
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static uint64_t zt_gettid_u64(void) {
+    return (uint64_t)syscall(SYS_gettid);
+}
+
+static uint64_t zt_getcpu_u64(void) {
+    int cpu = sched_getcpu();
+
+    return cpu >= 0 ? (uint64_t)cpu : 0;
+}
 
 static zt_trace_buffer_t *zt_get_trace_buffer(void) {
     if (g_payload_config.shared_buffer_addr == 0 ||
@@ -50,6 +77,9 @@ static void zt_publish_event(const zt_trace_event_t *event) {
     slot->probe_id = event->probe_id;
     slot->event_type = event->event_type;
     slot->call_id = event->call_id;
+    slot->timestamp_ns = event->timestamp_ns;
+    slot->tid = event->tid;
+    slot->cpu_id = event->cpu_id;
     slot->value0 = event->value0;
     slot->value1 = event->value1;
     slot->value2 = event->value2;
@@ -100,6 +130,9 @@ void zt_handle_entry(ctx_t *context) {
         .probe_id = context->func_id,
         .event_type = ZT_TRACE_EVENT_ENTRY,
         .call_id = call_id,
+        .timestamp_ns = zt_clock_monotonic_ns(),
+        .tid = zt_gettid_u64(),
+        .cpu_id = zt_getcpu_u64(),
         .value0 = context->rdi,
         .value1 = context->rsi,
         .value2 = context->rdx,
@@ -123,6 +156,9 @@ void zt_handle_return(ctx_t *context) {
         .probe_id = context->func_id,
         .event_type = ZT_TRACE_EVENT_RETURN,
         .call_id = peek_call_id_c(),
+        .timestamp_ns = zt_clock_monotonic_ns(),
+        .tid = zt_gettid_u64(),
+        .cpu_id = zt_getcpu_u64(),
         .value0 = context->rax,
     };
 

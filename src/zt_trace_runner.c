@@ -162,6 +162,7 @@ static void zt_dump_trace_events_since(zt_injector_session_t *session,
                                        const zt_trace_buffer_t *buffer,
                                        uint64_t *last_seq,
                                        FILE *out) {
+    const char *comm;
     uint64_t write_seq;
     uint64_t start_seq;
     uint64_t seq;
@@ -169,6 +170,9 @@ static void zt_dump_trace_events_since(zt_injector_session_t *session,
     if (session == NULL || buffer == NULL || last_seq == NULL || out == NULL) {
         return;
     }
+
+    comm = strrchr(session->exe_path, '/');
+    comm = comm != NULL ? comm + 1 : session->exe_path;
 
     if (buffer->magic != ZT_TRACE_BUFFER_MAGIC) {
         fprintf(out, "trace buffer magic mismatch\n");
@@ -192,6 +196,9 @@ static void zt_dump_trace_events_since(zt_injector_session_t *session,
         const zt_probe_info_t *probe;
         const char *symbol_name;
         char formatted[512];
+        const char *phase;
+        unsigned long long ts_sec;
+        unsigned long long ts_nsec;
 
         if (event->committed_seq != seq) {
             continue;
@@ -199,6 +206,9 @@ static void zt_dump_trace_events_since(zt_injector_session_t *session,
 
         probe = zt_probe_find_by_id(session, event->probe_id);
         symbol_name = probe != NULL ? probe->target.symbol : "<unknown>";
+        phase = event->event_type == ZT_TRACE_EVENT_RETURN ? "return" : "entry";
+        ts_sec = (unsigned long long)(event->timestamp_ns / 1000000000ULL);
+        ts_nsec = (unsigned long long)(event->timestamp_ns % 1000000000ULL);
 
         if (event->event_type == ZT_TRACE_EVENT_ENTRY && event->call_id != 0) {
             zt_entry_cache_slot_t *slot = &g_entry_cache[event->call_id % ZT_TRACE_EVENT_CAPACITY];
@@ -214,13 +224,28 @@ static void zt_dump_trace_events_since(zt_injector_session_t *session,
 
         if (probe != NULL &&
             zt_format_trace_event_with_sig(session, probe, matched_entry, event, formatted, sizeof(formatted)) == 0) {
-            fputs(formatted, out);
+            fprintf(out,
+                    "%s-%d/%llu [%03llu] %5llu.%09llu: ztrace:%s: %s",
+                    comm,
+                    session->pid,
+                    (unsigned long long)event->tid,
+                    (unsigned long long)event->cpu_id,
+                    ts_sec,
+                    ts_nsec,
+                    phase,
+                    formatted);
             continue;
         }
 
         if (event->event_type == ZT_TRACE_EVENT_ENTRY) {
             fprintf(out,
-                    "[entry ] %s(rdi=0x%llx, rsi=0x%llx, rdx=0x%llx, rcx=0x%llx, r8=0x%llx, r9=0x%llx)\n",
+                    "%s-%d/%llu [%03llu] %5llu.%09llu: ztrace:entry: %s(rdi=0x%llx, rsi=0x%llx, rdx=0x%llx, rcx=0x%llx, r8=0x%llx, r9=0x%llx)\n",
+                    comm,
+                    session->pid,
+                    (unsigned long long)event->tid,
+                    (unsigned long long)event->cpu_id,
+                    ts_sec,
+                    ts_nsec,
                     symbol_name,
                     (unsigned long long)event->value0,
                     (unsigned long long)event->value1,
@@ -230,12 +255,24 @@ static void zt_dump_trace_events_since(zt_injector_session_t *session,
                     (unsigned long long)event->value5);
         } else if (event->event_type == ZT_TRACE_EVENT_RETURN) {
             fprintf(out,
-                    "[return] %s -> 0x%llx\n",
+                    "%s-%d/%llu [%03llu] %5llu.%09llu: ztrace:return: %s -> 0x%llx\n",
+                    comm,
+                    session->pid,
+                    (unsigned long long)event->tid,
+                    (unsigned long long)event->cpu_id,
+                    ts_sec,
+                    ts_nsec,
                     symbol_name,
                     (unsigned long long)event->value0);
         } else {
             fprintf(out,
-                    "[event  ] %s type=%llu seq=%zu\n",
+                    "%s-%d/%llu [%03llu] %5llu.%09llu: ztrace:event: %s type=%llu seq=%zu\n",
+                    comm,
+                    session->pid,
+                    (unsigned long long)event->tid,
+                    (unsigned long long)event->cpu_id,
+                    ts_sec,
+                    ts_nsec,
                     symbol_name,
                     (unsigned long long)event->event_type,
                     (size_t)seq);

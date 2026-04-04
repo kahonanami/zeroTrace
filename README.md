@@ -88,6 +88,8 @@ CLI 常用命令：
   重新启用已存在 probe
 - `disable <symbol|id>`
   临时禁用 probe
+- `disable all`
+  一键禁用当前所有已安装 probe
 - `stop`
   暂停目标进程
 - `continue`
@@ -96,7 +98,7 @@ CLI 常用命令：
   查看当前目标进程信息
 - `info probes`
   查看当前 probe 列表
-- `quit`
+- `quit/exit`
   退出 CLI
 
 ## 快速测试
@@ -123,8 +125,8 @@ trace add_loop
 如果追踪成功，会持续看到类似输出：
 
 ```text
-[entry ] add_loop(rdi=0x1, rsi=0x2, rdx=0x0, rcx=0x7f54c2047a7a, r8=0x64, r9=0x0)
-[return] add_loop -> 0x3
+test_loop-2193810/2193810 [014] 157820.853973283: ztrace:entry: add_loop(rdi=0x1, rsi=0x2, rdx=0x0, rcx=0x7fb9cbcaca7a, r8=0x64, r9=0x0)
+test_loop-2193810/2193810 [014] 157820.853974307: ztrace:return: add_loop -> 0x3
 ```
 
 停止并卸载 probe：
@@ -149,6 +151,47 @@ ztrace.<pid>.log
 ztrace.1473057.log
 ```
 
+## 日志格式
+
+当前 trace 日志采用接近 `perf script` / `ftrace` 的事件格式，包含：
+
+- `comm/pid/tid`
+- `cpu id`
+- `CLOCK_MONOTONIC` 时间戳
+- `ztrace:entry` / `ztrace:return`
+
+例如：
+
+```text
+test_thread_log_demo-2184240/2184438 [010] 157114.775569202: ztrace:entry: demo_mix(rdi=0x1, rsi=0x32, rdx=0x1, rcx=0x0, r8=0x0, r9=0x7f175be7d6c0)
+test_thread_log_demo-2184240/2184438 [010] 157114.775572037: ztrace:return: demo_mix -> 0x3f
+```
+
+## 签名配置与参数解码
+
+`zeroTrace` 支持通过 [conf/zttrace.conf](./conf/zttrace.conf) 对常见 libc/POSIX 函数做签名感知输出。
+
+- 该文件是一个从 `ltrace.conf` 思路适配而来的配置文件
+- 命中已配置函数时，会优先按签名格式化参数和返回值
+- 字符串中非打印字符会转义成 `\xNN`
+
+`zttrace.conf` 使用简化版的函数签名语法，基本形式如下：
+
+```text
+function_name(arg_type arg_name, arg_type arg_name, ...) -> return_type
+```
+
+例如：
+
+```text
+puts(const char *s) -> int
+read(int fd, buffer buf, size_t count) -> long
+write(int fd, const buffer buf, size_t count) -> long
+malloc(size_t size) -> void *
+```
+
+对于未配置的函数会回退到寄存器风格显示。
+
 ## 自动化测试
 
 运行如下指令进行项目内置的自动化测试：
@@ -163,6 +206,7 @@ make test
 - thunk 构造
 - 16 个并发 probe 的生命周期测试
 - 多线程目标函数追踪稳定性测试
+- 异步信号下的 signal safety 测试
 
 ## Benchmark
 
@@ -219,10 +263,9 @@ uninstall latency avg : 22006 ns (0.022 ms) over 1000 rounds
 
 ## TODO List
 
+- [x] 增强信号安全测试，覆盖目标进程收到异步信号时的 trace 行为
 - [ ] 补充浮点寄存器 / SIMD 上下文保存与恢复验证
-- [ ] 增强信号安全测试，覆盖目标进程收到异步信号时的 trace 行为
 - [ ] 优化 `zt_trace_poll()` 的轮询策略，减少对目标进程的打断
-- [ ] 为更多函数补充 `conf/zttrace.conf` 签名和更丰富的参数显示规则
 
 ## 项目结构
 
@@ -233,7 +276,7 @@ uninstall latency avg : 22006 ns (0.022 ms) over 1000 rounds
 - [src/zt_trace_runner.c](./src/zt_trace_runner.c)
   payload 初始化、trace 轮询、probe 安装/卸载
 - [src/zt_thunk_manager.c](./src/zt_thunk_manager.c)
-  thunk 构造
+  thunk 构造与远程 thunk pool 管理
 - [src/zt_payload.c](./src/zt_payload.c)
   注入到目标进程中的 payload
 - [src/zt_stub.S](./src/zt_stub.S)
@@ -243,8 +286,10 @@ uninstall latency avg : 22006 ns (0.022 ms) over 1000 rounds
 
 - 当前项目主要面向 `x86_64 Linux`
 - 已支持通过 `conf/zttrace.conf` 对常见 libc/POSIX 函数做签名感知格式化；未配置到的函数会回退到寄存器风格显示
+- 已支持保存 / 恢复通用寄存器、标志寄存器和浮点上下文；当前尚未实现浮点参数/返回值显示
 - 对复杂函数前导指令的支持依赖 Capstone 解析；如果函数入口包含当前未处理的情况，probe 安装可能失败
 
 更底层的设计说明可以参考：
 
 - [docs/framework.md](./docs/framework.md)
+- [docs/stub.md](./docs/stub.md)

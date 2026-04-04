@@ -15,14 +15,12 @@ int main(void) {
     char *log_text = NULL;
     char log_path[256];
     pid_t child;
-    int add_entry_count;
-    int add_return_count;
-    int mix_entry_count;
-    int mix_return_count;
+    int entry_count;
+    int return_count;
     int i;
     int rc = 1;
 
-    if (zt_test_make_log_path(log_path, sizeof(log_path), "zt-thread-safety") != 0) {
+    if (zt_test_make_log_path(log_path, sizeof(log_path), "zt-signal-safety") != 0) {
         fprintf(stderr, "failed to create temp log path\n");
         return 1;
     }
@@ -34,8 +32,8 @@ int main(void) {
     }
 
     if (child == 0) {
-        execl("./bin/tests/test_threaded_target",
-              "./bin/tests/test_threaded_target",
+        execl("./bin/tests/test_signal_target",
+              "./bin/tests/test_signal_target",
               (char *)NULL);
         perror("execl");
         _exit(1);
@@ -48,9 +46,8 @@ int main(void) {
         goto cleanup;
     }
 
-    if (zt_trace_start_in_session(&session, "thread_add", log_path) != 0 ||
-        zt_trace_start_in_session(&session, "thread_mix", log_path) != 0) {
-        fprintf(stderr, "trace start failed for threaded target\n");
+    if (zt_trace_start_in_session(&session, "signal_work", log_path) != 0) {
+        fprintf(stderr, "trace start failed for signal target\n");
         goto cleanup_trace;
     }
 
@@ -59,13 +56,13 @@ int main(void) {
         goto cleanup_trace;
     }
 
-    for (i = 0; i < 60; ++i) {
+    for (i = 0; i < 80; ++i) {
         if (zt_test_process_gone(child)) {
             break;
         }
 
         if (zt_trace_poll() < 0) {
-            fprintf(stderr, "trace polling failed for threaded target\n");
+            fprintf(stderr, "trace polling failed for signal target\n");
             goto cleanup_trace;
         }
 
@@ -73,37 +70,32 @@ int main(void) {
     }
 
     if (zt_test_wait_trace_done(20000) != 0) {
-        fprintf(stderr, "trace polling timed out for threaded target\n");
+        fprintf(stderr, "trace polling timed out for signal target\n");
         goto cleanup_trace;
     }
 
     log_text = zt_test_read_file(log_path);
     if (log_text == NULL) {
-        fprintf(stderr, "failed to read threaded trace log\n");
+        fprintf(stderr, "failed to read signal trace log\n");
         goto cleanup_trace;
     }
 
-    add_entry_count = zt_test_count_substring(log_text, "ztrace:entry: thread_add");
-    add_return_count = zt_test_count_substring(log_text, "ztrace:return: thread_add");
-    mix_entry_count = zt_test_count_substring(log_text, "ztrace:entry: thread_mix");
-    mix_return_count = zt_test_count_substring(log_text, "ztrace:return: thread_mix");
-    if (add_entry_count < 8 || add_return_count < 8 ||
-        mix_entry_count < 8 || mix_return_count < 8) {
+    entry_count = zt_test_count_substring(log_text, "ztrace:entry: signal_work");
+    return_count = zt_test_count_substring(log_text, "ztrace:return: signal_work");
+    if (entry_count < 16 || return_count < 16) {
         fprintf(stderr,
-                "threaded trace log too sparse: add(entry=%d return=%d) mix(entry=%d return=%d)\n",
-                add_entry_count,
-                add_return_count,
-                mix_entry_count,
-                mix_return_count);
+                "signal trace log too sparse: entry=%d return=%d\n",
+                entry_count,
+                return_count);
         goto cleanup_trace;
     }
 
     if (!zt_test_process_gone(child)) {
-        fprintf(stderr, "threaded target still alive\n");
+        fprintf(stderr, "signal target still alive\n");
         goto cleanup_trace;
     }
 
-    printf("thread safety test passed\n");
+    printf("signal safety test passed\n");
     rc = 0;
 
 cleanup_trace:

@@ -490,7 +490,7 @@ int zt_format_trace_event_with_sig(const zt_injector_session_t *session,
     }
 
     if (event->event_type == ZT_TRACE_EVENT_ENTRY) {
-        written = snprintf(out, out_size, "[entry ] %s(", probe->target.symbol);
+        written = snprintf(out, out_size, "%s(", probe->target.symbol);
         if (written < 0 || (size_t)written >= out_size) {
             return -1;
         }
@@ -559,7 +559,7 @@ int zt_format_trace_event_with_sig(const zt_injector_session_t *session,
     }
 
     if (event->event_type == ZT_TRACE_EVENT_RETURN) {
-        written = snprintf(out, out_size, "[return] %s -> ", probe->target.symbol);
+        written = snprintf(out, out_size, "%s -> ", probe->target.symbol);
         if (written < 0 || (size_t)written >= out_size) {
             return -1;
         }

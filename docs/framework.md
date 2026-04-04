@@ -24,7 +24,7 @@
 - 读取命令
 - 维护当前会话状态
 - 调用 injector / trace runner
-- 在等待输入时轮询 trace 日志文件并把新增内容打印到终端
+- 在等待输入时轮询共享 trace buffer，并把新增日志重绘到终端
 
 当前支持的核心命令包括：
 
@@ -33,7 +33,7 @@
 - `trace <symbol>`
 - `untrace <symbol|id>`
 - `enable <symbol|id>`
-- `disable <symbol|id>`
+- `disable <symbol|id|all>`
 - `stop`
 - `continue`
 - `info target`
@@ -63,7 +63,14 @@ jmp rax
 
 ### 1.4 `zt_thunk_manager`
 
-`zt_thunk_manager` 负责根据 probe 信息构造 thunk 机器码。
+`zt_thunk_manager` 负责管理 thunk pool：
+
+- 第一次安装 probe 时一次性远程 `mmap` 一块 thunk pool
+- 每个 probe 占用一个固定 slot
+- `untrace` / `shutdown` 时，将 slot 对应标志位逻辑置空
+- 当 pool 全空时再远程 `munmap`
+
+`zt_thunk_manager` 同时负责根据 probe 信息构造 thunk 机器码。
 
 当前 thunk 模板如下：
 
@@ -84,15 +91,104 @@ jmp qword ptr [rip + disp32]
 - `continue_addr` 指向 `原函数地址 + orig_len`
 - 由于相对寻址范围的问题，在 thunk 末尾存放两个符号的绝对地址，通过 `call/jmp` 间接跳转到目标地址
 
-当前 thunk builder 会在复制函数前导指令时做最小重定位和改写，而不是只做裸 `memcpy`：
+thunk 对于不同的 `original bytes` 具有不同策略。
 
-- 普通指令：直接复制
-- `RIP` 相对内存访问：重新计算并回填新的 `disp32`
-- `call rel32`：改写成绝对调用
-- `jmp rel8/rel32`：改写成绝对跳转
-- `jcc rel8/rel32`：展开成“条件反转 + 绝对跳转”模板
+### 1. 普通指令
 
-这样可以支持一部分 glibc 入口常见的 `RIP` 相对寻址指令，例如 `read`、`write` 这类函数的入口逻辑。
+例如：
+
+```asm
+push rbp
+mov rbp, rsp
+sub rsp, 0x20
+xor eax, eax
+```
+
+这类指令不依赖当前 `RIP`，也不包含相对控制流，因此可以直接原样复制到 thunk。
+
+### 2. `RIP` 相对内存访问
+
+例如：
+
+```asm
+mov rax, [rip + disp32]
+lea rdi, [rip + disp32]
+cmp byte ptr [rip + disp32], 0
+```
+
+这类指令原本的目标地址是：
+
+```text
+old_target = old_next_ip + old_disp
+```
+
+把指令搬到 thunk 后，需要重新计算：
+
+```text
+new_disp = old_target - new_next_ip
+```
+
+然后把新的 `disp32` 回填进复制后的指令字节里。这样即使指令已经移动到新的 thunk 地址，它仍然会访问原来的全局变量、GOT 槽位或只读数据。
+
+### 3. `call rel32`
+
+例如：
+
+```asm
+call some_target
+```
+
+这类指令原本依赖相对偏移，如果 thunk 离目标地址很远，保留原编码会失效。因此当前实现会把它改写成绝对调用，逻辑上等价于：
+
+```asm
+movabs rax, target
+call rax
+```
+
+这样可以消除 `rel32` 距离限制。
+
+### 4. `jmp rel8/rel32`
+
+例如：
+
+```asm
+jmp some_target
+```
+
+同理，当前实现会把它改写成绝对跳转，逻辑上等价于：
+
+```asm
+movabs rax, target
+jmp rax
+```
+
+### 5. `jcc rel8/rel32`
+
+对于 jcc 当前做法是展开成一个小模板：
+
+1. 先把条件反转
+2. 条件不满足时跳过后面的绝对跳转块
+3. 条件满足时执行：
+
+```asm
+movabs rax, target
+jmp rax
+```
+
+例如：
+
+```asm
+jz target
+```
+
+会被展开成类似：
+
+```asm
+jnz .skip
+movabs rax, target
+jmp rax
+.skip:
+```
 
 ### 1.5 `zt_payload`
 
@@ -131,23 +227,11 @@ jmp qword ptr [rip + disp32]
 
 ### 1.8 `zt_sigconf`
 
-`zt_sigconf` 是运行时函数签名解释模块，会加载：
+`zt_sigconf` 是运行时函数签名解释模块，会加载 `conf/zttrace.conf`。
 
-- `conf/zttrace.conf`
+这个配置文件由 `ltrace.conf` 适配而来，它的作用是帮助 trace 日志把原始寄存器值格式化成更接近函数签名的展示结果。
 
-这个配置文件由 `ltrace.conf` 思路适配而来，但只实现了 `zeroTrace` 当前需要的简化子集。它的作用是帮助 trace 日志把原始寄存器值格式化成更接近函数签名的展示结果。
-
-当前支持的典型显示类型包括：
-
-- `int`
-- `long`
-- `unsigned long`
-- `size_t`
-- `ssize_t`
-- `char *` / `const char *`
-- 普通指针
-
-trace 输出时会优先按签名格式化；如果没有找到函数签名，或者类型暂时不支持，则回退到原始寄存器打印。
+具体配置语法请看 [README.md](../README.md)
 
 ---
 
@@ -189,13 +273,11 @@ trace <symbol>
 8. 读取目标函数开头字节
 9. 用 Capstone 累计完整指令长度，得到 `orig_len`
 10. 保存原始字节到 probe
-11. 为该 probe 远程 `mmap` 一页 thunk 空间
+11. 从远程 thunk pool 为该 probe 分配一个 thunk slot
 12. 基于真实 `thunk_addr` 构造 thunk，并在需要时对前导指令做重定位 / 改写
 13. 写入 thunk 到目标进程
 14. 把目标函数入口 patch 到 thunk
 15. `PTRACE_CONT` 恢复目标进程运行
-
-如果不是第一条 probe，而是同一会话里继续 `trace` 其他符号，则复用已经初始化好的 payload 和 trace buffer，只为新 probe 安装 thunk 和 patch。
 
 ### 2.3 capture
 
@@ -210,21 +292,28 @@ zt_trace_poll()
 1. `SIGSTOP` 暂停目标进程
 2. 读取远程 trace buffer
 3. 从上次 `last_seq` 之后开始消费新事件
-4. 把格式化后的输出追加写入 `ztrace.<pid>.log`
+4. 把格式化后的输出追加写入 `ztrace.<pid>.log`，并在 CLI 中重绘显示
 5. `PTRACE_CONT` 继续目标进程
 
-当前日志格式类似：
+当前日志格式采用接近 `perf script` / `ftrace` 的事件流风格，包含：
+
+- `comm/pid/tid`
+- `cpu id`
+- `CLOCK_MONOTONIC` 时间戳
+- `ztrace:entry` / `ztrace:return`
+
+例如：
 
 ```text
-[entry ] add_loop(rdi=0x1, rsi=0x2, ...)
-[return] add_loop -> 0x3
+test_thread_log_demo-2179652/2179837 [003] 156853.039080371: ztrace:entry: demo_add(rdi=0x1, rsi=0x0, rdx=0x1, rcx=0x7fa855d4785e, r8=0x0, r9=0x7fa855c8e6c0)
+test_thread_log_demo-2179652/2179837 [003] 156853.039081151: ztrace:return: demo_add -> 0x1
 ```
 
 如果函数签名能在 `conf/zttrace.conf` 中找到，则会优先输出更接近 `ltrace` 风格的结果，例如：
 
 ```text
-[entry ] puts("hello")
-[return] strlen -> 21
+test_libc_io_loop-1705732/1705732 [001] 157114.775569202: ztrace:entry: write(1, 0x55581e3322a0="line len: 22\x0a", 13)
+test_libc_io_loop-1705732/1705732 [001] 157114.775572037: ztrace:return: read -> 22 "ad-write\x0a"
 ```
 
 ### 2.4 disable / enable
@@ -250,7 +339,7 @@ zt_trace_poll()
 2. 如果该 probe 当前已启用，则恢复原函数
 3. 从 probe 表中删除该 probe
 4. 如果仍有其他 probe，则继续目标进程
-5. 如果这是最后一个 probe，则关闭当前 active trace 状态
+5. 如果这是最后一个 probe，则关闭当前 active trace 状态，并在 thunk pool 全空时回收远程 thunk pool
 
 ---
 
@@ -284,6 +373,10 @@ payload 和 tracer 之间通过共享内存中的 ring buffer 传递事件。
 
 - `probe_id`
 - `event_type`
+- `call_id`
+- `timestamp_ns`
+- `tid`
+- `cpu_id`
 - `value0 ... value5`
 - `committed_seq`
 
@@ -291,6 +384,9 @@ payload 和 tracer 之间通过共享内存中的 ring buffer 传递事件。
 
 - `entry` 事件保存参数寄存器
 - `return` 事件保存 `rax`
+- `call_id` 用于把 entry / return 在 tracer 侧稳定关联起来
+- `timestamp_ns` 在目标进程命中 probe 时通过 `CLOCK_MONOTONIC` 记录
+- `tid` / `cpu_id` 用于多线程与 perf-style 事件流展示
 - `committed_seq` 用于标记该槽位已经写完，防止竞争
 
 ### 3.3 active trace 运行态
@@ -299,9 +395,15 @@ payload 和 tracer 之间通过共享内存中的 ring buffer 传递事件。
 
 - 当前 session
 - 远程 payload 相关地址
+- 远程 thunk pool 元数据
 - 日志文件句柄
 - `last_seq`
 - 运行态（`inactive / stopped / running`）
+
+另外 tracer 侧还会维护一份基于 `call_id` 的 entry cache，用来在 `return` 时找回对应 entry，支持：
+
+- 多线程下稳定配对 entry / return
+- `read` / `recv` / `fread` / `fgets` 这类在返回后再读取 buffer 内容的函数格式化
 
 ---
 
@@ -311,5 +413,5 @@ payload 和 tracer 之间通过共享内存中的 ring buffer 传递事件。
 
 - 主要面向 `x86_64 Linux`，后续可支持 `ARM64` 架构（题目 A1）
 - 还未实现条件探针（题目 A2）
-- 参数输出目前固定按寄存器显示，之后可以优化输出形式
-- 对复杂 RIP-relative /其他相对寻址情况的支持还不完整
+- 已保存 / 恢复浮点上下文，但当前还不显示浮点参数与浮点返回值
+- `zt_trace_poll()` 仍然采用 `SIGSTOP -> 读 buffer -> PTRACE_CONT` 的轮询策略，后续仍可继续优化
