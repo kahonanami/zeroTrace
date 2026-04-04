@@ -36,7 +36,8 @@ STANDALONE_TEST_BINS := \
 	$(TEST_BIN_DIR)/test_benchmark_target \
 	$(TEST_BIN_DIR)/test_many_probes_target
 THREAD_STANDALONE_TEST_BINS := \
-	$(TEST_BIN_DIR)/test_threaded_target
+	$(TEST_BIN_DIR)/test_threaded_target \
+	$(TEST_BIN_DIR)/test_signal_target
 BENCHMARK_BINS := \
 	$(TEST_BIN_DIR)/test_benchmark_target \
 	$(TEST_BIN_DIR)/test_benchmark_runner \
