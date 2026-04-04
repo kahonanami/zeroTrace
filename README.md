@@ -219,10 +219,9 @@ uninstall latency avg : 22006 ns (0.022 ms) over 1000 rounds
 
 ## TODO List
 
+- [x] 增强信号安全测试，覆盖目标进程收到异步信号时的 trace 行为
 - [ ] 补充浮点寄存器 / SIMD 上下文保存与恢复验证
-- [ ] 增强信号安全测试，覆盖目标进程收到异步信号时的 trace 行为
 - [ ] 优化 `zt_trace_poll()` 的轮询策略，减少对目标进程的打断
-- [ ] 为更多函数补充 `conf/zttrace.conf` 签名和更丰富的参数显示规则
 
 ## 项目结构
 
