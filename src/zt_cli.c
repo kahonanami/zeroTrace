@@ -39,7 +39,7 @@ static struct {
     {"quit", "Exit the CLI", cmd_exit},
     {"attach", "Attach to target process: attach <pid>", cmd_attach},
     {"detach", "Detach from current target", cmd_detach},
-    {"trace", "Register and enable a probe: trace <symbol>", cmd_trace},
+    {"trace", "Register and enable a probe: trace <symbol> [if argN OP value]", cmd_trace},
     {"stop", "Stop the target process and keep probes unchanged", cmd_stop},
     {"enable", "Enable a probe again: enable <symbol|id>", cmd_enable},
     {"disable", "Disable probe(s): disable <symbol|id|all>", cmd_disable},
@@ -119,6 +119,113 @@ static char *zt_next_arg(char *args) {
 
     char *arg = strtok(NULL, " ");
     return arg;
+}
+
+static const char *zt_cli_filter_op_name(uint64_t op) {
+    switch (op) {
+    case ZT_PROBE_FILTER_EQ: return "==";
+    case ZT_PROBE_FILTER_NE: return "!=";
+    case ZT_PROBE_FILTER_GT: return ">";
+    case ZT_PROBE_FILTER_GE: return ">=";
+    case ZT_PROBE_FILTER_LT: return "<";
+    case ZT_PROBE_FILTER_LE: return "<=";
+    case ZT_PROBE_FILTER_NONE:
+    default:
+        return "none";
+    }
+}
+
+static int zt_cli_parse_filter_arg(const char *arg, uint64_t *index_out) {
+    char *endptr;
+    unsigned long index;
+
+    if (arg == NULL || index_out == NULL || strncmp(arg, "arg", 3) != 0) {
+        return -1;
+    }
+
+    index = strtoul(arg + 3, &endptr, 10);
+    if (arg + 3 == endptr || *endptr != '\0' || index >= 6) {
+        return -1;
+    }
+
+    *index_out = index;
+    return 0;
+}
+
+static int zt_cli_parse_filter_op(const char *op, uint64_t *op_out) {
+    if (op == NULL || op_out == NULL) {
+        return -1;
+    }
+
+    if (strcmp(op, "==") == 0) {
+        *op_out = ZT_PROBE_FILTER_EQ;
+    } else if (strcmp(op, "!=") == 0) {
+        *op_out = ZT_PROBE_FILTER_NE;
+    } else if (strcmp(op, ">") == 0) {
+        *op_out = ZT_PROBE_FILTER_GT;
+    } else if (strcmp(op, ">=") == 0) {
+        *op_out = ZT_PROBE_FILTER_GE;
+    } else if (strcmp(op, "<") == 0) {
+        *op_out = ZT_PROBE_FILTER_LT;
+    } else if (strcmp(op, "<=") == 0) {
+        *op_out = ZT_PROBE_FILTER_LE;
+    } else {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int zt_cli_parse_trace_filter(zt_probe_filter_t *filter) {
+    char *maybe_if;
+    char *arg;
+    char *op;
+    char *value_str;
+    char *extra;
+    char *endptr;
+    uint64_t arg_index;
+    uint64_t op_value;
+    unsigned long long value;
+
+    if (filter == NULL) {
+        return -1;
+    }
+
+    memset(filter, 0, sizeof(*filter));
+
+    maybe_if = zt_next_arg(NULL);
+    if (maybe_if == NULL) {
+        return 0;
+    }
+
+    if (strcmp(maybe_if, "if") != 0) {
+        return -1;
+    }
+
+    arg = zt_next_arg(NULL);
+    op = zt_next_arg(NULL);
+    value_str = zt_next_arg(NULL);
+    extra = zt_next_arg(NULL);
+    if (arg == NULL || op == NULL || value_str == NULL || extra != NULL) {
+        return -1;
+    }
+
+    if (zt_cli_parse_filter_arg(arg, &arg_index) != 0 ||
+        zt_cli_parse_filter_op(op, &op_value) != 0) {
+        return -1;
+    }
+
+    errno = 0;
+    value = strtoull(value_str, &endptr, 0);
+    if (value_str == endptr || *endptr != '\0' || errno != 0) {
+        return -1;
+    }
+
+    filter->enabled = 1;
+    filter->arg_index = arg_index;
+    filter->op = op_value;
+    filter->value = value;
+    return 0;
 }
 
 static char *rl_gets(void) {
@@ -299,6 +406,7 @@ static int cmd_detach(char *args) {
 static int cmd_trace(char *args) {
     char *symbol;
     char cwd[PATH_MAX];
+    zt_probe_filter_t filter;
 
     if (!g_cli_attached) {
         printf("No target attached\n");
@@ -307,7 +415,13 @@ static int cmd_trace(char *args) {
 
     symbol = zt_next_arg(args);
     if (symbol == NULL) {
-        printf("Usage: trace <symbol>\n");
+        printf("Usage: trace <symbol> [if argN OP value]\n");
+        return 0;
+    }
+
+    if (zt_cli_parse_trace_filter(&filter) != 0) {
+        printf("Usage: trace <symbol> [if argN OP value]\n");
+        printf("Example: trace write if arg0 == 1\n");
         return 0;
     }
 
@@ -331,7 +445,10 @@ static int cmd_trace(char *args) {
         g_cli_last_poll = 0;
     }
 
-    if (zt_trace_start_in_session(&g_cli_session, symbol, g_cli_log_path) != 0) {
+    if (zt_trace_start_filtered_in_session(&g_cli_session,
+                                           symbol,
+                                           g_cli_log_path,
+                                           filter.enabled ? &filter : NULL) != 0) {
         printf("Failed to trace %s\n", symbol);
         if (!zt_trace_is_active()) {
             g_cli_log_path[0] = '\0';
@@ -341,7 +458,16 @@ static int cmd_trace(char *args) {
         return 0;
     }
 
-    printf("Tracing %s, log file: %s\n", symbol, g_cli_log_path);
+    if (filter.enabled) {
+        printf("Tracing %s if arg%llu %s 0x%llx, log file: %s\n",
+               symbol,
+               (unsigned long long)filter.arg_index,
+               zt_cli_filter_op_name(filter.op),
+               (unsigned long long)filter.value,
+               g_cli_log_path);
+    } else {
+        printf("Tracing %s, log file: %s\n", symbol, g_cli_log_path);
+    }
     return 0;
 }
 
@@ -540,34 +666,49 @@ static int cmd_info(char *args) {
             return 0;
         }
 
-        printf("%-4s %-20s %-10s %-5s %-18s %s\n",
+        printf("%-4s %-20s %-10s %-5s %-18s %-18s %s\n",
                "id",
                "symbol",
                "state",
                "len",
                "addr",
+               "filter",
                "module");
-        printf("%-4s %-20s %-10s %-5s %-18s %s\n",
+        printf("%-4s %-20s %-10s %-5s %-18s %-18s %s\n",
                "--",
                "--------------------",
                "----------",
                "-----",
                "------------------",
+               "------------------",
                "------");
 
         for (i = 0; i < ZT_PROBES_CAPACITY; ++i) {
             zt_probe_info_t *probe = &g_cli_session.probes[i];
+            char filter_desc[32];
 
             if (probe->probe_id == 0) {
                 continue;
             }
 
-            printf("%-4lu %-20.20s %-10s %-5u 0x%016lx %s\n",
+            if (probe->filter.enabled && probe->filter.op != ZT_PROBE_FILTER_NONE) {
+                snprintf(filter_desc,
+                         sizeof(filter_desc),
+                         "arg%llu%s0x%llx",
+                         (unsigned long long)probe->filter.arg_index,
+                         zt_cli_filter_op_name(probe->filter.op),
+                         (unsigned long long)probe->filter.value);
+            } else {
+                snprintf(filter_desc, sizeof(filter_desc), "-");
+            }
+
+            printf("%-4lu %-20.20s %-10s %-5u 0x%016lx %-18.18s %s\n",
                    probe->probe_id,
                    probe->target.symbol,
                    zt_probe_state_name(probe->state),
                    probe->orig_len,
                    probe->target.remote_addr,
+                   filter_desc,
                    probe->target.module_path);
         }
         return 0;

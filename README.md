@@ -40,8 +40,10 @@ make
   主程序，进入交互式 CLI
 - `bin/libzt_payload.so`
   注入到目标进程中的 payload
+- `bin/tests/test_libc_io_loop`
+  自动化测试使用的 libc/POSIX 动态库函数目标程序
 - `bin/tests/test_loop`
-  独立测试目标程序
+  唯一保留的手动验证目标程序
 - `bin/tests/test_benchmark_target`
   benchmark 目标程序
 - `bin/tests/test_benchmark_runner`
@@ -82,6 +84,8 @@ CLI 常用命令：
   从当前目标进程分离
 - `trace <symbol>`
   为函数安装 probe 并开始追踪
+- `trace <symbol> if argN OP value`
+  条件追踪前 6 个整型 / 指针参数，例如 `trace write if arg0 == 1`
 - `untrace <symbol|id>`
   恢复原函数并删除 probe
 - `enable <symbol|id>`
@@ -103,7 +107,7 @@ CLI 常用命令：
 
 ## 快速测试
 
-先启动测试程序：
+先启动手动测试程序：
 
 ```bash
 ./bin/tests/test_loop
@@ -125,8 +129,8 @@ trace add_loop
 如果追踪成功，会持续看到类似输出：
 
 ```text
-test_loop-2193810/2193810 [014] 157820.853973283: ztrace:entry: add_loop(rdi=0x1, rsi=0x2, rdx=0x0, rcx=0x7fb9cbcaca7a, r8=0x64, r9=0x0)
-test_loop-2193810/2193810 [014] 157820.853974307: ztrace:return: add_loop -> 0x3
+test_loop-32079/32079 [001] 157114.775569202: ztrace:entry: add_loop(rdi=0xa, rsi=0x0, rdx=0x0, rcx=0x0, r8=0x0, r9=0x0)
+test_loop-32079/32079 [001] 157114.775572037: ztrace:return: add_loop -> 0xb
 ```
 
 停止并卸载 probe：
@@ -136,6 +140,15 @@ untrace add_loop
 detach
 quit
 ```
+
+条件探针可以只输出满足参数条件的调用：
+
+```text
+trace add_loop if arg0 >= 10
+trace write if arg0 == 0x1
+```
+
+当前条件表达式支持 `arg0` 到 `arg5`，分别对应 x86-64 SysV ABI 的 `rdi/rsi/rdx/rcx/r8/r9`。操作符支持 `==`、`!=`、`>`、`>=`、`<`、`<=`，数值支持十进制和 `0x` 十六进制。
 
 ## 日志文件
 
@@ -163,8 +176,8 @@ ztrace.1473057.log
 例如：
 
 ```text
-test_thread_log_demo-2184240/2184438 [010] 157114.775569202: ztrace:entry: demo_mix(rdi=0x1, rsi=0x32, rdx=0x1, rcx=0x0, r8=0x0, r9=0x7f175be7d6c0)
-test_thread_log_demo-2184240/2184438 [010] 157114.775572037: ztrace:return: demo_mix -> 0x3f
+test_threaded_target-22520/22521 [010] 157114.775569202: ztrace:entry: thread_add(rdi=0x1, rsi=0x32, rdx=0x1, rcx=0x0, r8=0x0, r9=0x7f175be7d6c0)
+test_threaded_target-22520/22521 [010] 157114.775572037: ztrace:return: thread_add -> 0x33
 ```
 
 ## 签名配置与参数解码
@@ -202,11 +215,12 @@ make test
 
 当前测试覆盖：
 
-- probe 表和符号解析
 - thunk 构造
+- libc/POSIX 动态库函数 trace
 - 16 个并发 probe 的生命周期测试
 - 多线程目标函数追踪稳定性测试
 - 异步信号下的 signal safety 测试
+- 条件探针参数过滤测试
 
 ## Benchmark
 

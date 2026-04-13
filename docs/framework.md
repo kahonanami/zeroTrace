@@ -30,7 +30,7 @@
 
 - `attach <pid>`
 - `detach`
-- `trace <symbol>`
+- `trace <symbol> [if argN OP value]`
 - `untrace <symbol|id>`
 - `enable <symbol|id>`
 - `disable <symbol|id|all>`
@@ -258,8 +258,18 @@ attach <pid>
 用户执行：
 
 ```text
-trace <symbol>
+trace <symbol> [if argN OP value]
 ```
+
+无 `if` 时直接追踪所有调用；带 `if` 时会在 ztrace 消费事件时按 entry 参数过滤日志，并同步吞掉对应的 return 事件。例如：
+
+```text
+trace write if arg0 == 1
+trace probe_fn01 if arg0 >= 10
+```
+
+当前支持 `arg0` 到 `arg5`，对应 x86-64 SysV ABI 的 `rdi/rsi/rdx/rcx/r8/r9`，操作符支持 `==`、`!=`、`>`、`>=`、`<`、`<=`。
+条件值通过 `strtoull(..., base=0)` 解析，因此支持十进制和 `0x` 十六进制输入。
 
 第一条 probe 的完整流程如下：
 
@@ -305,8 +315,8 @@ zt_trace_poll()
 例如：
 
 ```text
-test_thread_log_demo-2179652/2179837 [003] 156853.039080371: ztrace:entry: demo_add(rdi=0x1, rsi=0x0, rdx=0x1, rcx=0x7fa855d4785e, r8=0x0, r9=0x7fa855c8e6c0)
-test_thread_log_demo-2179652/2179837 [003] 156853.039081151: ztrace:return: demo_add -> 0x1
+test_threaded_target-22520/22521 [003] 156853.039080371: ztrace:entry: thread_add(rdi=0x1, rsi=0x0, rdx=0x1, rcx=0x7fa855d4785e, r8=0x0, r9=0x7fa855c8e6c0)
+test_threaded_target-22520/22521 [003] 156853.039081151: ztrace:return: thread_add -> 0x1
 ```
 
 如果函数签名能在 `conf/zttrace.conf` 中找到，则会优先输出更接近 `ltrace` 风格的结果，例如：
@@ -316,7 +326,22 @@ test_libc_io_loop-1705732/1705732 [001] 157114.775569202: ztrace:entry: write(1,
 test_libc_io_loop-1705732/1705732 [001] 157114.775572037: ztrace:return: read -> 22 "ad-write\x0a"
 ```
 
-### 2.4 disable / enable
+### 2.4 条件探针过滤
+
+条件探针没有把过滤表达式放进目标进程 payload 的热路径里执行，而是在 tracer 消费共享 trace buffer 时完成过滤。这样 payload 侧仍然只负责记录寄存器快照，避免在被 trace 的进程里增加复杂判断逻辑。
+
+实现流程如下：
+
+1. CLI 解析 `trace <symbol> if argN OP value`
+2. 解析结果保存到 `zt_probe_info_t.filter`
+3. payload 命中 probe 时仍然写入普通 entry / return 事件
+4. `zt_trace_runner` 消费 entry 事件时读取 `value0 ... value5`
+5. 如果 entry 不满足条件，则不写日志，并在 entry cache 中把这个 `call_id` 标记为 suppressed
+6. 后续遇到相同 `call_id` 的 return 事件时也直接吞掉，避免出现“没有 entry 但有 return”的半条日志
+
+因此条件 probe 只影响 ztrace 输出，不改变目标函数执行路径，也不会改变 thunk / stub 的运行方式。
+
+### 2.5 disable / enable
 
 `disable <symbol|id>`：
 
@@ -331,7 +356,7 @@ test_libc_io_loop-1705732/1705732 [001] 157114.775572037: ztrace:return: read ->
 2. 重新为 probe 安装 thunk 和入口 patch
 3. 继续目标进程
 
-### 2.5 untrace
+### 2.6 untrace
 
 `untrace <symbol|id>`：
 
@@ -357,6 +382,7 @@ probe 表定义在 `zt_injector_session_t` 中，每个 probe 包含：
 - `orig_code`
 - `orig_len`
 - `state`
+- `filter`
 
 其中 `state` 当前显式区分为：
 
@@ -412,6 +438,6 @@ payload 和 tracer 之间通过共享内存中的 ring buffer 传递事件。
 当前实现已经能稳定支持基本功能，但还有一些限制：
 
 - 主要面向 `x86_64 Linux`，后续可支持 `ARM64` 架构（题目 A1）
-- 还未实现条件探针（题目 A2）
+- 条件探针当前在 ztrace 事件消费侧过滤日志，不在目标进程 payload hot path 中执行过滤表达式
 - 已保存 / 恢复浮点上下文，但当前还不显示浮点参数与浮点返回值
 - `zt_trace_poll()` 仍然采用 `SIGSTOP -> 读 buffer -> PTRACE_CONT` 的轮询策略，后续仍可继续优化

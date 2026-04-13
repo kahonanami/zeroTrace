@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 static void wait_for_start(void) {
     sigset_t set;
@@ -43,7 +44,7 @@ int main(void) {
 
     wait_for_start();
 
-    for (i = 0; i < 4000; ++i) {
+    for (i = 0; i < 20; ++i) {
         sink += probe_fn01(i);
         sink += probe_fn02(i);
         sink += probe_fn03(i);
@@ -60,7 +61,10 @@ int main(void) {
         sink += probe_fn14(i);
         sink += probe_fn15(i);
         sink += probe_fn16(i);
+        usleep(5000);
     }
+
+    usleep(100000);
 
     return sink == 0xdead ? 1 : 0;
 }

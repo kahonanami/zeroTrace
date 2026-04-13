@@ -6,6 +6,24 @@
 #define ZT_TRACE_EVENT_CAPACITY 1024
 #define ZT_TRACE_BUFFER_MAGIC 0x5a54425546464552ULL
 
+typedef enum {
+    ZT_PROBE_FILTER_NONE = 0,
+    ZT_PROBE_FILTER_EQ,
+    ZT_PROBE_FILTER_NE,
+    ZT_PROBE_FILTER_GT,
+    ZT_PROBE_FILTER_GE,
+    ZT_PROBE_FILTER_LT,
+    ZT_PROBE_FILTER_LE,
+} zt_probe_filter_op_t;
+
+typedef struct {
+    uint64_t probe_id;
+    uint64_t enabled;
+    uint64_t arg_index;
+    uint64_t op;
+    uint64_t value;
+} zt_probe_filter_t;
+
 typedef struct {
     uint64_t r15;
     uint64_t r14;

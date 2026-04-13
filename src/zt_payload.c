@@ -146,8 +146,14 @@ void zt_handle_entry(ctx_t *context) {
 
 void zt_handle_return(ctx_t *context) {
     zt_trace_event_t event;
+    uint64_t call_id;
 
     if (context == NULL) {
+        return;
+    }
+
+    call_id = peek_call_id_c();
+    if (call_id == 0) {
         return;
     }
 
@@ -155,7 +161,7 @@ void zt_handle_return(ctx_t *context) {
         .committed_seq = 0,
         .probe_id = context->func_id,
         .event_type = ZT_TRACE_EVENT_RETURN,
-        .call_id = peek_call_id_c(),
+        .call_id = call_id,
         .timestamp_ns = zt_clock_monotonic_ns(),
         .tid = zt_gettid_u64(),
         .cpu_id = zt_getcpu_u64(),

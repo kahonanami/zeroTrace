@@ -5,6 +5,8 @@
 #include <stdbool.h>
 #include <sys/types.h>
 
+#include "zt_payload.h"
+
 #define ZT_PROBES_CAPACITY 32
 #define ZT_PROBE_SYMBOL_MAX 64
 #define ZT_PROBE_MODULE_MAX 512
@@ -33,6 +35,7 @@ typedef struct{
     uint8_t orig_code[ZT_PROBE_ORIG_CODE_MAX];
     uint8_t orig_len;
     zt_probe_state_t state;
+    zt_probe_filter_t filter;
 } zt_probe_info_t;
 
 typedef struct {

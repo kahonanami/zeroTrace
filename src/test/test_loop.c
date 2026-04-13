@@ -1,26 +1,29 @@
+#define _GNU_SOURCE
+
 #include <stdio.h>
+#include <sys/prctl.h>
 #include <unistd.h>
-#include <stdint.h>
 
-int add_loop(int a, int b) {
-    return a + b;
+__attribute__((noinline)) int add_loop(int value) {
+    return value + 1;
 }
 
-int multiply_loop(int a, int b) {
-    return a * b;
-}
+int main(void) {
+    int i = 0;
 
-int main(){
-    int pid = getpid();
-    printf("Process ID: %d\n", pid);
-    printf("add_loop addr: %p\n", (void*)add_loop);
-    printf("multiply_loop addr: %p\n", (void*)multiply_loop);
-    while(1){
-        int add_result = add_loop(1, 2);
-        int multiply_result = multiply_loop(1, 2);
+    prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
 
-        printf("Add Result: %d\n", add_result);
-        printf("Multiply Result: %d\n", multiply_result);
+    printf("test_loop pid=%d\n", getpid());
+    fflush(stdout);
+
+    while (1) {
+        int ret = add_loop(i);
+
+        printf("add_loop(%d) -> %d\n", i, ret);
+        fflush(stdout);
+        ++i;
         sleep(1);
     }
+
+    return 0;
 }
