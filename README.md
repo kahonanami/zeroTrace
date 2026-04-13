@@ -280,7 +280,7 @@ uninstall latency avg : 22006 ns (0.022 ms) over 1000 rounds
 
 - [x] 增强信号安全测试，覆盖目标进程收到异步信号时的 trace 行为
 - [x] 补充浮点寄存器 / SIMD 上下文保存与恢复验证
-- [ ] 优化 `zt_trace_poll()` 的轮询策略，减少对目标进程的打断
+- [x] 优化 `zt_trace_poll()` 的轮询策略，使用 `process_vm_readv` 非暂停读取 trace buffer
 
 ## 项目结构
 

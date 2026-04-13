@@ -551,6 +551,7 @@ static int zt_trace_ensure_running(zt_injector_session_t *session) {
 
 static int zt_trace_check_exit_event(void) {
     int status;
+    int stop_sig;
     pid_t pid;
 
     if (g_active_trace.state != ZT_TRACE_RUNTIME_RUNNING ||
@@ -572,7 +573,14 @@ static int zt_trace_check_exit_event(void) {
     }
 
     if (WIFSTOPPED(status)) {
-        g_active_trace.state = ZT_TRACE_RUNTIME_STOPPED;
+        stop_sig = WSTOPSIG(status);
+        if (ptrace(PTRACE_CONT,
+                   g_active_trace.session->pid,
+                   NULL,
+                   (void *)(uintptr_t)stop_sig) != 0) {
+            return -1;
+        }
+        g_active_trace.state = ZT_TRACE_RUNTIME_RUNNING;
     }
 
     return 0;
@@ -589,12 +597,18 @@ int zt_trace_poll(void) {
         return 0;
     }
 
-    if (zt_trace_check_exit_event() != 0) {
-        return 1;
+    {
+        int exit_status = zt_trace_check_exit_event();
+        if (exit_status < 0) {
+            return -1;
+        }
+        if (exit_status > 0) {
+            return 1;
+        }
     }
 
-    if (zt_trace_ensure_stopped(g_active_trace.session) != 0) {
-        return -1;
+    if (g_active_trace.state != ZT_TRACE_RUNTIME_RUNNING) {
+        return 0;
     }
 
     if (zt_read_remote_memory(g_active_trace.session->pid,
@@ -609,7 +623,7 @@ int zt_trace_poll(void) {
                                &g_active_trace.last_seq,
                                g_active_trace.log_fp);
 
-    return zt_trace_ensure_running(g_active_trace.session);
+    return 0;
 }
 
 int zt_trace_disable_probe(zt_injector_session_t *session, uint64_t probe_id) {

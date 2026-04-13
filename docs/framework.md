@@ -297,13 +297,14 @@ trace probe_fn01 if arg0 >= 10
 zt_trace_poll()
 ```
 
-当前轮询方式是：
+当前普通轮询方式是：
 
-1. `SIGSTOP` 暂停目标进程
-2. 读取远程 trace buffer
-3. 从上次 `last_seq` 之后开始消费新事件
-4. 把格式化后的输出追加写入 `ztrace.<pid>.log`，并在 CLI 中重绘显示
-5. `PTRACE_CONT` 继续目标进程
+1. 使用 `process_vm_readv` 从目标进程直接读取共享 trace buffer
+2. 从上次 `last_seq` 之后开始消费新事件
+3. 把格式化后的输出追加写入 `ztrace.<pid>.log`，并在 CLI 中重绘显示
+4. 如果目标因为信号进入 ptrace stop，则转发该信号并继续目标进程
+
+也就是说，普通日志轮询不再依赖 `SIGSTOP -> 读 buffer -> PTRACE_CONT`，不会为了读取 trace buffer 主动暂停目标进程。`trace` / `untrace` / `enable` / `disable` 这类需要修改代码段的操作仍会短暂停止目标进程，以保证 patch 和恢复原始指令的安全性。
 
 当前日志格式采用接近 `perf script` / `ftrace` 的事件流风格，包含：
 
@@ -440,4 +441,4 @@ payload 和 tracer 之间通过共享内存中的 ring buffer 传递事件。
 - 主要面向 `x86_64 Linux`，后续可支持 `ARM64` 架构（题目 A1）
 - 条件探针当前在 ztrace 事件消费侧过滤日志，不在目标进程 payload hot path 中执行过滤表达式
 - 已保存 / 恢复浮点上下文，并通过 `test_context_integrity` 覆盖浮点/SIMD 上下文不被 probe handler 破坏；当前还不显示浮点参数与浮点返回值
-- `zt_trace_poll()` 仍然采用 `SIGSTOP -> 读 buffer -> PTRACE_CONT` 的轮询策略，后续仍可继续优化
+- `zt_trace_poll()` 的普通日志轮询已经改为 `process_vm_readv` 非暂停读取；代码 patch 类操作仍需要短暂停止目标进程

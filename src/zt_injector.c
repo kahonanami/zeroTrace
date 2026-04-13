@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <stdbool.h>
 #include <fcntl.h>
@@ -14,6 +16,7 @@
 #include <sys/wait.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <signal.h>
 #include <capstone/capstone.h>
 
@@ -115,12 +118,25 @@ static int zt_read_image_base(pid_t pid, const char *image_path, uint64_t *base_
 }
 
 int zt_read_remote_memory(pid_t pid, uint64_t remote_addr, void *buffer, size_t size) {
+    struct iovec local_iov;
+    struct iovec remote_iov;
+    ssize_t nread;
     size_t copied;
     long word;
     size_t word_size;
 
     if (buffer == NULL || size == 0) {
         return -1;
+    }
+
+    local_iov.iov_base = buffer;
+    local_iov.iov_len = size;
+    remote_iov.iov_base = (void *)(uintptr_t)remote_addr;
+    remote_iov.iov_len = size;
+
+    nread = process_vm_readv(pid, &local_iov, 1, &remote_iov, 1, 0);
+    if (nread == (ssize_t)size) {
+        return 0;
     }
 
     copied = 0;
@@ -214,12 +230,7 @@ static int zt_remote_syscall6(pid_t pid,
         return -1;
     }
 
-    errno = 0;
-    saved_word = (uint64_t)ptrace(PTRACE_PEEKDATA,
-                                  pid,
-                                  (void *)(uintptr_t)saved_regs.rip,
-                                  NULL);
-    if (saved_word == (uint64_t)-1 && errno != 0) {
+    if (zt_read_remote_memory(pid, saved_regs.rip, &saved_word, sizeof(saved_word)) != 0) {
         return -1;
     }
 
