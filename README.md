@@ -215,6 +215,7 @@ make test
 
 当前测试覆盖：
 
+- 通用寄存器、flags、浮点/SIMD 上下文保存恢复
 - thunk 构造
 - libc/POSIX 动态库函数 trace
 - 16 个并发 probe 的生命周期测试
@@ -278,7 +279,7 @@ uninstall latency avg : 22006 ns (0.022 ms) over 1000 rounds
 ## TODO List
 
 - [x] 增强信号安全测试，覆盖目标进程收到异步信号时的 trace 行为
-- [ ] 补充浮点寄存器 / SIMD 上下文保存与恢复验证
+- [x] 补充浮点寄存器 / SIMD 上下文保存与恢复验证
 - [ ] 优化 `zt_trace_poll()` 的轮询策略，减少对目标进程的打断
 
 ## 项目结构

@@ -32,6 +32,7 @@ PAYLOAD_PIC_OBJ := $(BUILD_DIR)/zt_payload.pic.o $(BUILD_DIR)/zt_stub.pic.o
 TEST_BINS := $(patsubst $(TEST_DIR)/%.c, $(TEST_BIN_DIR)/%, $(TEST_C))
 TEST_TARGET_BINS := \
 	$(TEST_BIN_DIR)/test_libc_io_loop \
+	$(TEST_BIN_DIR)/test_context_target \
 	$(TEST_BIN_DIR)/test_benchmark_target \
 	$(TEST_BIN_DIR)/test_many_probes_target
 MANUAL_TEST_BINS := \

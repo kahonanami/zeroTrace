@@ -896,12 +896,10 @@ int zt_install_probe_patch(zt_injector_session_t *session,
         return -1;
     }
 
-    memset(patch, 0x90, sizeof(patch));
-    patch[0] = 0x48; /* movabs rax, imm64 */
-    patch[1] = 0xB8;
-    memcpy(patch + 2, &thunk_addr, sizeof(thunk_addr));
-    patch[10] = 0xFF; /* jmp rax */
-    patch[11] = 0xE0;
+    patch[0] = 0xFF; /* jmp qword ptr [rip + 0] */
+    patch[1] = 0x25;
+    memset(patch + 2, 0, 4);
+    memcpy(patch + 6, &thunk_addr, sizeof(thunk_addr));
 
     if (zt_write_remote_memory(session->pid,
                                probe->target.remote_addr,

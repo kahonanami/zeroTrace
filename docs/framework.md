@@ -55,11 +55,11 @@
 当前 patch 方案固定为：
 
 ```asm
-movabs rax, thunk_addr
-jmp rax
+jmp qword ptr [rip + 0]
+.quad thunk_addr
 ```
 
-总长度是 12 字节。在安装 patch 前用 Capstone 解析函数开头指令，确保不会截断原始指令。
+总长度是 14 字节，在安装 patch 前用 Capstone 解析函数开头指令，确保不会截断原始指令。
 
 ### 1.4 `zt_thunk_manager`
 
@@ -141,8 +141,8 @@ call some_target
 这类指令原本依赖相对偏移，如果 thunk 离目标地址很远，保留原编码会失效。因此当前实现会把它改写成绝对调用，逻辑上等价于：
 
 ```asm
-movabs rax, target
-call rax
+movabs r11, target
+call r11
 ```
 
 这样可以消除 `rel32` 距离限制。
@@ -158,8 +158,8 @@ jmp some_target
 同理，当前实现会把它改写成绝对跳转，逻辑上等价于：
 
 ```asm
-movabs rax, target
-jmp rax
+movabs r11, target
+jmp r11
 ```
 
 ### 5. `jcc rel8/rel32`
@@ -171,8 +171,8 @@ jmp rax
 3. 条件满足时执行：
 
 ```asm
-movabs rax, target
-jmp rax
+movabs r11, target
+jmp r11
 ```
 
 例如：
@@ -185,8 +185,8 @@ jz target
 
 ```asm
 jnz .skip
-movabs rax, target
-jmp rax
+movabs r11, target
+jmp r11
 .skip:
 ```
 
@@ -203,7 +203,7 @@ jmp rax
 
 ### 1.6 `zt_stub.S`
 
-`zt_stub.S` 是 `libzt_payload.so` 的一部分，是注入到目标进程里的汇编 stub，用于保存上下文信息并传入 `zt_payload` 中的 C 函数处理。
+`zt_stub.S` 是 `libzt_payload.so` 的一部分，是注入到目标进程里的汇编 stub，用于保存上下文信息并传入 `zt_payload` 中的 C 函数处理。当前 stub 会保存 / 恢复通用寄存器、`rflags`，并用 `fxsave64/fxrstor64` 保存 / 恢复 x87、MMX 和 XMM 浮点/SIMD 上下文。
 
 ### 1.7 `zt_trace_runner`
 
@@ -439,5 +439,5 @@ payload 和 tracer 之间通过共享内存中的 ring buffer 传递事件。
 
 - 主要面向 `x86_64 Linux`，后续可支持 `ARM64` 架构（题目 A1）
 - 条件探针当前在 ztrace 事件消费侧过滤日志，不在目标进程 payload hot path 中执行过滤表达式
-- 已保存 / 恢复浮点上下文，但当前还不显示浮点参数与浮点返回值
+- 已保存 / 恢复浮点上下文，并通过 `test_context_integrity` 覆盖浮点/SIMD 上下文不被 probe handler 破坏；当前还不显示浮点参数与浮点返回值
 - `zt_trace_poll()` 仍然采用 `SIGSTOP -> 读 buffer -> PTRACE_CONT` 的轮询策略，后续仍可继续优化

@@ -11,7 +11,7 @@
 #define ZT_PROBE_SYMBOL_MAX 64
 #define ZT_PROBE_MODULE_MAX 512
 #define ZT_PROBE_ORIG_CODE_MAX 32
-#define ZT_PROBE_PATCH_LEN 12
+#define ZT_PROBE_PATCH_LEN 14
 
 typedef struct {
     char symbol[ZT_PROBE_SYMBOL_MAX];
