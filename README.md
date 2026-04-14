@@ -150,7 +150,7 @@ quit
 ```text
 trace add_loop if arg0 >= 10
 trace write if arg0 == 0x1 && arg2 > 0
-update add_loop if arg0 >= 100 || arg1 == 0
+update add_loop if arg0 >= 100 && arg0 <= 120
 update add_loop clear
 ```
 
