@@ -30,10 +30,11 @@
 
 - `attach <pid>`
 - `detach`
-- `trace <symbol> [if argN OP value]`
+- `trace <symbol> [if <expr>]`
 - `untrace <symbol|id>`
 - `enable <symbol|id>`
 - `disable <symbol|id|all>`
+- `update <symbol|id> if <expr> | clear`
 - `stop`
 - `continue`
 - `info target`
@@ -258,7 +259,7 @@ attach <pid>
 用户执行：
 
 ```text
-trace <symbol> [if argN OP value]
+trace <symbol> [if <expr>]
 ```
 
 无 `if` 时直接追踪所有调用；带 `if` 时会在 ztrace 消费事件时按 entry 参数过滤日志，并同步吞掉对应的 return 事件。例如：
@@ -268,8 +269,16 @@ trace write if arg0 == 1
 trace probe_fn01 if arg0 >= 10
 ```
 
-当前支持 `arg0` 到 `arg5`，对应 x86-64 SysV ABI 的 `rdi/rsi/rdx/rcx/r8/r9`，操作符支持 `==`、`!=`、`>`、`>=`、`<`、`<=`。
-条件值通过 `strtoull(..., base=0)` 解析，因此支持十进制和 `0x` 十六进制输入。
+当前会把 `if` 后面的字符串作为完整布尔表达式解析。表达式支持：
+
+- `arg0` 到 `arg5`，对应 x86-64 SysV ABI 的 `rdi/rsi/rdx/rcx/r8/r9`
+- 十进制和 `0x` 十六进制数字
+- `==`、`!=`、`>`、`>=`、`<`、`<=`
+- `&&`、`||`、`!`
+- `+`、`-`、`*`、`/`
+- 括号
+
+解析方式参考了 [NEMU](https://github.com/NJU-ProjectN/nemu) 的 simple debuger 中表达式求值思路：先把字符串 token 化，再按优先级递归求值。token 会保存在 `zt_probe_filter_t` 中，后续每次消费 entry 事件时直接用当前事件的 `value0 ... value5` 作为 `arg0 ... arg5` 求值。
 
 第一条 probe 的完整流程如下：
 
@@ -335,7 +344,7 @@ test_libc_io_loop-1705732/1705732 [001] 157114.775572037: ztrace:return: read ->
 
 实现流程如下：
 
-1. CLI 解析 `trace <symbol> if argN OP value`
+1. CLI 解析 `trace <symbol> if <expr>`
 2. 解析结果保存到 `zt_probe_info_t.filter`
 3. payload 命中 probe 时仍然写入普通 entry / return 事件
 4. `zt_trace_runner` 消费 entry 事件时读取 `value0 ... value5`
@@ -344,7 +353,24 @@ test_libc_io_loop-1705732/1705732 [001] 157114.775572037: ztrace:return: read ->
 
 因此条件 probe 只影响 ztrace 输出，不改变目标函数执行路径，也不会改变 thunk / stub 的运行方式。
 
-### 2.5 disable / enable
+### 2.5 probe filter 热更新
+
+`update <symbol|id> if <expr>` 会在 probe 已安装的情况下直接替换 `zt_probe_info_t.filter`，包括原始表达式字符串和已经编译好的 token 序列。
+`update <symbol|id> clear` 会清空 filter，让该 probe 重新输出所有命中事件。
+
+这个更新发生在 tracer 侧，不会执行 `untrace` / `trace`，也不会：
+
+- 恢复原函数入口
+- 重新分配 thunk slot
+- 重建 thunk
+- 重新 patch 函数入口
+- 暂停目标进程
+
+因此它是一个轻量级的 probe 行为热更新：目标进程继续运行，下一次 ztrace 消费 entry / return 事件时就会使用新的过滤规则。
+当前 `update` 是替换语义，不会和旧 filter 做 `&&` / `||` 组合。
+由于 filter 只影响 tracer 侧日志消费，`update` 不需要调用 `zt_trace_ensure_stopped()`，也不会触发任何远程内存 patch。
+
+### 2.6 disable / enable
 
 `disable <symbol|id>`：
 
@@ -359,7 +385,7 @@ test_libc_io_loop-1705732/1705732 [001] 157114.775572037: ztrace:return: read ->
 2. 重新为 probe 安装 thunk 和入口 patch
 3. 继续目标进程
 
-### 2.6 untrace
+### 2.7 untrace
 
 `untrace <symbol|id>`：
 

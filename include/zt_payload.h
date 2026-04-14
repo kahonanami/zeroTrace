@@ -5,23 +5,43 @@
 #define MAX_SAVED_RET_ADDR 256
 #define ZT_TRACE_EVENT_CAPACITY 1024
 #define ZT_TRACE_BUFFER_MAGIC 0x5a54425546464552ULL
+#define ZT_PROBE_FILTER_EXPR_MAX 128
+#define ZT_PROBE_FILTER_TOKEN_CAP 64
 
 typedef enum {
-    ZT_PROBE_FILTER_NONE = 0,
-    ZT_PROBE_FILTER_EQ,
-    ZT_PROBE_FILTER_NE,
-    ZT_PROBE_FILTER_GT,
-    ZT_PROBE_FILTER_GE,
-    ZT_PROBE_FILTER_LT,
-    ZT_PROBE_FILTER_LE,
-} zt_probe_filter_op_t;
+    ZT_PROBE_FILTER_TOK_END = 0,
+    ZT_PROBE_FILTER_TOK_ARG,
+    ZT_PROBE_FILTER_TOK_NUM,
+    ZT_PROBE_FILTER_TOK_EQ,
+    ZT_PROBE_FILTER_TOK_NE,
+    ZT_PROBE_FILTER_TOK_GT,
+    ZT_PROBE_FILTER_TOK_GE,
+    ZT_PROBE_FILTER_TOK_LT,
+    ZT_PROBE_FILTER_TOK_LE,
+    ZT_PROBE_FILTER_TOK_AND,
+    ZT_PROBE_FILTER_TOK_OR,
+    ZT_PROBE_FILTER_TOK_NOT,
+    ZT_PROBE_FILTER_TOK_ADD,
+    ZT_PROBE_FILTER_TOK_SUB,
+    ZT_PROBE_FILTER_TOK_MUL,
+    ZT_PROBE_FILTER_TOK_DIV,
+    ZT_PROBE_FILTER_TOK_LPAREN,
+    ZT_PROBE_FILTER_TOK_RPAREN,
+} zt_probe_filter_token_type_t;
+
+typedef struct {
+    uint8_t type;
+    uint8_t arg_index;
+    uint8_t reserved[6];
+    uint64_t value;
+} zt_probe_filter_token_t;
 
 typedef struct {
     uint64_t probe_id;
     uint64_t enabled;
-    uint64_t arg_index;
-    uint64_t op;
-    uint64_t value;
+    uint64_t token_count;
+    char expr[ZT_PROBE_FILTER_EXPR_MAX];
+    zt_probe_filter_token_t tokens[ZT_PROBE_FILTER_TOKEN_CAP];
 } zt_probe_filter_t;
 
 typedef struct {

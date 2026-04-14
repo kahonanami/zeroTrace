@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include "../../include/zt_injector.h"
+#include "../../include/zt_filter.h"
 #include "../../include/zt_trace_runner.h"
 #include "test_trace_utils.h"
 
@@ -135,12 +136,7 @@ cleanup_trace:
 }
 
 static int run_conditional_probe(void) {
-    zt_probe_filter_t filter = {
-        .enabled = 1,
-        .arg_index = 0,
-        .op = ZT_PROBE_FILTER_GE,
-        .value = 10,
-    };
+    zt_probe_filter_t filter;
     zt_injector_session_t session;
     char *log_text = NULL;
     char log_path[256];
@@ -154,6 +150,11 @@ static int run_conditional_probe(void) {
                                sizeof(log_path),
                                "zt-conditional-probe") != 0) {
         return 1;
+    }
+
+    if (zt_probe_filter_compile("arg0 >= 10 && arg0 < 20", &filter) != 0) {
+        fprintf(stderr, "failed to compile conditional filter\n");
+        goto cleanup_trace;
     }
 
     if (zt_trace_start_filtered_in_session(&session, "probe_fn01", log_path, &filter) != 0) {
@@ -209,9 +210,111 @@ cleanup_trace:
     return rc;
 }
 
+static int run_probe_filter_update(void) {
+    zt_probe_filter_t filter;
+    zt_probe_filter_t updated_filter;
+    zt_injector_session_t session;
+    zt_probe_info_t *probe;
+    char *log_text = NULL;
+    char log_path[256];
+    uint64_t thunk_addr;
+    int thunk_slot;
+    pid_t child;
+    int entry_count;
+    int rc = 1;
+
+    if (start_many_probe_trace(&session,
+                               &child,
+                               log_path,
+                               sizeof(log_path),
+                               "zt-probe-update") != 0) {
+        return 1;
+    }
+
+    if (zt_probe_filter_compile("arg0 >= 10", &filter) != 0 ||
+        zt_probe_filter_compile("arg0 >= 15 && (arg0 < 20 || arg0 == 99)", &updated_filter) != 0) {
+        fprintf(stderr, "failed to compile probe update filters\n");
+        goto cleanup_trace;
+    }
+
+    if (zt_trace_start_filtered_in_session(&session, "probe_fn01", log_path, &filter) != 0) {
+        fprintf(stderr, "filtered trace start failed before update\n");
+        goto cleanup_trace;
+    }
+
+    probe = zt_probe_find_by_symbol(&session, "probe_fn01");
+    if (probe == NULL || probe->state != ZT_PROBE_INSTALLED) {
+        fprintf(stderr, "probe not installed before update\n");
+        goto cleanup_trace;
+    }
+
+    thunk_addr = probe->thunk_addr;
+    thunk_slot = probe->thunk_slot;
+
+    if (zt_trace_update_probe_filter(&session, probe->probe_id, NULL) != 0 ||
+        zt_trace_update_probe_filter(&session, probe->probe_id, &updated_filter) != 0) {
+        fprintf(stderr, "probe filter update failed\n");
+        goto cleanup_trace;
+    }
+
+    if (probe->thunk_addr != thunk_addr ||
+        probe->thunk_slot != thunk_slot ||
+        probe->state != ZT_PROBE_INSTALLED) {
+        fprintf(stderr, "probe update unexpectedly rebuilt thunk or changed state\n");
+        goto cleanup_trace;
+    }
+
+    if (kill(child, SIGUSR1) != 0) {
+        perror("kill");
+        goto cleanup_trace;
+    }
+
+    if (zt_test_wait_trace_done(15000) != 0) {
+        fprintf(stderr, "trace polling timed out for probe update\n");
+        goto cleanup_trace;
+    }
+
+    log_text = zt_test_read_file(log_path);
+    if (log_text == NULL) {
+        fprintf(stderr, "failed to read trace log\n");
+        goto cleanup_trace;
+    }
+
+    entry_count = zt_test_count_substring(log_text, "ztrace:entry: probe_fn01");
+    if (entry_count != 5) {
+        fprintf(stderr, "expected 5 updated-filter entries, got %d\n", entry_count);
+        goto cleanup_trace;
+    }
+
+    if (strstr(log_text, "probe_fn01(rdi=0xe") != NULL ||
+        strstr(log_text, "probe_fn01(rdi=0xf") == NULL) {
+        fprintf(stderr, "probe update log does not match arg0 >= 15\n");
+        goto cleanup_trace;
+    }
+
+    if (!zt_test_process_gone(child)) {
+        fprintf(stderr, "probe update target still alive\n");
+        goto cleanup_trace;
+    }
+
+    printf("probe filter update test passed\n");
+    rc = 0;
+
+cleanup_trace:
+    zt_trace_shutdown();
+    zt_injector_detach(&session);
+    if (rc != 0) {
+        kill(child, SIGKILL);
+    }
+    unlink(log_path);
+    free(log_text);
+    return rc;
+}
+
 int main(void) {
     if (run_many_probe_lifecycle() != 0 ||
-        run_conditional_probe() != 0) {
+        run_conditional_probe() != 0 ||
+        run_probe_filter_update() != 0) {
         return 1;
     }
 

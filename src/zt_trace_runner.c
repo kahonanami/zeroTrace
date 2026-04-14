@@ -12,6 +12,7 @@
 #include <sys/wait.h>
 
 #include "../include/zt_injector.h"
+#include "../include/zt_filter.h"
 #include "../include/zt_payload.h"
 #include "../include/zt_sigconf.h"
 #include "../include/zt_thunk_manager.h"
@@ -173,32 +174,6 @@ static int zt_wait_for_tracee_stop(pid_t pid) {
     }
 }
 
-static uint64_t zt_trace_event_arg(const zt_trace_event_t *event, uint64_t arg_index) {
-    switch (arg_index) {
-    case 0: return event->value0;
-    case 1: return event->value1;
-    case 2: return event->value2;
-    case 3: return event->value3;
-    case 4: return event->value4;
-    case 5: return event->value5;
-    default: return 0;
-    }
-}
-
-static int zt_trace_filter_matches(uint64_t lhs, uint64_t op, uint64_t rhs) {
-    switch (op) {
-    case ZT_PROBE_FILTER_EQ: return lhs == rhs;
-    case ZT_PROBE_FILTER_NE: return lhs != rhs;
-    case ZT_PROBE_FILTER_GT: return lhs > rhs;
-    case ZT_PROBE_FILTER_GE: return lhs >= rhs;
-    case ZT_PROBE_FILTER_LT: return lhs < rhs;
-    case ZT_PROBE_FILTER_LE: return lhs <= rhs;
-    case ZT_PROBE_FILTER_NONE:
-    default:
-        return 1;
-    }
-}
-
 static int zt_trace_event_is_suppressed(const zt_probe_info_t *probe,
                                         const zt_trace_event_t *event) {
     const zt_probe_filter_t *filter;
@@ -208,17 +183,11 @@ static int zt_trace_event_is_suppressed(const zt_probe_info_t *probe,
     }
 
     filter = &probe->filter;
-    if (!filter->enabled || filter->op == ZT_PROBE_FILTER_NONE) {
+    if (!filter->enabled) {
         return 0;
     }
 
-    if (filter->arg_index >= 6) {
-        return 1;
-    }
-
-    return !zt_trace_filter_matches(zt_trace_event_arg(event, filter->arg_index),
-                                    filter->op,
-                                    filter->value);
+    return !zt_probe_filter_eval(filter, event);
 }
 
 static void zt_dump_trace_events_since(zt_injector_session_t *session,
@@ -651,6 +620,33 @@ int zt_trace_disable_probe(zt_injector_session_t *session, uint64_t probe_id) {
     return zt_trace_ensure_running(session);
 }
 
+int zt_trace_update_probe_filter(zt_injector_session_t *session,
+                                 uint64_t probe_id,
+                                 const zt_probe_filter_t *filter) {
+    zt_probe_info_t *probe;
+
+    if (session == NULL || probe_id == 0 ||
+        g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE ||
+        g_active_trace.session != session) {
+        return -1;
+    }
+
+    probe = zt_probe_find_by_id(session, probe_id);
+    if (probe == NULL) {
+        return -1;
+    }
+
+    if (filter != NULL) {
+        probe->filter = *filter;
+        probe->filter.probe_id = probe->probe_id;
+    } else {
+        memset(&probe->filter, 0, sizeof(probe->filter));
+        probe->filter.probe_id = probe->probe_id;
+    }
+
+    return 0;
+}
+
 int zt_trace_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
     zt_probe_info_t *probe;
 
@@ -673,7 +669,7 @@ int zt_trace_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
         return -1;
     }
 
-    if (zt_trace_install_probe(session, &g_active_trace.runtime, probe->target.symbol, NULL, NULL) != 0) {
+    if (zt_trace_install_probe(session, &g_active_trace.runtime, probe->target.symbol, &probe->filter, NULL) != 0) {
         return -1;
     }
 

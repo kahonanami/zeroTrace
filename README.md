@@ -84,8 +84,8 @@ CLI 常用命令：
   从当前目标进程分离
 - `trace <symbol>`
   为函数安装 probe 并开始追踪
-- `trace <symbol> if argN OP value`
-  条件追踪前 6 个整型 / 指针参数，例如 `trace write if arg0 == 1`
+- `trace <symbol> if <expr>`
+  条件追踪前 6 个整型 / 指针参数，例如 `trace write if arg0 == 1 && arg2 > 0`
 - `untrace <symbol|id>`
   恢复原函数并删除 probe
 - `enable <symbol|id>`
@@ -94,6 +94,10 @@ CLI 常用命令：
   临时禁用 probe
 - `disable all`
   一键禁用当前所有已安装 probe
+- `update <symbol|id> if <expr>`
+  热更新已安装 probe 的过滤条件
+- `update <symbol|id> clear`
+  清除已安装 probe 的过滤条件
 - `stop`
   暂停目标进程
 - `continue`
@@ -145,10 +149,21 @@ quit
 
 ```text
 trace add_loop if arg0 >= 10
-trace write if arg0 == 0x1
+trace write if arg0 == 0x1 && arg2 > 0
+update add_loop if arg0 >= 100 || arg1 == 0
+update add_loop clear
 ```
 
-当前条件表达式支持 `arg0` 到 `arg5`，分别对应 x86-64 SysV ABI 的 `rdi/rsi/rdx/rcx/r8/r9`。操作符支持 `==`、`!=`、`>`、`>=`、`<`、`<=`，数值支持十进制和 `0x` 十六进制。
+当前条件表达式会把 `if` 后面的字符串作为完整布尔表达式解析。表达式支持：
+
+- `arg0` 到 `arg5`，对应 x86-64 SysV ABI 的 `rdi/rsi/rdx/rcx/r8/r9`
+- 十进制和 `0x` 十六进制数字
+- 比较运算：`==`、`!=`、`>`、`>=`、`<`、`<=`
+- 布尔运算：`&&`、`||`、`!`
+- 算术运算：`+`、`-`、`*`、`/`
+- 括号
+
+`update` 会直接替换旧 filter，不会叠加条件。当前不支持解引用目标进程地址。
 
 ## 日志文件
 
@@ -223,6 +238,7 @@ make test
 - 多线程目标函数追踪稳定性测试
 - 异步信号下的 signal safety 测试
 - 条件探针参数过滤测试
+- probe filter 热更新测试
 
 ## Benchmark
 
