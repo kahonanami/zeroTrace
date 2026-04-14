@@ -24,6 +24,7 @@ enum {
 static __thread zt_saved_probe_frame_t saved_frames[MAX_SAVED_RET_ADDR];
 static __thread int call_stack_idx;
 static __thread uint64_t last_call_id;
+static __thread uint64_t cached_tid;
 
 static zt_payload_config_t g_payload_config;
 static uint64_t g_call_id_seq;
@@ -39,7 +40,11 @@ static uint64_t zt_clock_monotonic_ns(void) {
 }
 
 static uint64_t zt_gettid_u64(void) {
-    return (uint64_t)syscall(SYS_gettid);
+    if (cached_tid == 0) {
+        cached_tid = (uint64_t)syscall(SYS_gettid);
+    }
+
+    return cached_tid;
 }
 
 static uint64_t zt_getcpu_u64(void) {
