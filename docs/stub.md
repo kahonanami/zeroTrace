@@ -14,11 +14,11 @@
 原函数入口 patch 逻辑上等价于：
 
 ```asm
-movabs rax, thunk_addr
-jmp rax
+jmp qword ptr [rip + 0]
+.quad thunk_addr
 ```
 
-也就是说，原函数一进入，就不再直接执行自身前导指令，而是先跳到 thunk。
+也就是说，原函数一进入，就不再直接执行自身前导指令，而是先跳到 thunk。这个 14 字节模板不需要借用 `rax`，因此不会破坏可变参数函数依赖的 `al` 或其他寄存器状态。
 
 ---
 
@@ -103,8 +103,9 @@ entry_stub:
     PUSH_ALL
 
     mov r12, rsp
-    and rsp, -16
+    SAVE_FP
     mov rdi, r12
+    mov rsi, rsp
     call zt_handle_entry
 
     mov rdi, [r12 + 0x90]
@@ -114,6 +115,7 @@ entry_stub:
     lea rax, [rip + exit_stub]
     mov [r12 + 0x90], rax
 
+    RESTORE_FP
     mov rsp, r12
     POP_ALL
     ret
@@ -172,17 +174,17 @@ offset +0x90 : real return address
   这里是 thunk 最开始 `push <probe_id>` 压进去的 probe id
 
 - `[r12 + 0x90]`
-  这里是 `call entry_stub` 自动压进去的返回地址
-  它原本指向 thunk 里 `call` 后面的下一条指令
+  这里是真实调用者压入的原始返回地址
+  `entry_stub` 会把它保存到 TLS shadow stack，并改写成 `exit_stub`
 
 可以把 `entry_stub` 中 `PUSH_ALL` 之后、但还没改写返回地址之前的栈理解成下面这样：
 
 ```text
 高地址
 │
-│  [r12 + 0x90]  thunk 中 call entry_stub 的返回地址
+│  [r12 + 0x90]  真实调用者的原始返回地址
 │  [r12 + 0x88]  probe_id（由 thunk 里的 push <probe_id> 压入）
-│  [r12 + 0x80]  thunk_ret_addr
+│  [r12 + 0x80]  thunk 中 call entry_stub 的返回地址
 │  [r12 + 0x78]  rflags
 │  [r12 + 0x70]  rax
 │  [r12 + 0x68]  rbx
@@ -208,6 +210,7 @@ offset +0x90 : real return address
 1. `call zt_handle_entry`
    - 把当前保存区当成 `ctx_t *` 传给 C handler
    - C handler 直接从保存区里读取参数寄存器值
+   - 调用 C handler 前已经通过 `fxsave64` 保存浮点/SIMD 上下文，并把 `fxsave64` 区域地址作为第二个参数传入，用于读取 `xmm0 ... xmm7`
 
 2. `call save_probe_frame_c`
    - `rdi = [r12 + 0x90]`，也就是真实返回地址
@@ -219,6 +222,7 @@ offset +0x90 : real return address
 
 然后：
 
+- `fxrstor64`
 - `POP_ALL`
 - `ret`
 
@@ -235,6 +239,8 @@ jmp continue_addr
 
 真正等到原函数跑完执行 `ret` 时，才会跳进 `exit_stub`。
 
+`SAVE_FP` / `RESTORE_FP` 会在当前栈下方临时开出一块 16 字节对齐的 512 字节区域，执行 `fxsave64 [rsp]` 和 `fxrstor64 [rsp]`。这样不会改变 `ctx_t` 的偏移布局，同时可以保护 x87、MMX、XMM 和 MXCSR 状态。需要注意的是，`fxsave64` 不覆盖 AVX YMM 寄存器的高 128 位；如果后续要完整支持 AVX，需要升级为 `xsave/xrstor`。
+
 ---
 
 ## 5. 为什么原函数本身不会出问题
@@ -249,6 +255,7 @@ jmp continue_addr
 
 - 参数寄存器已经恢复
 - 通用寄存器和 flags 已恢复
+- x87 / MMX / XMM 浮点和 SIMD 上下文已恢复
 - thunk 又把原函数前导指令补执行了一遍
 - 最后跳回 `func_addr + orig_len`
 
@@ -262,27 +269,26 @@ jmp continue_addr
 
 ```asm
 exit_stub:
-    mov r13, rax
-    mov r12, rsp
-    and rsp, -16
-    call peek_probe_id_c
-    mov rsp, r12
-    push rax
     push 0
-    mov rax, r13
+    push 0
     PUSH_ALL
 
     mov r12, rsp
-    and rsp, -16
+    SAVE_FP
+
+    call peek_probe_id_c
+    mov [r12 + 0x88], rax
 
     mov rdi, r12
+    mov rsi, rsp
     call zt_handle_return
 
     call get_ret_addr_c
 
-    mov rsp, r12
-    mov [rsp + 0x88], rax
+    mov [r12 + 0x88], rax
 
+    RESTORE_FP
+    mov rsp, r12
     POP_ALL
     lea rsp, [rsp + 8]
     ret
@@ -297,17 +303,19 @@ exit_stub:
 所以它的入口栈形态和 `entry_stub` 完全不同，不能直接套用同一套 `ctx_t` 视图。  
 为了解决这个问题，`exit_stub` 手工补了两项：
 
-1. `push probe_id`
-2. `push 0`
+1. `push 0`，预留最终 `ret` 使用的返回地址槽位
+2. `push 0`，预留 `POP_ALL` 之后会跳过的占位槽
 
 然后再 `PUSH_ALL`。
 
 这样就人为伪造出了一段和 `entry_stub` 类似的栈布局，使得：
 
 - `zt_handle_return` 仍然可以把当前 `rsp` 当成 `ctx_t *`
-- `[rsp + 0x88]` 这一格被预留出来，后面专门用来写回真实返回地址
+- `zt_handle_return` 同样会收到当前 `fxsave64` 区域地址，用于读取 `xmm0` 浮点返回值
+- `[rsp + 0x88]` 这一格先写入 `peek_probe_id_c()` 取回的 `probe_id`
+- 记录 return 事件之后，同一个 `[rsp + 0x88]` 槽位会被改写成真实返回地址
 
-这里的 `push 0` 本质上就是一个占位槽，用来模拟“未来真正要 `ret` 的那个返回地址位置”。
+这样 `zt_handle_return` 可以先用同一套 `ctx_t` 视图读到 `func_id`，最终 `ret` 又能从同一槽位拿回真实返回地址。
 
 ### 6.2 再把真实返回地址写回占位槽
 
@@ -355,8 +363,8 @@ caller
 高地址
 │
 │  [r12 + 0x88]  预留的“最终 ret 使用的返回地址槽位”
-│                初始由 push 0 伪造，之后会被改写成真实返回地址
-│  [r12 + 0x80]  probe_id（由 peek_probe_id_c + push rax 填入）
+│                调 zt_handle_return 前写入 probe_id，之后改写成真实返回地址
+│  [r12 + 0x80]  占位槽，POP_ALL 后通过 lea rsp, [rsp + 8] 跳过
 │  [r12 + 0x78]  rflags
 │  [r12 + 0x70]  rax
 │  [r12 + 0x68]  rbx
@@ -380,10 +388,11 @@ caller
 接下来：
 
 1. `get_ret_addr_c()` 从 TLS shadow stack 弹出真正的返回地址
-2. `mov [rsp + 0x88], rax` 把它写回到上图中的预留槽位
-3. `POP_ALL`
-4. `lea rsp, [rsp + 8]`
-5. `ret`
+2. `mov [r12 + 0x88], rax` 把它写回到上图中的预留槽位
+3. `fxrstor64` 恢复浮点/SIMD 上下文
+4. `POP_ALL`
+5. `lea rsp, [rsp + 8]`
+6. `ret`
 
 这样最后这个 `ret` 才会真正回到原始调用者，而不是停在 `exit_stub` 自己伪造的链条里。
 

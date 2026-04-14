@@ -40,8 +40,10 @@ make
   主程序，进入交互式 CLI
 - `bin/libzt_payload.so`
   注入到目标进程中的 payload
+- `bin/tests/test_libc_io_loop`
+  自动化测试使用的 libc/POSIX 动态库函数目标程序
 - `bin/tests/test_loop`
-  独立测试目标程序
+  唯一保留的手动验证目标程序
 - `bin/tests/test_benchmark_target`
   benchmark 目标程序
 - `bin/tests/test_benchmark_runner`
@@ -82,6 +84,8 @@ CLI 常用命令：
   从当前目标进程分离
 - `trace <symbol>`
   为函数安装 probe 并开始追踪
+- `trace <symbol> if <expr>`
+  条件追踪前 6 个整型 / 指针参数，例如 `trace write if arg0 == 1 && arg2 > 0`
 - `untrace <symbol|id>`
   恢复原函数并删除 probe
 - `enable <symbol|id>`
@@ -90,6 +94,10 @@ CLI 常用命令：
   临时禁用 probe
 - `disable all`
   一键禁用当前所有已安装 probe
+- `update <symbol|id> if <expr>`
+  热更新已安装 probe 的过滤条件
+- `update <symbol|id> clear`
+  清除已安装 probe 的过滤条件
 - `stop`
   暂停目标进程
 - `continue`
@@ -103,7 +111,7 @@ CLI 常用命令：
 
 ## 快速测试
 
-先启动测试程序：
+先启动手动测试程序：
 
 ```bash
 ./bin/tests/test_loop
@@ -120,22 +128,46 @@ CLI 常用命令：
 ```text
 attach <pid>
 trace add_loop
+trace fp_add_loop
 ```
 
 如果追踪成功，会持续看到类似输出：
 
 ```text
-test_loop-2193810/2193810 [014] 157820.853973283: ztrace:entry: add_loop(rdi=0x1, rsi=0x2, rdx=0x0, rcx=0x7fb9cbcaca7a, r8=0x64, r9=0x0)
-test_loop-2193810/2193810 [014] 157820.853974307: ztrace:return: add_loop -> 0x3
+test_loop-532386/532386 [010] 58915.513461172: ztrace:entry: add_loop(24, 25)
+test_loop-532386/532386 [010] 58915.513468205: ztrace:return: add_loop -> 49
+test_loop-532386/532386 [010] 58915.513461172: ztrace:entry: fp_add_loop(24.25, 1.5)
+test_loop-532386/532386 [010] 58915.513468205: ztrace:return: fp_add_loop -> 25.75
 ```
 
 停止并卸载 probe：
 
 ```text
 untrace add_loop
+untrace fp_add_loop
 detach
 quit
 ```
+
+条件探针可以只输出满足参数条件的调用：
+
+```text
+trace add_loop if arg0 >= 10
+trace write if arg0 == 0x1 && arg2 > 0
+update add_loop if arg0 >= 100 && arg0 <= 120
+update add_loop clear
+```
+
+当前条件表达式会把 `if` 后面的字符串作为完整布尔表达式解析。表达式支持：
+
+- `arg0` 到 `arg5`，对应 x86-64 SysV ABI 的 `rdi/rsi/rdx/rcx/r8/r9`
+- 十进制和 `0x` 十六进制数字
+- 比较运算：`==`、`!=`、`>`、`>=`、`<`、`<=`
+- 布尔运算：`&&`、`||`、`!`
+- 算术运算：`+`、`-`、`*`、`/`
+- 括号
+
+`update` 会直接替换旧 filter，不会叠加条件。当前不支持解引用目标进程地址。
 
 ## 日志文件
 
@@ -163,8 +195,8 @@ ztrace.1473057.log
 例如：
 
 ```text
-test_thread_log_demo-2184240/2184438 [010] 157114.775569202: ztrace:entry: demo_mix(rdi=0x1, rsi=0x32, rdx=0x1, rcx=0x0, r8=0x0, r9=0x7f175be7d6c0)
-test_thread_log_demo-2184240/2184438 [010] 157114.775572037: ztrace:return: demo_mix -> 0x3f
+test_threaded_target-22520/22521 [010] 157114.775569202: ztrace:entry: thread_add(rdi=0x1, rsi=0x32, rdx=0x1, rcx=0x0, r8=0x0, r9=0x7f175be7d6c0)
+test_threaded_target-22520/22521 [010] 157114.775572037: ztrace:return: thread_add -> 0x33
 ```
 
 ## 签名配置与参数解码
@@ -174,6 +206,8 @@ test_thread_log_demo-2184240/2184438 [010] 157114.775572037: ztrace:return: demo
 - 该文件是一个从 `ltrace.conf` 思路适配而来的配置文件
 - 命中已配置函数时，会优先按签名格式化参数和返回值
 - 字符串中非打印字符会转义成 `\xNN`
+- `float` / `double` 参数和返回值会按 x86-64 SysV ABI 从 `xmm` 寄存器快照中解码
+- 对配置中存在名为 `fmt` 的参数的可变参数函数，会根据 format string 展开仍在寄存器快照内的整型、指针和浮点可变参数
 
 `zttrace.conf` 使用简化版的函数签名语法，基本形式如下：
 
@@ -188,6 +222,7 @@ puts(const char *s) -> int
 read(int fd, buffer buf, size_t count) -> long
 write(int fd, const buffer buf, size_t count) -> long
 malloc(size_t size) -> void *
+fp_mix(double a, double b) -> double
 ```
 
 对于未配置的函数会回退到寄存器风格显示。
@@ -202,11 +237,14 @@ make test
 
 当前测试覆盖：
 
-- probe 表和符号解析
+- 通用寄存器、flags、浮点/SIMD 上下文保存恢复
 - thunk 构造
+- libc/POSIX 动态库函数 trace
 - 16 个并发 probe 的生命周期测试
 - 多线程目标函数追踪稳定性测试
 - 异步信号下的 signal safety 测试
+- 条件探针参数过滤测试
+- probe filter 热更新测试
 
 ## Benchmark
 
@@ -264,8 +302,8 @@ uninstall latency avg : 22006 ns (0.022 ms) over 1000 rounds
 ## TODO List
 
 - [x] 增强信号安全测试，覆盖目标进程收到异步信号时的 trace 行为
-- [ ] 补充浮点寄存器 / SIMD 上下文保存与恢复验证
-- [ ] 优化 `zt_trace_poll()` 的轮询策略，减少对目标进程的打断
+- [x] 补充浮点寄存器 / SIMD 上下文保存与恢复验证
+- [x] 优化 `zt_trace_poll()` 的轮询策略，使用 `process_vm_readv` 非暂停读取 trace buffer
 
 ## 项目结构
 
@@ -286,7 +324,7 @@ uninstall latency avg : 22006 ns (0.022 ms) over 1000 rounds
 
 - 当前项目主要面向 `x86_64 Linux`
 - 已支持通过 `conf/zttrace.conf` 对常见 libc/POSIX 函数做签名感知格式化；未配置到的函数会回退到寄存器风格显示
-- 已支持保存 / 恢复通用寄存器、标志寄存器和浮点上下文；当前尚未实现浮点参数/返回值显示
+- 已支持保存 / 恢复通用寄存器、标志寄存器和浮点上下文，并支持 `float` / `double` 参数与返回值显示
 - 对复杂函数前导指令的支持依赖 Capstone 解析；如果函数入口包含当前未处理的情况，probe 安装可能失败
 
 更底层的设计说明可以参考：

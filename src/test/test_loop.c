@@ -1,26 +1,37 @@
+#define _GNU_SOURCE
+
 #include <stdio.h>
+#include <sys/prctl.h>
 #include <unistd.h>
-#include <stdint.h>
 
-int add_loop(int a, int b) {
-    return a + b;
+__attribute__((noinline)) int add_loop(int lhs, int rhs) {
+    return lhs + rhs;
 }
 
-int multiply_loop(int a, int b) {
-    return a * b;
+__attribute__((noinline)) double fp_add_loop(double lhs, double rhs) {
+    return lhs + rhs;
 }
 
-int main(){
-    int pid = getpid();
-    printf("Process ID: %d\n", pid);
-    printf("add_loop addr: %p\n", (void*)add_loop);
-    printf("multiply_loop addr: %p\n", (void*)multiply_loop);
-    while(1){
-        int add_result = add_loop(1, 2);
-        int multiply_result = multiply_loop(1, 2);
+int main(void) {
+    int i = 0;
 
-        printf("Add Result: %d\n", add_result);
-        printf("Multiply Result: %d\n", multiply_result);
+    prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
+
+    printf("test_loop pid=%d\n", getpid());
+    fflush(stdout);
+
+    while (1) {
+        int ret = add_loop(i, i + 1);
+        double lhs = (double)i + 0.25;
+        double rhs = 1.5;
+        double fp_ret = fp_add_loop(lhs, rhs);
+
+        printf("add_loop(%d, %d) -> %d\n", i, i + 1, ret);
+        printf("fp_add_loop(%.2f, %.2f) -> %.2f\n", lhs, rhs, fp_ret);
+        fflush(stdout);
+        ++i;
         sleep(1);
     }
+
+    return 0;
 }

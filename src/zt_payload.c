@@ -16,6 +16,11 @@ typedef struct {
     uint64_t call_id;
 } zt_saved_probe_frame_t;
 
+enum {
+    ZT_FXSAVE_XMM_OFFSET = 160,
+    ZT_FXSAVE_XMM_STRIDE = 16,
+};
+
 static __thread zt_saved_probe_frame_t saved_frames[MAX_SAVED_RET_ADDR];
 static __thread int call_stack_idx;
 static __thread uint64_t last_call_id;
@@ -52,6 +57,25 @@ static zt_trace_buffer_t *zt_get_trace_buffer(void) {
     return (zt_trace_buffer_t *)(uintptr_t)g_payload_config.shared_buffer_addr;
 }
 
+static uint64_t zt_fxsave_xmm_low64(const void *fxsave_area, int index) {
+    uint64_t value = 0;
+    const unsigned char *base;
+    unsigned int i;
+
+    if (fxsave_area == NULL || index < 0 || index >= 8) {
+        return 0;
+    }
+
+    base = (const unsigned char *)fxsave_area +
+           ZT_FXSAVE_XMM_OFFSET +
+           ((size_t)index * ZT_FXSAVE_XMM_STRIDE);
+
+    for (i = 0; i < sizeof(value); ++i) {
+        value |= ((uint64_t)base[i]) << (i * 8);
+    }
+    return value;
+}
+
 static void zt_publish_event(const zt_trace_event_t *event) {
     zt_trace_buffer_t *buffer;
     uint64_t seq;
@@ -86,6 +110,14 @@ static void zt_publish_event(const zt_trace_event_t *event) {
     slot->value3 = event->value3;
     slot->value4 = event->value4;
     slot->value5 = event->value5;
+    slot->fp0 = event->fp0;
+    slot->fp1 = event->fp1;
+    slot->fp2 = event->fp2;
+    slot->fp3 = event->fp3;
+    slot->fp4 = event->fp4;
+    slot->fp5 = event->fp5;
+    slot->fp6 = event->fp6;
+    slot->fp7 = event->fp7;
 
     __atomic_store_n(&slot->committed_seq, seq + 1, __ATOMIC_RELEASE);
 }
@@ -114,7 +146,7 @@ void *zt_payload_get_entry_stub_addr(void) {
     return (void *)entry_stub;
 }
 
-void zt_handle_entry(ctx_t *context) {
+void zt_handle_entry(ctx_t *context, const void *fxsave_area) {
     zt_trace_event_t event;
     uint64_t call_id;
 
@@ -139,15 +171,29 @@ void zt_handle_entry(ctx_t *context) {
         .value3 = context->rcx,
         .value4 = context->r8,
         .value5 = context->r9,
+        .fp0 = zt_fxsave_xmm_low64(fxsave_area, 0),
+        .fp1 = zt_fxsave_xmm_low64(fxsave_area, 1),
+        .fp2 = zt_fxsave_xmm_low64(fxsave_area, 2),
+        .fp3 = zt_fxsave_xmm_low64(fxsave_area, 3),
+        .fp4 = zt_fxsave_xmm_low64(fxsave_area, 4),
+        .fp5 = zt_fxsave_xmm_low64(fxsave_area, 5),
+        .fp6 = zt_fxsave_xmm_low64(fxsave_area, 6),
+        .fp7 = zt_fxsave_xmm_low64(fxsave_area, 7),
     };
 
     zt_publish_event(&event);
 }
 
-void zt_handle_return(ctx_t *context) {
+void zt_handle_return(ctx_t *context, const void *fxsave_area) {
     zt_trace_event_t event;
+    uint64_t call_id;
 
     if (context == NULL) {
+        return;
+    }
+
+    call_id = peek_call_id_c();
+    if (call_id == 0) {
         return;
     }
 
@@ -155,11 +201,12 @@ void zt_handle_return(ctx_t *context) {
         .committed_seq = 0,
         .probe_id = context->func_id,
         .event_type = ZT_TRACE_EVENT_RETURN,
-        .call_id = peek_call_id_c(),
+        .call_id = call_id,
         .timestamp_ns = zt_clock_monotonic_ns(),
         .tid = zt_gettid_u64(),
         .cpu_id = zt_getcpu_u64(),
         .value0 = context->rax,
+        .fp0 = zt_fxsave_xmm_low64(fxsave_area, 0),
     };
 
     zt_publish_event(&event);

@@ -1,11 +1,22 @@
 #define _GNU_SOURCE
 
 #include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 
 static const char *k_path = "/tmp/zt_libc_io_loop.txt";
+
+static void wait_for_start(void) {
+    sigset_t set;
+    int sig;
+
+    sigemptyset(&set);
+    sigaddset(&set, SIGUSR1);
+    sigprocmask(SIG_BLOCK, &set, NULL);
+    sigwait(&set, &sig);
+}
 
 __attribute__((noinline))
 int wrap_open(const char *path, int flags, int mode) {
@@ -67,6 +78,7 @@ int main(void) {
     char line_buf[128];
     int fd;
     FILE *fp;
+    int i;
     pid_t pid = getpid();
 
     printf("Process ID: %d\n", pid);
@@ -76,8 +88,11 @@ int main(void) {
     printf("wrap_fopen addr: %p\n", (void *)wrap_fopen);
     printf("wrap_fgets addr: %p\n", (void *)wrap_fgets);
     printf("wrap_strlen addr: %p\n", (void *)wrap_strlen);
+    fflush(stdout);
 
-    while (1) {
+    wait_for_start();
+
+    for (i = 0; i < 8; ++i) {
         memset(read_buf, 0, sizeof(read_buf));
         memset(line_buf, 0, sizeof(line_buf));
 
@@ -100,6 +115,13 @@ int main(void) {
 
         wrap_puts(read_buf);
         printf("line len: %zu\n", wrap_strlen(line_buf));
-        sleep(1);
+        printf("tag: %s\n", "hello-vararg");
+        printf("ratio: %.2f\n", 3.5);
+        usleep(10000);
     }
+
+    usleep(100000);
+
+    unlink(k_path);
+    return 0;
 }

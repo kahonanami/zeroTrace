@@ -30,20 +30,22 @@ PAYLOAD_PIC_OBJ := $(BUILD_DIR)/zt_payload.pic.o $(BUILD_DIR)/zt_stub.pic.o
 .PRECIOUS: $(BUILD_DIR)/%.o
 
 TEST_BINS := $(patsubst $(TEST_DIR)/%.c, $(TEST_BIN_DIR)/%, $(TEST_C))
-STANDALONE_TEST_BINS := \
-	$(TEST_BIN_DIR)/test_loop \
+TEST_TARGET_BINS := \
 	$(TEST_BIN_DIR)/test_libc_io_loop \
+	$(TEST_BIN_DIR)/test_context_target \
 	$(TEST_BIN_DIR)/test_benchmark_target \
 	$(TEST_BIN_DIR)/test_many_probes_target
-THREAD_STANDALONE_TEST_BINS := \
+MANUAL_TEST_BINS := \
+	$(TEST_BIN_DIR)/test_loop
+THREAD_TEST_TARGET_BINS := \
 	$(TEST_BIN_DIR)/test_threaded_target \
-	$(TEST_BIN_DIR)/test_signal_target \
-	$(TEST_BIN_DIR)/test_thread_log_demo
+	$(TEST_BIN_DIR)/test_signal_target
 BENCHMARK_BINS := \
 	$(TEST_BIN_DIR)/test_benchmark_target \
 	$(TEST_BIN_DIR)/test_benchmark_runner \
 	$(TEST_BIN_DIR)/test_benchmark_latency
-CORE_TEST_BINS := $(filter-out $(STANDALONE_TEST_BINS) $(THREAD_STANDALONE_TEST_BINS), $(TEST_BINS))
+NON_AUTO_TEST_BINS := $(TEST_TARGET_BINS) $(THREAD_TEST_TARGET_BINS) $(MANUAL_TEST_BINS)
+CORE_TEST_BINS := $(filter-out $(NON_AUTO_TEST_BINS), $(TEST_BINS))
 AUTO_TEST_BINS := $(filter-out $(BENCHMARK_BINS), $(CORE_TEST_BINS))
 APP_TARGET := $(BIN_DIR)/ztrace
 
@@ -82,11 +84,11 @@ $(CORE_TEST_BINS): $(TEST_BIN_DIR)/%: $(TEST_DIR)/%.c $(OBJ_CORE) $(OBJ_TEST_HEL
 	$(CC) $(CFLAGS) $< $(OBJ_CORE) $(OBJ_TEST_HELPERS) -o $@ $(LDLIBS)
 	@echo "[✓] Built test: $@"
 
-$(STANDALONE_TEST_BINS): $(TEST_BIN_DIR)/%: $(TEST_DIR)/%.c
+$(TEST_TARGET_BINS) $(MANUAL_TEST_BINS): $(TEST_BIN_DIR)/%: $(TEST_DIR)/%.c
 	$(CC) $(CFLAGS) $< -o $@
 	@echo "[✓] Built standalone test: $@"
 
-$(THREAD_STANDALONE_TEST_BINS): $(TEST_BIN_DIR)/%: $(TEST_DIR)/%.c
+$(THREAD_TEST_TARGET_BINS): $(TEST_BIN_DIR)/%: $(TEST_DIR)/%.c
 	$(CC) $(CFLAGS) $< -o $@ -lpthread
 	@echo "[✓] Built threaded standalone test: $@"
 

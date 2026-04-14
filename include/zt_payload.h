@@ -5,6 +5,44 @@
 #define MAX_SAVED_RET_ADDR 256
 #define ZT_TRACE_EVENT_CAPACITY 1024
 #define ZT_TRACE_BUFFER_MAGIC 0x5a54425546464552ULL
+#define ZT_PROBE_FILTER_EXPR_MAX 128
+#define ZT_PROBE_FILTER_TOKEN_CAP 64
+
+typedef enum {
+    ZT_PROBE_FILTER_TOK_END = 0,
+    ZT_PROBE_FILTER_TOK_ARG,
+    ZT_PROBE_FILTER_TOK_NUM,
+    ZT_PROBE_FILTER_TOK_EQ,
+    ZT_PROBE_FILTER_TOK_NE,
+    ZT_PROBE_FILTER_TOK_GT,
+    ZT_PROBE_FILTER_TOK_GE,
+    ZT_PROBE_FILTER_TOK_LT,
+    ZT_PROBE_FILTER_TOK_LE,
+    ZT_PROBE_FILTER_TOK_AND,
+    ZT_PROBE_FILTER_TOK_OR,
+    ZT_PROBE_FILTER_TOK_NOT,
+    ZT_PROBE_FILTER_TOK_ADD,
+    ZT_PROBE_FILTER_TOK_SUB,
+    ZT_PROBE_FILTER_TOK_MUL,
+    ZT_PROBE_FILTER_TOK_DIV,
+    ZT_PROBE_FILTER_TOK_LPAREN,
+    ZT_PROBE_FILTER_TOK_RPAREN,
+} zt_probe_filter_token_type_t;
+
+typedef struct {
+    uint8_t type;
+    uint8_t arg_index;
+    uint8_t reserved[6];
+    uint64_t value;
+} zt_probe_filter_token_t;
+
+typedef struct {
+    uint64_t probe_id;
+    uint64_t enabled;
+    uint64_t token_count;
+    char expr[ZT_PROBE_FILTER_EXPR_MAX];
+    zt_probe_filter_token_t tokens[ZT_PROBE_FILTER_TOKEN_CAP];
+} zt_probe_filter_t;
 
 typedef struct {
     uint64_t r15;
@@ -46,6 +84,14 @@ typedef struct {
     uint64_t value3;
     uint64_t value4;
     uint64_t value5;
+    uint64_t fp0;
+    uint64_t fp1;
+    uint64_t fp2;
+    uint64_t fp3;
+    uint64_t fp4;
+    uint64_t fp5;
+    uint64_t fp6;
+    uint64_t fp7;
 } zt_trace_event_t;
 
 typedef struct {
@@ -61,8 +107,8 @@ typedef struct {
 
 int zt_payload_init(const zt_payload_config_t *config);
 void *zt_payload_get_entry_stub_addr(void);
-void zt_handle_entry(ctx_t *context);
-void zt_handle_return(ctx_t *context);
+void zt_handle_entry(ctx_t *context, const void *fxsave_area);
+void zt_handle_return(ctx_t *context, const void *fxsave_area);
 uint64_t save_probe_frame_c(uint64_t ret_addr, uint64_t func_id);
 uint64_t peek_probe_id_c(void);
 uint64_t peek_call_id_c(void);

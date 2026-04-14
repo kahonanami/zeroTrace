@@ -14,6 +14,7 @@
 #include <readline/history.h>
 
 #include "../include/zt_cli.h"
+#include "../include/zt_filter.h"
 #include "../include/zt_injector.h"
 #include "../include/zt_trace_runner.h"
 
@@ -25,6 +26,7 @@ static int cmd_trace(char *args);
 static int cmd_stop(char *args);
 static int cmd_enable(char *args);
 static int cmd_disable(char *args);
+static int cmd_update(char *args);
 static int cmd_untrace(char *args);
 static int cmd_info(char *args);
 static int cmd_continue(char *args);
@@ -39,10 +41,11 @@ static struct {
     {"quit", "Exit the CLI", cmd_exit},
     {"attach", "Attach to target process: attach <pid>", cmd_attach},
     {"detach", "Detach from current target", cmd_detach},
-    {"trace", "Register and enable a probe: trace <symbol>", cmd_trace},
+    {"trace", "Register and enable a probe: trace <symbol> [if <expr>]", cmd_trace},
     {"stop", "Stop the target process and keep probes unchanged", cmd_stop},
     {"enable", "Enable a probe again: enable <symbol|id>", cmd_enable},
     {"disable", "Disable probe(s): disable <symbol|id|all>", cmd_disable},
+    {"update", "Update probe filter: update <symbol|id> if <expr> | clear", cmd_update},
     {"untrace", "Remove a probe: untrace <symbol|id>", cmd_untrace},
     {"info", "Show info: info target | info probes", cmd_info},
     {"continue", "Continue the stopped target process", cmd_continue},
@@ -119,6 +122,29 @@ static char *zt_next_arg(char *args) {
 
     char *arg = strtok(NULL, " ");
     return arg;
+}
+
+static int zt_cli_parse_trace_filter(zt_probe_filter_t *filter) {
+    char *maybe_if;
+    char *expr;
+
+    if (filter == NULL) {
+        return -1;
+    }
+
+    memset(filter, 0, sizeof(*filter));
+
+    maybe_if = zt_next_arg(NULL);
+    if (maybe_if == NULL) {
+        return 0;
+    }
+
+    if (strcmp(maybe_if, "if") != 0) {
+        return -1;
+    }
+
+    expr = strtok(NULL, "\n");
+    return zt_probe_filter_compile(expr, filter);
 }
 
 static char *rl_gets(void) {
@@ -299,6 +325,7 @@ static int cmd_detach(char *args) {
 static int cmd_trace(char *args) {
     char *symbol;
     char cwd[PATH_MAX];
+    zt_probe_filter_t filter;
 
     if (!g_cli_attached) {
         printf("No target attached\n");
@@ -307,7 +334,13 @@ static int cmd_trace(char *args) {
 
     symbol = zt_next_arg(args);
     if (symbol == NULL) {
-        printf("Usage: trace <symbol>\n");
+        printf("Usage: trace <symbol> [if <expr>]\n");
+        return 0;
+    }
+
+    if (zt_cli_parse_trace_filter(&filter) != 0) {
+        printf("Usage: trace <symbol> [if <expr>]\n");
+        printf("Example: trace write if arg0 == 1 && arg2 > 0\n");
         return 0;
     }
 
@@ -331,7 +364,10 @@ static int cmd_trace(char *args) {
         g_cli_last_poll = 0;
     }
 
-    if (zt_trace_start_in_session(&g_cli_session, symbol, g_cli_log_path) != 0) {
+    if (zt_trace_start_filtered_in_session(&g_cli_session,
+                                           symbol,
+                                           g_cli_log_path,
+                                           filter.enabled ? &filter : NULL) != 0) {
         printf("Failed to trace %s\n", symbol);
         if (!zt_trace_is_active()) {
             g_cli_log_path[0] = '\0';
@@ -341,7 +377,14 @@ static int cmd_trace(char *args) {
         return 0;
     }
 
-    printf("Tracing %s, log file: %s\n", symbol, g_cli_log_path);
+    if (filter.enabled) {
+        printf("Tracing %s if %s, log file: %s\n",
+               symbol,
+               filter.expr,
+               g_cli_log_path);
+    } else {
+        printf("Tracing %s, log file: %s\n", symbol, g_cli_log_path);
+    }
     return 0;
 }
 
@@ -477,6 +520,68 @@ static int cmd_disable(char *args) {
     return 0;
 }
 
+static int cmd_update(char *args) {
+    char *target;
+    char *mode;
+    zt_probe_info_t *probe;
+    zt_probe_filter_t filter;
+    uint64_t probe_id;
+
+    if (!g_cli_attached) {
+        printf("No target attached\n");
+        return 0;
+    }
+
+    if (!zt_trace_is_active()) {
+        printf("No active trace\n");
+        return 0;
+    }
+
+    target = zt_next_arg(args);
+    mode = zt_next_arg(NULL);
+    if (target == NULL || mode == NULL) {
+        printf("Usage: update <symbol|id> if <expr> | clear\n");
+        return 0;
+    }
+
+    probe = zt_cli_find_probe(target, &probe_id);
+    if (probe == NULL) {
+        printf("Probe not found: %s\n", target);
+        return 0;
+    }
+
+    if (strcmp(mode, "clear") == 0) {
+        if (zt_next_arg(NULL) != NULL) {
+            printf("Usage: update <symbol|id> clear\n");
+            return 0;
+        }
+
+        if (zt_trace_update_probe_filter(&g_cli_session, probe_id, NULL) != 0) {
+            printf("Failed to update probe %s\n", target);
+            return 0;
+        }
+
+        printf("Cleared filter for probe %s\n", target);
+        return 0;
+    }
+
+    if (strcmp(mode, "if") != 0 ||
+        zt_probe_filter_compile(strtok(NULL, "\n"), &filter) != 0) {
+        printf("Usage: update <symbol|id> if <expr> | clear\n");
+        return 0;
+    }
+
+    if (zt_trace_update_probe_filter(&g_cli_session, probe_id, &filter) != 0) {
+        printf("Failed to update probe %s\n", target);
+        return 0;
+    }
+
+    printf("Updated probe %s filter to %s\n",
+           target,
+           filter.expr);
+    return 0;
+}
+
 static int cmd_untrace(char *args) {
     char *target;
     zt_probe_info_t *probe;
@@ -557,9 +662,14 @@ static int cmd_info(char *args) {
 
         for (i = 0; i < ZT_PROBES_CAPACITY; ++i) {
             zt_probe_info_t *probe = &g_cli_session.probes[i];
+            const char *filter_desc = NULL;
 
             if (probe->probe_id == 0) {
                 continue;
+            }
+
+            if (probe->filter.enabled && probe->filter.expr[0] != '\0') {
+                filter_desc = probe->filter.expr;
             }
 
             printf("%-4lu %-20.20s %-10s %-5u 0x%016lx %s\n",
@@ -569,6 +679,9 @@ static int cmd_info(char *args) {
                    probe->orig_len,
                    probe->target.remote_addr,
                    probe->target.module_path);
+            if (filter_desc != NULL) {
+                printf("     filter: %s\n", filter_desc);
+            }
         }
         return 0;
     }

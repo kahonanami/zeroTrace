@@ -52,12 +52,23 @@
     popfq
 .endm
 
+.macro SAVE_FP
+    sub rsp, 512
+    and rsp, 0xFFFFFFFFFFFFFFF0
+    fxsave64 [rsp]
+.endm
+
+.macro RESTORE_FP
+    fxrstor64 [rsp]
+.endm
+
 entry_stub:
     PUSH_ALL
 
     mov r12, rsp
-    and rsp, 0xFFFFFFFFFFFFFFF0
+    SAVE_FP
     mov rdi, r12
+    mov rsi, rsp
 
     call zt_handle_entry
 
@@ -68,33 +79,33 @@ entry_stub:
     lea rax, [rip + exit_stub]
     mov [r12 + 0x90], rax
 
+    RESTORE_FP
     mov rsp, r12
     POP_ALL
     ret
 
 
 exit_stub:
-    mov r13, rax
-    mov r12, rsp
-    and rsp, 0xFFFFFFFFFFFFFFF0
-    call peek_probe_id_c
-    mov rsp, r12
-    push rax
     push 0
-    mov rax, r13
+    push 0
     PUSH_ALL
 
     mov r12, rsp
-    and rsp, 0xFFFFFFFFFFFFFFF0
+    SAVE_FP
+
+    call peek_probe_id_c
+    mov [r12 + 0x88], rax
 
     mov rdi, r12
+    mov rsi, rsp
     call zt_handle_return
 
     call get_ret_addr_c
 
-    mov rsp, r12
-    mov [rsp + 0x88], rax
+    mov [r12 + 0x88], rax
 
+    RESTORE_FP
+    mov rsp, r12
     POP_ALL
     lea rsp, [rsp + 8]
     ret

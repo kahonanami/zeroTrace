@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <stdbool.h>
 #include <fcntl.h>
@@ -14,6 +16,7 @@
 #include <sys/wait.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <signal.h>
 #include <capstone/capstone.h>
 
@@ -115,12 +118,25 @@ static int zt_read_image_base(pid_t pid, const char *image_path, uint64_t *base_
 }
 
 int zt_read_remote_memory(pid_t pid, uint64_t remote_addr, void *buffer, size_t size) {
+    struct iovec local_iov;
+    struct iovec remote_iov;
+    ssize_t nread;
     size_t copied;
     long word;
     size_t word_size;
 
     if (buffer == NULL || size == 0) {
         return -1;
+    }
+
+    local_iov.iov_base = buffer;
+    local_iov.iov_len = size;
+    remote_iov.iov_base = (void *)(uintptr_t)remote_addr;
+    remote_iov.iov_len = size;
+
+    nread = process_vm_readv(pid, &local_iov, 1, &remote_iov, 1, 0);
+    if (nread == (ssize_t)size) {
+        return 0;
     }
 
     copied = 0;
@@ -214,12 +230,7 @@ static int zt_remote_syscall6(pid_t pid,
         return -1;
     }
 
-    errno = 0;
-    saved_word = (uint64_t)ptrace(PTRACE_PEEKDATA,
-                                  pid,
-                                  (void *)(uintptr_t)saved_regs.rip,
-                                  NULL);
-    if (saved_word == (uint64_t)-1 && errno != 0) {
+    if (zt_read_remote_memory(pid, saved_regs.rip, &saved_word, sizeof(saved_word)) != 0) {
         return -1;
     }
 
@@ -896,12 +907,10 @@ int zt_install_probe_patch(zt_injector_session_t *session,
         return -1;
     }
 
-    memset(patch, 0x90, sizeof(patch));
-    patch[0] = 0x48; /* movabs rax, imm64 */
-    patch[1] = 0xB8;
-    memcpy(patch + 2, &thunk_addr, sizeof(thunk_addr));
-    patch[10] = 0xFF; /* jmp rax */
-    patch[11] = 0xE0;
+    patch[0] = 0xFF; /* jmp qword ptr [rip + 0] */
+    patch[1] = 0x25;
+    memset(patch + 2, 0, 4);
+    memcpy(patch + 6, &thunk_addr, sizeof(thunk_addr));
 
     if (zt_write_remote_memory(session->pid,
                                probe->target.remote_addr,

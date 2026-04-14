@@ -30,10 +30,11 @@
 
 - `attach <pid>`
 - `detach`
-- `trace <symbol>`
+- `trace <symbol> [if <expr>]`
 - `untrace <symbol|id>`
 - `enable <symbol|id>`
 - `disable <symbol|id|all>`
+- `update <symbol|id> if <expr> | clear`
 - `stop`
 - `continue`
 - `info target`
@@ -55,11 +56,11 @@
 当前 patch 方案固定为：
 
 ```asm
-movabs rax, thunk_addr
-jmp rax
+jmp qword ptr [rip + 0]
+.quad thunk_addr
 ```
 
-总长度是 12 字节。在安装 patch 前用 Capstone 解析函数开头指令，确保不会截断原始指令。
+总长度是 14 字节，在安装 patch 前用 Capstone 解析函数开头指令，确保不会截断原始指令。
 
 ### 1.4 `zt_thunk_manager`
 
@@ -141,8 +142,8 @@ call some_target
 这类指令原本依赖相对偏移，如果 thunk 离目标地址很远，保留原编码会失效。因此当前实现会把它改写成绝对调用，逻辑上等价于：
 
 ```asm
-movabs rax, target
-call rax
+movabs r11, target
+call r11
 ```
 
 这样可以消除 `rel32` 距离限制。
@@ -158,8 +159,8 @@ jmp some_target
 同理，当前实现会把它改写成绝对跳转，逻辑上等价于：
 
 ```asm
-movabs rax, target
-jmp rax
+movabs r11, target
+jmp r11
 ```
 
 ### 5. `jcc rel8/rel32`
@@ -171,8 +172,8 @@ jmp rax
 3. 条件满足时执行：
 
 ```asm
-movabs rax, target
-jmp rax
+movabs r11, target
+jmp r11
 ```
 
 例如：
@@ -185,8 +186,8 @@ jz target
 
 ```asm
 jnz .skip
-movabs rax, target
-jmp rax
+movabs r11, target
+jmp r11
 .skip:
 ```
 
@@ -203,7 +204,9 @@ jmp rax
 
 ### 1.6 `zt_stub.S`
 
-`zt_stub.S` 是 `libzt_payload.so` 的一部分，是注入到目标进程里的汇编 stub，用于保存上下文信息并传入 `zt_payload` 中的 C 函数处理。
+`zt_stub.S` 是 `libzt_payload.so` 的一部分，是注入到目标进程里的汇编 stub，用于保存上下文信息并传入 `zt_payload` 中的 C 函数处理。当前 stub 会保存 / 恢复通用寄存器、`rflags`，并用 `fxsave64/fxrstor64` 保存 / 恢复 x87、MMX 和 XMM 浮点/SIMD 上下文。
+
+在调用 `zt_handle_entry()` / `zt_handle_return()` 时，stub 会把当前 `ctx_t *` 和临时 `fxsave64` 区域地址一起传给 payload。payload 从 `fxsave64` 区域的 XMM 保存区读取 `xmm0 ... xmm7` 的低 64 位，写入 trace event 的 `fp0 ... fp7` 字段。这样 tracer 侧可以在不进入目标进程再次取寄存器的情况下，根据函数签名显示 `float` / `double` 参数和 `double` 返回值。
 
 ### 1.7 `zt_trace_runner`
 
@@ -230,6 +233,8 @@ jmp rax
 `zt_sigconf` 是运行时函数签名解释模块，会加载 `conf/zttrace.conf`。
 
 这个配置文件由 `ltrace.conf` 适配而来，它的作用是帮助 trace 日志把原始寄存器值格式化成更接近函数签名的展示结果。
+
+整数 / 指针参数使用 x86-64 SysV ABI 的通用寄存器序列，浮点参数使用独立的 SSE 参数序列。也就是说，`int` / pointer 类参数从 `rdi/rsi/rdx/rcx/r8/r9` 对应的 `value0 ... value5` 读取，`float` / `double` 参数从 `xmm0 ... xmm7` 对应的 `fp0 ... fp7` 读取；浮点返回值从 return 事件中的 `fp0` 读取。
 
 具体配置语法请看 [README.md](../README.md)
 
@@ -258,8 +263,26 @@ attach <pid>
 用户执行：
 
 ```text
-trace <symbol>
+trace <symbol> [if <expr>]
 ```
+
+无 `if` 时直接追踪所有调用；带 `if` 时会在 ztrace 消费事件时按 entry 参数过滤日志，并同步吞掉对应的 return 事件。例如：
+
+```text
+trace write if arg0 == 1
+trace probe_fn01 if arg0 >= 10
+```
+
+当前会把 `if` 后面的字符串作为完整布尔表达式解析。表达式支持：
+
+- `arg0` 到 `arg5`，对应 x86-64 SysV ABI 的 `rdi/rsi/rdx/rcx/r8/r9`
+- 十进制和 `0x` 十六进制数字
+- `==`、`!=`、`>`、`>=`、`<`、`<=`
+- `&&`、`||`、`!`
+- `+`、`-`、`*`、`/`
+- 括号
+
+解析方式参考了 [NEMU](https://github.com/NJU-ProjectN/nemu) 的 simple debuger 中表达式求值思路：先把字符串 token 化，再按优先级递归求值。token 会保存在 `zt_probe_filter_t` 中，后续每次消费 entry 事件时直接用当前事件的 `value0 ... value5` 作为 `arg0 ... arg5` 求值。
 
 第一条 probe 的完整流程如下：
 
@@ -287,13 +310,14 @@ trace <symbol>
 zt_trace_poll()
 ```
 
-当前轮询方式是：
+当前普通轮询方式是：
 
-1. `SIGSTOP` 暂停目标进程
-2. 读取远程 trace buffer
-3. 从上次 `last_seq` 之后开始消费新事件
-4. 把格式化后的输出追加写入 `ztrace.<pid>.log`，并在 CLI 中重绘显示
-5. `PTRACE_CONT` 继续目标进程
+1. 使用 `process_vm_readv` 从目标进程直接读取共享 trace buffer
+2. 从上次 `last_seq` 之后开始消费新事件
+3. 把格式化后的输出追加写入 `ztrace.<pid>.log`，并在 CLI 中重绘显示
+4. 如果目标因为信号进入 ptrace stop，则转发该信号并继续目标进程
+
+也就是说，普通日志轮询不再依赖 `SIGSTOP -> 读 buffer -> PTRACE_CONT`，不会为了读取 trace buffer 主动暂停目标进程。`trace` / `untrace` / `enable` / `disable` 这类需要修改代码段的操作仍会短暂停止目标进程，以保证 patch 和恢复原始指令的安全性。
 
 当前日志格式采用接近 `perf script` / `ftrace` 的事件流风格，包含：
 
@@ -305,8 +329,8 @@ zt_trace_poll()
 例如：
 
 ```text
-test_thread_log_demo-2179652/2179837 [003] 156853.039080371: ztrace:entry: demo_add(rdi=0x1, rsi=0x0, rdx=0x1, rcx=0x7fa855d4785e, r8=0x0, r9=0x7fa855c8e6c0)
-test_thread_log_demo-2179652/2179837 [003] 156853.039081151: ztrace:return: demo_add -> 0x1
+test_threaded_target-22520/22521 [003] 156853.039080371: ztrace:entry: thread_add(rdi=0x1, rsi=0x0, rdx=0x1, rcx=0x7fa855d4785e, r8=0x0, r9=0x7fa855c8e6c0)
+test_threaded_target-22520/22521 [003] 156853.039081151: ztrace:return: thread_add -> 0x1
 ```
 
 如果函数签名能在 `conf/zttrace.conf` 中找到，则会优先输出更接近 `ltrace` 风格的结果，例如：
@@ -316,7 +340,41 @@ test_libc_io_loop-1705732/1705732 [001] 157114.775569202: ztrace:entry: write(1,
 test_libc_io_loop-1705732/1705732 [001] 157114.775572037: ztrace:return: read -> 22 "ad-write\x0a"
 ```
 
-### 2.4 disable / enable
+对于配置中存在名为 `fmt` 的参数的可变参数函数，`zt_sigconf` 会读取 format string，并在 tracer 侧展开仍处于寄存器快照内的可变参数。例如 `%zu`、`%d`、`%p`、`%s` 会被解析成对应的整数、指针或远程字符串，`%f` / `%g` 这类浮点格式会从 `fp0 ... fp7` 读取。超出寄存器、已经落到栈上的可变参数当前不会异步读取，避免在函数返回后读取到已经失效或被复用的调用栈内容。
+
+### 2.4 条件探针过滤
+
+条件探针没有把过滤表达式放进目标进程 payload 的热路径里执行，而是在 tracer 消费共享 trace buffer 时完成过滤。这样 payload 侧仍然只负责记录寄存器快照，避免在被 trace 的进程里增加复杂判断逻辑。
+
+实现流程如下：
+
+1. CLI 解析 `trace <symbol> if <expr>`
+2. 解析结果保存到 `zt_probe_info_t.filter`
+3. payload 命中 probe 时仍然写入普通 entry / return 事件
+4. `zt_trace_runner` 消费 entry 事件时读取 `value0 ... value5`
+5. 如果 entry 不满足条件，则不写日志，并在 entry cache 中把这个 `call_id` 标记为 suppressed
+6. 后续遇到相同 `call_id` 的 return 事件时也直接吞掉，避免出现“没有 entry 但有 return”的半条日志
+
+因此条件 probe 只影响 ztrace 输出，不改变目标函数执行路径，也不会改变 thunk / stub 的运行方式。
+
+### 2.5 probe filter 热更新
+
+`update <symbol|id> if <expr>` 会在 probe 已安装的情况下直接替换 `zt_probe_info_t.filter`，包括原始表达式字符串和已经编译好的 token 序列。
+`update <symbol|id> clear` 会清空 filter，让该 probe 重新输出所有命中事件。
+
+这个更新发生在 tracer 侧，不会执行 `untrace` / `trace`，也不会：
+
+- 恢复原函数入口
+- 重新分配 thunk slot
+- 重建 thunk
+- 重新 patch 函数入口
+- 暂停目标进程
+
+因此它是一个轻量级的 probe 行为热更新：目标进程继续运行，下一次 ztrace 消费 entry / return 事件时就会使用新的过滤规则。
+当前 `update` 是替换语义，不会和旧 filter 做 `&&` / `||` 组合。
+由于 filter 只影响 tracer 侧日志消费，`update` 不需要调用 `zt_trace_ensure_stopped()`，也不会触发任何远程内存 patch。
+
+### 2.6 disable / enable
 
 `disable <symbol|id>`：
 
@@ -331,7 +389,7 @@ test_libc_io_loop-1705732/1705732 [001] 157114.775572037: ztrace:return: read ->
 2. 重新为 probe 安装 thunk 和入口 patch
 3. 继续目标进程
 
-### 2.5 untrace
+### 2.7 untrace
 
 `untrace <symbol|id>`：
 
@@ -357,6 +415,7 @@ probe 表定义在 `zt_injector_session_t` 中，每个 probe 包含：
 - `orig_code`
 - `orig_len`
 - `state`
+- `filter`
 
 其中 `state` 当前显式区分为：
 
@@ -378,12 +437,14 @@ payload 和 tracer 之间通过共享内存中的 ring buffer 传递事件。
 - `tid`
 - `cpu_id`
 - `value0 ... value5`
+- `fp0 ... fp7`
 - `committed_seq`
 
 其中：
 
 - `entry` 事件保存参数寄存器
-- `return` 事件保存 `rax`
+- `entry` 事件额外保存 `xmm0 ... xmm7` 的低 64 位，用于显示 `float` / `double` 参数
+- `return` 事件保存 `rax` 和 `xmm0`，分别用于整数 / 指针返回值和浮点返回值
 - `call_id` 用于把 entry / return 在 tracer 侧稳定关联起来
 - `timestamp_ns` 在目标进程命中 probe 时通过 `CLOCK_MONOTONIC` 记录
 - `tid` / `cpu_id` 用于多线程与 perf-style 事件流展示
@@ -412,6 +473,6 @@ payload 和 tracer 之间通过共享内存中的 ring buffer 传递事件。
 当前实现已经能稳定支持基本功能，但还有一些限制：
 
 - 主要面向 `x86_64 Linux`，后续可支持 `ARM64` 架构（题目 A1）
-- 还未实现条件探针（题目 A2）
-- 已保存 / 恢复浮点上下文，但当前还不显示浮点参数与浮点返回值
-- `zt_trace_poll()` 仍然采用 `SIGSTOP -> 读 buffer -> PTRACE_CONT` 的轮询策略，后续仍可继续优化
+- 条件探针当前在 ztrace 事件消费侧过滤日志，不在目标进程 payload hot path 中执行过滤表达式
+- 已保存 / 恢复浮点上下文，并通过 `test_context_integrity` 覆盖浮点/SIMD 上下文不被 probe handler 破坏；当前支持 `float` / `double` 参数和返回值显示，但不覆盖 AVX YMM 高 128 位
+- `zt_trace_poll()` 的普通日志轮询已经改为 `process_vm_readv` 非暂停读取；代码 patch 类操作仍需要短暂停止目标进程
