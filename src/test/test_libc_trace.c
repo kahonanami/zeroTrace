@@ -86,7 +86,8 @@ int main(void) {
         strstr(log_text, "ztrace:return: read ->") == NULL ||
         strstr(log_text, "ztrace:entry: printf") == NULL ||
         strstr(log_text, "printf(\"line len: %zu.\", 22)") == NULL ||
-        strstr(log_text, "printf(\"tag: %s.\", \"hello-vararg\")") == NULL) {
+        strstr(log_text, "printf(\"tag: %s.\", \"hello-vararg\")") == NULL ||
+        strstr(log_text, "printf(\"ratio: %.2f.\", 3.5)") == NULL) {
         fprintf(stderr, "libc trace log missed entry/return output\n");
         goto cleanup_trace;
     }

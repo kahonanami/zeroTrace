@@ -4,8 +4,12 @@
 #include <sys/prctl.h>
 #include <unistd.h>
 
-__attribute__((noinline)) int add_loop(int value) {
-    return value + 1;
+__attribute__((noinline)) int add_loop(int lhs, int rhs) {
+    return lhs + rhs;
+}
+
+__attribute__((noinline)) double fp_add_loop(double lhs, double rhs) {
+    return lhs + rhs;
 }
 
 int main(void) {
@@ -17,9 +21,13 @@ int main(void) {
     fflush(stdout);
 
     while (1) {
-        int ret = add_loop(i);
+        int ret = add_loop(i, i + 1);
+        double lhs = (double)i + 0.25;
+        double rhs = 1.5;
+        double fp_ret = fp_add_loop(lhs, rhs);
 
-        printf("add_loop(%d) -> %d\n", i, ret);
+        printf("add_loop(%d, %d) -> %d\n", i, i + 1, ret);
+        printf("fp_add_loop(%.2f, %.2f) -> %.2f\n", lhs, rhs, fp_ret);
         fflush(stdout);
         ++i;
         sleep(1);

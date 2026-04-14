@@ -84,6 +84,14 @@ typedef struct {
     uint64_t value3;
     uint64_t value4;
     uint64_t value5;
+    uint64_t fp0;
+    uint64_t fp1;
+    uint64_t fp2;
+    uint64_t fp3;
+    uint64_t fp4;
+    uint64_t fp5;
+    uint64_t fp6;
+    uint64_t fp7;
 } zt_trace_event_t;
 
 typedef struct {
@@ -99,8 +107,8 @@ typedef struct {
 
 int zt_payload_init(const zt_payload_config_t *config);
 void *zt_payload_get_entry_stub_addr(void);
-void zt_handle_entry(ctx_t *context);
-void zt_handle_return(ctx_t *context);
+void zt_handle_entry(ctx_t *context, const void *fxsave_area);
+void zt_handle_return(ctx_t *context, const void *fxsave_area);
 uint64_t save_probe_frame_c(uint64_t ret_addr, uint64_t func_id);
 uint64_t peek_probe_id_c(void);
 uint64_t peek_call_id_c(void);

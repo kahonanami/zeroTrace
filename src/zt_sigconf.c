@@ -136,6 +136,14 @@ static zt_sig_type_t zt_parse_sig_type(const char *decl) {
         return ZT_SIG_TYPE_CONST_BUF;
     }
 
+    if (strcmp(decl, "float") == 0) {
+        return ZT_SIG_TYPE_FLOAT;
+    }
+
+    if (strcmp(decl, "double") == 0) {
+        return ZT_SIG_TYPE_DOUBLE;
+    }
+
     if (strstr(decl, "char *") != NULL) {
         return ZT_SIG_TYPE_CSTR;
     }
@@ -302,6 +310,24 @@ static uint64_t zt_event_arg_value(const zt_trace_event_t *event, int index) {
     }
 }
 
+static uint64_t zt_event_fp_arg_value(const zt_trace_event_t *event, int index) {
+    if (event == NULL) {
+        return 0;
+    }
+
+    switch (index) {
+    case 0: return event->fp0;
+    case 1: return event->fp1;
+    case 2: return event->fp2;
+    case 3: return event->fp3;
+    case 4: return event->fp4;
+    case 5: return event->fp5;
+    case 6: return event->fp6;
+    case 7: return event->fp7;
+    default: return 0;
+    }
+}
+
 static int zt_event_arg_value_ext(const zt_trace_event_t *event,
                                   int index,
                                   uint64_t *value_out) {
@@ -380,6 +406,10 @@ static int zt_sig_type_is_numeric(zt_sig_type_t type) {
     default:
         return 0;
     }
+}
+
+static int zt_sig_type_is_fp(zt_sig_type_t type) {
+    return type == ZT_SIG_TYPE_FLOAT || type == ZT_SIG_TYPE_DOUBLE;
 }
 
 static size_t zt_cap_preview_len(size_t len) {
@@ -506,6 +536,40 @@ static int zt_find_format_param_index(const zt_func_sig_t *sig) {
     return -1;
 }
 
+static int zt_count_fixed_gp_params(const zt_func_sig_t *sig) {
+    int i;
+    int count = 0;
+
+    if (sig == NULL) {
+        return 0;
+    }
+
+    for (i = 0; i < sig->param_count; ++i) {
+        if (!zt_sig_type_is_fp(sig->params[i].type)) {
+            ++count;
+        }
+    }
+
+    return count;
+}
+
+static int zt_count_fixed_fp_params(const zt_func_sig_t *sig) {
+    int i;
+    int count = 0;
+
+    if (sig == NULL) {
+        return 0;
+    }
+
+    for (i = 0; i < sig->param_count; ++i) {
+        if (zt_sig_type_is_fp(sig->params[i].type)) {
+            ++count;
+        }
+    }
+
+    return count;
+}
+
 static void zt_skip_format_flags(const char **cursor, int *arg_index) {
     const char *p = *cursor;
 
@@ -556,18 +620,23 @@ static int zt_append_variadic_arg(char *out,
                                   size_t *offset,
                                   const zt_injector_session_t *session,
                                   const zt_trace_event_t *event,
-                                  int *arg_index,
+                                  int *gp_index,
+                                  int *fp_index,
                                   char conv) {
     uint64_t value;
 
     if (strchr("aAeEfFgG", conv) != NULL) {
-        return zt_append_raw(out, out_size, offset, ", <fp>");
+        value = zt_event_fp_arg_value(event, (*fp_index)++);
+        if (zt_append_raw(out, out_size, offset, ", ") != 0) {
+            return -1;
+        }
+        return zt_append_value(out, out_size, offset, session, ZT_SIG_TYPE_DOUBLE, value);
     }
 
-    if (zt_event_arg_value_ext(event, *arg_index, &value) != 0) {
+    if (zt_event_arg_value_ext(event, *gp_index, &value) != 0) {
         return zt_append_raw(out, out_size, offset, ", <unreadable>");
     }
-    ++*arg_index;
+    ++*gp_index;
 
     if (zt_append_raw(out, out_size, offset, ", ") != 0) {
         return -1;
@@ -601,7 +670,8 @@ static int zt_append_variadic_args(char *out,
                                    const zt_func_sig_t *sig,
                                    const zt_trace_event_t *event) {
     int fmt_index;
-    int arg_index;
+    int gp_index;
+    int fp_index;
     uint64_t fmt_addr;
     char fmt[192];
     const char *p;
@@ -613,7 +683,8 @@ static int zt_append_variadic_args(char *out,
         return zt_append_raw(out, out_size, offset, ", ...");
     }
 
-    arg_index = fmt_index + 1;
+    gp_index = zt_count_fixed_gp_params(sig);
+    fp_index = zt_count_fixed_fp_params(sig);
     p = fmt;
     while (*p != '\0') {
         if (*p++ != '%') {
@@ -625,7 +696,7 @@ static int zt_append_variadic_args(char *out,
             continue;
         }
 
-        zt_skip_format_flags(&p, &arg_index);
+        zt_skip_format_flags(&p, &gp_index);
         zt_skip_format_length(&p);
         if (*p == '\0') {
             break;
@@ -636,7 +707,8 @@ static int zt_append_variadic_args(char *out,
                                                 offset,
                                                 session,
                                                 event,
-                                                &arg_index,
+                                                &gp_index,
+                                                &fp_index,
                                                 *p) != 0) {
             return -1;
         }
@@ -667,6 +739,21 @@ static int zt_append_value(char *out,
     case ZT_SIG_TYPE_SIZE:
         written = snprintf(text, sizeof(text), "%llu", (unsigned long long)value);
         break;
+    case ZT_SIG_TYPE_FLOAT: {
+        float fp_value;
+        uint32_t raw = (uint32_t)value;
+
+        memcpy(&fp_value, &raw, sizeof(fp_value));
+        written = snprintf(text, sizeof(text), "%g", (double)fp_value);
+        break;
+    }
+    case ZT_SIG_TYPE_DOUBLE: {
+        double fp_value;
+
+        memcpy(&fp_value, &value, sizeof(fp_value));
+        written = snprintf(text, sizeof(text), "%g", fp_value);
+        break;
+    }
     case ZT_SIG_TYPE_CSTR: {
         char str[64];
 
@@ -709,6 +796,8 @@ int zt_format_trace_event_with_sig(const zt_injector_session_t *session,
     const zt_func_sig_t *sig;
     size_t offset = 0;
     int i;
+    int gp_index = 0;
+    int fp_index = 0;
     int written;
 
     if (session == NULL || probe == NULL || event == NULL || out == NULL || out_size == 0) {
@@ -728,6 +817,8 @@ int zt_format_trace_event_with_sig(const zt_injector_session_t *session,
         offset = (size_t)written;
 
         for (i = 0; i < sig->param_count && i < ZT_SIGCONF_MAX_PARAMS; ++i) {
+            uint64_t raw_value;
+
             if (i > 0) {
                 if (offset + 2 >= out_size) {
                     return -1;
@@ -737,12 +828,18 @@ int zt_format_trace_event_with_sig(const zt_injector_session_t *session,
                 out[offset] = '\0';
             }
 
+            if (zt_sig_type_is_fp(sig->params[i].type)) {
+                raw_value = zt_event_fp_arg_value(event, fp_index++);
+            } else {
+                raw_value = zt_event_arg_value(event, gp_index++);
+            }
+
             if (zt_append_value(out,
                                 out_size,
                                 &offset,
                                 session,
                                 sig->params[i].type,
-                                zt_event_arg_value(event, i)) != 0) {
+                                raw_value) != 0) {
                 return -1;
             }
 
@@ -752,7 +849,7 @@ int zt_format_trace_event_with_sig(const zt_injector_session_t *session,
 
                 if (preview_len > 0 &&
                     zt_read_remote_buf_preview(session,
-                                               zt_event_arg_value(event, i),
+                                               raw_value,
                                                preview_len,
                                                preview,
                                                sizeof(preview)) == 0) {
@@ -797,7 +894,7 @@ int zt_format_trace_event_with_sig(const zt_injector_session_t *session,
                             &offset,
                             session,
                             sig->ret.type,
-                            event->value0) != 0) {
+                            zt_sig_type_is_fp(sig->ret.type) ? event->fp0 : event->value0) != 0) {
             return -1;
         }
 

@@ -53,6 +53,6 @@ int main(void) {
         sink += actual;
     }
 
-    usleep(100000);
+    usleep(1000000);
     return sink == -1.0 ? 1 : 0;
 }

@@ -128,19 +128,23 @@ CLI 常用命令：
 ```text
 attach <pid>
 trace add_loop
+trace fp_add_loop
 ```
 
 如果追踪成功，会持续看到类似输出：
 
 ```text
-test_loop-32079/32079 [001] 157114.775569202: ztrace:entry: add_loop(rdi=0xa, rsi=0x0, rdx=0x0, rcx=0x0, r8=0x0, r9=0x0)
-test_loop-32079/32079 [001] 157114.775572037: ztrace:return: add_loop -> 0xb
+test_loop-532386/532386 [010] 58915.513461172: ztrace:entry: add_loop(24, 25)
+test_loop-532386/532386 [010] 58915.513468205: ztrace:return: add_loop -> 49
+test_loop-532386/532386 [010] 58915.513461172: ztrace:entry: fp_add_loop(24.25, 1.5)
+test_loop-532386/532386 [010] 58915.513468205: ztrace:return: fp_add_loop -> 25.75
 ```
 
 停止并卸载 probe：
 
 ```text
 untrace add_loop
+untrace fp_add_loop
 detach
 quit
 ```
@@ -202,7 +206,8 @@ test_threaded_target-22520/22521 [010] 157114.775572037: ztrace:return: thread_a
 - 该文件是一个从 `ltrace.conf` 思路适配而来的配置文件
 - 命中已配置函数时，会优先按签名格式化参数和返回值
 - 字符串中非打印字符会转义成 `\xNN`
-- 对配置中存在名为 `fmt` 的参数的可变参数函数，会根据 format string 展开仍在前 6 个通用寄存器参数内的可变参数
+- `float` / `double` 参数和返回值会按 x86-64 SysV ABI 从 `xmm` 寄存器快照中解码
+- 对配置中存在名为 `fmt` 的参数的可变参数函数，会根据 format string 展开仍在寄存器快照内的整型、指针和浮点可变参数
 
 `zttrace.conf` 使用简化版的函数签名语法，基本形式如下：
 
@@ -217,6 +222,7 @@ puts(const char *s) -> int
 read(int fd, buffer buf, size_t count) -> long
 write(int fd, const buffer buf, size_t count) -> long
 malloc(size_t size) -> void *
+fp_mix(double a, double b) -> double
 ```
 
 对于未配置的函数会回退到寄存器风格显示。
@@ -318,7 +324,7 @@ uninstall latency avg : 22006 ns (0.022 ms) over 1000 rounds
 
 - 当前项目主要面向 `x86_64 Linux`
 - 已支持通过 `conf/zttrace.conf` 对常见 libc/POSIX 函数做签名感知格式化；未配置到的函数会回退到寄存器风格显示
-- 已支持保存 / 恢复通用寄存器、标志寄存器和浮点上下文；当前尚未实现浮点参数/返回值显示
+- 已支持保存 / 恢复通用寄存器、标志寄存器和浮点上下文，并支持 `float` / `double` 参数与返回值显示
 - 对复杂函数前导指令的支持依赖 Capstone 解析；如果函数入口包含当前未处理的情况，probe 安装可能失败
 
 更底层的设计说明可以参考：

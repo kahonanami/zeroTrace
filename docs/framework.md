@@ -206,6 +206,8 @@ jmp r11
 
 `zt_stub.S` 是 `libzt_payload.so` 的一部分，是注入到目标进程里的汇编 stub，用于保存上下文信息并传入 `zt_payload` 中的 C 函数处理。当前 stub 会保存 / 恢复通用寄存器、`rflags`，并用 `fxsave64/fxrstor64` 保存 / 恢复 x87、MMX 和 XMM 浮点/SIMD 上下文。
 
+在调用 `zt_handle_entry()` / `zt_handle_return()` 时，stub 会把当前 `ctx_t *` 和临时 `fxsave64` 区域地址一起传给 payload。payload 从 `fxsave64` 区域的 XMM 保存区读取 `xmm0 ... xmm7` 的低 64 位，写入 trace event 的 `fp0 ... fp7` 字段。这样 tracer 侧可以在不进入目标进程再次取寄存器的情况下，根据函数签名显示 `float` / `double` 参数和 `double` 返回值。
+
 ### 1.7 `zt_trace_runner`
 
 `zt_trace_runner` 是把以上模块串起来的高层控制层。
@@ -231,6 +233,8 @@ jmp r11
 `zt_sigconf` 是运行时函数签名解释模块，会加载 `conf/zttrace.conf`。
 
 这个配置文件由 `ltrace.conf` 适配而来，它的作用是帮助 trace 日志把原始寄存器值格式化成更接近函数签名的展示结果。
+
+整数 / 指针参数使用 x86-64 SysV ABI 的通用寄存器序列，浮点参数使用独立的 SSE 参数序列。也就是说，`int` / pointer 类参数从 `rdi/rsi/rdx/rcx/r8/r9` 对应的 `value0 ... value5` 读取，`float` / `double` 参数从 `xmm0 ... xmm7` 对应的 `fp0 ... fp7` 读取；浮点返回值从 return 事件中的 `fp0` 读取。
 
 具体配置语法请看 [README.md](../README.md)
 
@@ -336,7 +340,7 @@ test_libc_io_loop-1705732/1705732 [001] 157114.775569202: ztrace:entry: write(1,
 test_libc_io_loop-1705732/1705732 [001] 157114.775572037: ztrace:return: read -> 22 "ad-write\x0a"
 ```
 
-对于配置中存在名为 `fmt` 的参数的可变参数函数，`zt_sigconf` 会读取 format string，并在 tracer 侧展开仍处于前 6 个通用寄存器参数内的可变参数。例如 `%zu`、`%d`、`%p`、`%s` 会被解析成对应的整数、指针或远程字符串。超出寄存器、已经落到栈上的可变参数当前不会异步读取，避免在函数返回后读取到已经失效或被复用的调用栈内容。
+对于配置中存在名为 `fmt` 的参数的可变参数函数，`zt_sigconf` 会读取 format string，并在 tracer 侧展开仍处于寄存器快照内的可变参数。例如 `%zu`、`%d`、`%p`、`%s` 会被解析成对应的整数、指针或远程字符串，`%f` / `%g` 这类浮点格式会从 `fp0 ... fp7` 读取。超出寄存器、已经落到栈上的可变参数当前不会异步读取，避免在函数返回后读取到已经失效或被复用的调用栈内容。
 
 ### 2.4 条件探针过滤
 
@@ -433,12 +437,14 @@ payload 和 tracer 之间通过共享内存中的 ring buffer 传递事件。
 - `tid`
 - `cpu_id`
 - `value0 ... value5`
+- `fp0 ... fp7`
 - `committed_seq`
 
 其中：
 
 - `entry` 事件保存参数寄存器
-- `return` 事件保存 `rax`
+- `entry` 事件额外保存 `xmm0 ... xmm7` 的低 64 位，用于显示 `float` / `double` 参数
+- `return` 事件保存 `rax` 和 `xmm0`，分别用于整数 / 指针返回值和浮点返回值
 - `call_id` 用于把 entry / return 在 tracer 侧稳定关联起来
 - `timestamp_ns` 在目标进程命中 probe 时通过 `CLOCK_MONOTONIC` 记录
 - `tid` / `cpu_id` 用于多线程与 perf-style 事件流展示
@@ -468,5 +474,5 @@ payload 和 tracer 之间通过共享内存中的 ring buffer 传递事件。
 
 - 主要面向 `x86_64 Linux`，后续可支持 `ARM64` 架构（题目 A1）
 - 条件探针当前在 ztrace 事件消费侧过滤日志，不在目标进程 payload hot path 中执行过滤表达式
-- 已保存 / 恢复浮点上下文，并通过 `test_context_integrity` 覆盖浮点/SIMD 上下文不被 probe handler 破坏；当前还不显示浮点参数与浮点返回值
+- 已保存 / 恢复浮点上下文，并通过 `test_context_integrity` 覆盖浮点/SIMD 上下文不被 probe handler 破坏；当前支持 `float` / `double` 参数和返回值显示，但不覆盖 AVX YMM 高 128 位
 - `zt_trace_poll()` 的普通日志轮询已经改为 `process_vm_readv` 非暂停读取；代码 patch 类操作仍需要短暂停止目标进程

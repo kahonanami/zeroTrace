@@ -19,6 +19,8 @@ typedef enum {
     ZT_SIG_TYPE_CSTR,
     ZT_SIG_TYPE_BUF,
     ZT_SIG_TYPE_CONST_BUF,
+    ZT_SIG_TYPE_FLOAT,
+    ZT_SIG_TYPE_DOUBLE,
     ZT_SIG_TYPE_VOID,
 } zt_sig_type_t;
 

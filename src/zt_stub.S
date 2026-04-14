@@ -68,6 +68,7 @@ entry_stub:
     mov r12, rsp
     SAVE_FP
     mov rdi, r12
+    mov rsi, rsp
 
     call zt_handle_entry
 
@@ -96,6 +97,7 @@ exit_stub:
     mov [r12 + 0x88], rax
 
     mov rdi, r12
+    mov rsi, rsp
     call zt_handle_return
 
     call get_ret_addr_c

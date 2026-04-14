@@ -70,6 +70,12 @@ int main(void) {
         goto cleanup_trace;
     }
 
+    if (strstr(log_text, "fp_mix(0.125, 0.5)") == NULL ||
+        strstr(log_text, "fp_mix -> -6.89583") == NULL) {
+        fprintf(stderr, "context trace log missed formatted floating-point values\n");
+        goto cleanup_trace;
+    }
+
     if (!zt_test_process_gone(child)) {
         fprintf(stderr, "context target still alive\n");
         goto cleanup_trace;

@@ -116,6 +116,7 @@ int main(void) {
         wrap_puts(read_buf);
         printf("line len: %zu\n", wrap_strlen(line_buf));
         printf("tag: %s\n", "hello-vararg");
+        printf("ratio: %.2f\n", 3.5);
         usleep(10000);
     }
 

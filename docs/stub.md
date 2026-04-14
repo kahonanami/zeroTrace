@@ -105,6 +105,7 @@ entry_stub:
     mov r12, rsp
     SAVE_FP
     mov rdi, r12
+    mov rsi, rsp
     call zt_handle_entry
 
     mov rdi, [r12 + 0x90]
@@ -209,7 +210,7 @@ offset +0x90 : real return address
 1. `call zt_handle_entry`
    - 把当前保存区当成 `ctx_t *` 传给 C handler
    - C handler 直接从保存区里读取参数寄存器值
-   - 调用 C handler 前已经通过 `fxsave64` 保存浮点/SIMD 上下文
+   - 调用 C handler 前已经通过 `fxsave64` 保存浮点/SIMD 上下文，并把 `fxsave64` 区域地址作为第二个参数传入，用于读取 `xmm0 ... xmm7`
 
 2. `call save_probe_frame_c`
    - `rdi = [r12 + 0x90]`，也就是真实返回地址
@@ -279,6 +280,7 @@ exit_stub:
     mov [r12 + 0x88], rax
 
     mov rdi, r12
+    mov rsi, rsp
     call zt_handle_return
 
     call get_ret_addr_c
@@ -309,6 +311,7 @@ exit_stub:
 这样就人为伪造出了一段和 `entry_stub` 类似的栈布局，使得：
 
 - `zt_handle_return` 仍然可以把当前 `rsp` 当成 `ctx_t *`
+- `zt_handle_return` 同样会收到当前 `fxsave64` 区域地址，用于读取 `xmm0` 浮点返回值
 - `[rsp + 0x88]` 这一格先写入 `peek_probe_id_c()` 取回的 `probe_id`
 - 记录 return 事件之后，同一个 `[rsp + 0x88]` 槽位会被改写成真实返回地址
 
