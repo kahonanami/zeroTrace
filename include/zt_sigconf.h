@@ -24,6 +24,7 @@ typedef enum {
 
 typedef struct {
     char decl[64];
+    char name[32];
     zt_sig_type_t type;
 } zt_sig_param_t;
 

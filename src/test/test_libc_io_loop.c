@@ -115,6 +115,7 @@ int main(void) {
 
         wrap_puts(read_buf);
         printf("line len: %zu\n", wrap_strlen(line_buf));
+        printf("tag: %s\n", "hello-vararg");
         usleep(10000);
     }
 

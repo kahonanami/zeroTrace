@@ -13,6 +13,7 @@
 static const char *k_symbols[] = {
     "write",
     "read",
+    "printf",
 };
 
 int main(void) {
@@ -82,7 +83,10 @@ int main(void) {
     if (strstr(log_text, "ztrace:entry: write") == NULL ||
         strstr(log_text, "ztrace:return: write ->") == NULL ||
         strstr(log_text, "ztrace:entry: read") == NULL ||
-        strstr(log_text, "ztrace:return: read ->") == NULL) {
+        strstr(log_text, "ztrace:return: read ->") == NULL ||
+        strstr(log_text, "ztrace:entry: printf") == NULL ||
+        strstr(log_text, "printf(\"line len: %zu.\", 22)") == NULL ||
+        strstr(log_text, "printf(\"tag: %s.\", \"hello-vararg\")") == NULL) {
         fprintf(stderr, "libc trace log missed entry/return output\n");
         goto cleanup_trace;
     }
