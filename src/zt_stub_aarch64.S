@@ -2,6 +2,8 @@
 
 .global entry_stub
 .global exit_stub
+.protected entry_stub
+.protected exit_stub
 .type entry_stub, %function
 .type exit_stub, %function
 
