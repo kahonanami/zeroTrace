@@ -34,10 +34,12 @@ sudo apt install build-essential libcapstone-dev libreadline-dev
 make
 ```
 
-默认会根据当前机器选择 `ARCH=x86_64` 后端；也可以显式指定：
+默认会根据当前机器选择架构后端；也可以显式指定：
 
 ```bash
 make ARCH=x86_64
+make ARCH=aarch64
+make ARCH=aarch64 CC=aarch64-linux-gnu-gcc
 ```
 
 构建产物：
@@ -166,7 +168,7 @@ update add_loop clear
 
 当前条件表达式会把 `if` 后面的字符串作为完整布尔表达式解析。表达式支持：
 
-- `arg0` 到 `arg5`，对应 x86-64 SysV ABI 的 `rdi/rsi/rdx/rcx/r8/r9`
+- `arg0` 到 `arg5`，对应当前 ABI 的前 6 个整型 / 指针参数；`x86_64` 为 `rdi/rsi/rdx/rcx/r8/r9`，`aarch64` 为 `x0 ... x5`
 - 十进制和 `0x` 十六进制数字
 - 比较运算：`==`、`!=`、`>`、`>=`、`<`、`<=`
 - 布尔运算：`&&`、`||`、`!`
@@ -212,7 +214,7 @@ test_threaded_target-22520/22521 [010] 157114.775572037: ztrace:return: thread_a
 - 该文件是一个从 `ltrace.conf` 思路适配而来的配置文件
 - 命中已配置函数时，会优先按签名格式化参数和返回值
 - 字符串中非打印字符会转义成 `\xNN`
-- `float` / `double` 参数和返回值会按 x86-64 SysV ABI 从 `xmm` 寄存器快照中解码
+- `float` / `double` 参数和返回值会按当前 ABI 从浮点寄存器快照中解码；`x86_64` 为 `xmm0 ... xmm7`，`aarch64` 为 `d0 ... d7`
 - 对配置中存在名为 `fmt` 的参数的可变参数函数，会根据 format string 展开仍在寄存器快照内的整型、指针和浮点可变参数
 
 `zttrace.conf` 使用简化版的函数签名语法，基本形式如下：
@@ -319,21 +321,27 @@ uninstall latency avg : 22006 ns (0.022 ms) over 1000 rounds
   `ptrace`、远程内存读写、远程调用、probe 管理
 - [src/zt_arch_x86_64.c](./src/zt_arch_x86_64.c)
   x86_64 架构后端，负责远程 syscall/call、入口跳转 patch 和 patch span 计算
+- [src/zt_arch_aarch64.c](./src/zt_arch_aarch64.c)
+  aarch64 架构后端，负责 `PTRACE_GETREGSET` 远程 syscall/call 和 ARM64 入口跳转 patch
 - [src/zt_trace_runner.c](./src/zt_trace_runner.c)
   payload 初始化、trace 轮询、probe 安装/卸载
 - [src/zt_thunk_manager.c](./src/zt_thunk_manager.c)
-  thunk 构造与远程 thunk pool 管理
+  x86_64 thunk 构造与远程 thunk pool 管理
+- [src/zt_thunk_manager_aarch64.c](./src/zt_thunk_manager_aarch64.c)
+  aarch64 thunk 构造与远程 thunk pool 管理
 - [src/zt_payload.c](./src/zt_payload.c)
   注入到目标进程中的 payload
 - [src/zt_stub.S](./src/zt_stub.S)
-  入口 / 返回 stub
+  x86_64 入口 / 返回 stub
+- [src/zt_stub_aarch64.S](./src/zt_stub_aarch64.S)
+  aarch64 入口 / 返回 stub
 
 ## 说明
 
-- 当前项目主要面向 `x86_64 Linux`，核心注入流程已经通过 `zt_arch` 接口拆出架构边界，后续可按同一接口增加 `aarch64` 后端
+- 当前已拆出 `x86_64` / `aarch64` 架构后端；`x86_64` 已通过本项目自动化测试，`aarch64` 后端包含远程 syscall/call、入口 patch、thunk 和 stub，但需要在 ARM64 环境中做运行验证
 - 已支持通过 `conf/zttrace.conf` 对常见 libc/POSIX 函数做签名感知格式化；未配置到的函数会回退到寄存器风格显示
 - 已支持保存 / 恢复通用寄存器、标志寄存器和浮点上下文，并支持 `float` / `double` 参数与返回值显示
-- 对复杂函数前导指令的支持依赖 Capstone 解析；如果函数入口包含当前未处理的情况，probe 安装可能失败
+- 对复杂函数前导指令的支持依赖 Capstone 解析；如果函数入口包含当前未处理的情况，probe 安装可能失败。ARM64 后端当前对 PC-relative 前导指令采取保守拒绝策略
 
 更底层的设计说明可以参考：
 

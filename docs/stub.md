@@ -11,7 +11,7 @@
 1. 把原函数入口改写成一段固定长度的绝对跳转 patch
 2. 为这个 probe 准备一个专属 thunk
 
-原函数入口 patch 逻辑上等价于：
+`x86_64` 原函数入口 patch 逻辑上等价于：
 
 ```asm
 jmp qword ptr [rip + 0]
@@ -20,11 +20,21 @@ jmp qword ptr [rip + 0]
 
 也就是说，原函数一进入，就不再直接执行自身前导指令，而是先跳到 thunk。这个 14 字节模板不需要借用 `rax`，因此不会破坏可变参数函数依赖的 `al` 或其他寄存器状态。
 
+`aarch64` 入口 patch 逻辑上等价于：
+
+```asm
+ldr x16, #8
+br  x16
+.quad thunk_addr
+```
+
+这个模板使用 AAPCS64 中的 scratch register `x16/ip0`，跳转后原函数参数寄存器 `x0 ... x7` 和浮点参数寄存器 `d0 ... d7` 仍保持原值。
+
 ---
 
 ## 2. thunk 做了什么
 
-当前 thunk 的逻辑可以理解成：
+`x86_64` thunk 的逻辑可以理解成：
 
 ```asm
 push <probe_id>
@@ -61,9 +71,26 @@ jmp [continue_addr]
 2. 再补做原函数前导若干条被覆盖掉的指令
 3. 再跳回原函数剩余部分继续执行
 
+`aarch64` 没有像 x86 那样天然把返回地址放在栈上，函数返回地址通常在 `x30/lr` 中。因此 ARM64 thunk 会显式保存和改写 `x30`：
+
+```asm
+mov x15, x30          // 保存原始 LR
+mov x17, probe_id
+mov x16, entry_stub
+blr x16               // entry_stub 返回时，把 exit_stub 放到 x15
+mov x30, x15          // 让原函数最终 ret 到 exit_stub
+<relocated original instructions>
+mov x16, continue_addr
+br x16
+```
+
+也就是说，ARM64 的返回劫持不是改写调用者栈上的返回地址，而是把原函数继续执行前的 `x30` 改成 `exit_stub`。真实 LR 会被保存到 payload 的线程本地 shadow stack，`exit_stub` 记录返回值后再取出真实 LR 并 `ret` 回调用者。
+
 ---
 
 ## 3. 为什么返回地址可以被劫持
+
+这一节先以 `x86_64` 为例说明栈上返回地址的改写方式；`aarch64` 的 LR 链路见第 7 节。
 
 关键点在于：
 
@@ -94,9 +121,9 @@ jmp continue_addr
 
 ---
 
-## 4. `entry_stub` 的栈布局
+## 4. `x86_64 entry_stub` 的栈布局
 
-当前 `entry_stub` 的代码主干是：
+当前 `x86_64 entry_stub` 的代码主干是：
 
 ```asm
 entry_stub:
@@ -255,7 +282,7 @@ jmp continue_addr
 
 - 参数寄存器已经恢复
 - 通用寄存器和 flags 已恢复
-- x87 / MMX / XMM 浮点和 SIMD 上下文已恢复
+- 对应架构的浮点和 SIMD 上下文已恢复
 - thunk 又把原函数前导指令补执行了一遍
 - 最后跳回 `func_addr + orig_len`
 
@@ -263,9 +290,9 @@ jmp continue_addr
 
 ---
 
-## 6. `exit_stub` 是怎么把返回链接回去的
+## 6. `x86_64 exit_stub` 是怎么把返回链接回去的
 
-当前 `exit_stub` 的主干是：
+当前 `x86_64 exit_stub` 的主干是：
 
 ```asm
 exit_stub:
@@ -397,3 +424,30 @@ caller
 这样最后这个 `ret` 才会真正回到原始调用者，而不是停在 `exit_stub` 自己伪造的链条里。
 
 ---
+
+## 7. `aarch64 exit_stub` 的返回链
+
+ARM64 的 `exit_stub` 不需要伪造 x86_64 那样的栈返回槽，因为原函数最终是通过 `x30/lr` 跳进来的。
+
+ARM64 stub 会在自己的固定栈帧中保存 / 恢复 `q0 ... q31`、`fpcr`、`fpsr` 和 `nzcv`；trace 事件只解码 ABI 需要展示的 `d0 ... d7` 低 64 位，但上下文本身按完整 SIMD 快照恢复。
+
+它的核心流程是：
+
+1. 保存当前 `x0` 和 `d0`，分别作为整数 / 指针返回值和浮点返回值
+2. 通过 TLS shadow stack 找回当前 probe id 和真实 LR
+3. 调用 `zt_handle_return()` 写 return 事件
+4. 恢复参数 / 返回值相关寄存器
+5. 把真实 LR 写回 `x30`
+6. 执行 `ret` 回到原始调用者
+
+因此 ARM64 这条链路是：
+
+```text
+caller
+  -> patched function entry
+  -> aarch64 thunk
+  -> entry_stub
+  -> original function body, x30 = exit_stub
+  -> exit_stub
+  -> caller, x30 = original LR
+```

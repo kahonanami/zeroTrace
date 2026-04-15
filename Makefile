@@ -1,4 +1,4 @@
-CC := gcc
+CC ?= gcc
 CFLAGS := -Wall -Wextra -g -Iinclude
 ASMFLAGS := -g -Wa,--noexecstack
 PIC_CFLAGS := $(CFLAGS) -fPIC
@@ -14,14 +14,17 @@ TEST_BIN_DIR := $(BIN_DIR)/tests
 ARCH ?= $(shell uname -m)
 
 ifeq ($(ARCH),x86_64)
-ARCH_SRC_C := $(SRC_DIR)/zt_arch_x86_64.c
+ARCH_SRC_C := $(SRC_DIR)/zt_arch_x86_64.c $(SRC_DIR)/zt_thunk_manager.c
 ARCH_SRC_S := $(SRC_DIR)/zt_stub.S
+else ifeq ($(ARCH),aarch64)
+ARCH_SRC_C := $(SRC_DIR)/zt_arch_aarch64.c $(SRC_DIR)/zt_thunk_manager_aarch64.c
+ARCH_SRC_S := $(SRC_DIR)/zt_stub_aarch64.S
 else
-$(error Unsupported ARCH=$(ARCH). Supported: x86_64)
+$(error Unsupported ARCH=$(ARCH). Supported: x86_64 aarch64)
 endif
 
 SRC_C_ALL := $(wildcard $(SRC_DIR)/*.c)
-SRC_C := $(filter-out $(SRC_DIR)/zt_arch_%.c,$(SRC_C_ALL)) $(ARCH_SRC_C)
+SRC_C := $(filter-out $(SRC_DIR)/zt_arch_%.c $(SRC_DIR)/zt_thunk_manager%.c,$(SRC_C_ALL)) $(ARCH_SRC_C)
 SRC_C_CORE := $(filter-out $(SRC_DIR)/zt_main.c, $(SRC_C))
 SRC_S := $(ARCH_SRC_S)
 
@@ -30,12 +33,17 @@ OBJ_CORE := $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/%.o, $(SRC_C_CORE)) \
 
 OBJ_MAIN := $(BUILD_DIR)/zt_main.o
 
-TEST_C := $(wildcard $(TEST_DIR)/*.c)
+TEST_C_ALL := $(wildcard $(TEST_DIR)/*.c)
+ifeq ($(ARCH),aarch64)
+TEST_C := $(filter-out $(TEST_DIR)/test_thunk_builder.c,$(TEST_C_ALL))
+else
+TEST_C := $(TEST_C_ALL)
+endif
 TEST_S := $(wildcard $(TEST_DIR)/*.S)
 
 OBJ_TEST_HELPERS := $(patsubst $(TEST_DIR)/%.S, $(BUILD_DIR)/%.o, $(TEST_S))
 PAYLOAD_SO := $(BIN_DIR)/libzt_payload.so
-PAYLOAD_PIC_OBJ := $(BUILD_DIR)/zt_payload.pic.o $(BUILD_DIR)/zt_stub.pic.o
+PAYLOAD_PIC_OBJ := $(BUILD_DIR)/zt_payload.pic.o $(patsubst $(SRC_DIR)/%.S, $(BUILD_DIR)/%.pic.o, $(ARCH_SRC_S))
 .PRECIOUS: $(BUILD_DIR)/%.o
 
 TEST_BINS := $(patsubst $(TEST_DIR)/%.c, $(TEST_BIN_DIR)/%, $(TEST_C))

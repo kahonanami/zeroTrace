@@ -53,7 +53,7 @@
 - 安装和恢复函数入口 patch
 - 管理本地 probe 表
 
-当前 patch 方案固定为：
+当前 `x86_64` patch 方案为：
 
 ```asm
 jmp qword ptr [rip + 0]
@@ -61,6 +61,16 @@ jmp qword ptr [rip + 0]
 ```
 
 总长度是 14 字节，在安装 patch 前用 Capstone 解析函数开头指令，确保不会截断原始指令。
+
+`aarch64` patch 方案为固定 16 字节：
+
+```asm
+ldr x16, #8
+br  x16
+.quad thunk_addr
+```
+
+ARM64 指令固定 4 字节，因此 patch span 会按 4 字节对齐。
 
 ### 1.4 `zt_thunk_manager`
 
@@ -73,7 +83,7 @@ jmp qword ptr [rip + 0]
 
 `zt_thunk_manager` 同时负责根据 probe 信息构造 thunk 机器码。
 
-当前 thunk 模板如下：
+`x86_64` thunk 模板如下：
 
 ```asm
 push <probe_id>
@@ -93,6 +103,21 @@ jmp qword ptr [rip + disp32]
 - 由于相对寻址范围的问题，在 thunk 末尾存放两个符号的绝对地址，通过 `call/jmp` 间接跳转到目标地址
 
 thunk 对于不同的 `original bytes` 具有不同策略。
+
+`aarch64` thunk 模板逻辑上是：
+
+```asm
+mov x15, x30          // 保存原始 LR
+mov x17, probe_id
+mov x16, entry_stub
+blr x16
+mov x30, x15          // entry_stub 返回后，x15 中放 exit_stub
+<relocated original instructions>
+mov x16, continue_addr
+br x16
+```
+
+其中 `x17` 用来传递 probe id，`x15` 用来在 thunk 和 stub 之间传递原始 LR / `exit_stub`。这两个寄存器在 AAPCS64 中属于 caller-saved scratch 范围，不承载标准 C ABI 参数。
 
 ### 1. 普通指令
 
@@ -202,11 +227,13 @@ jmp r11
 - 将参数和返回值写入共享 trace buffer
 - 维护线程私有 shadow stack
 
-### 1.6 `zt_stub.S`
+### 1.6 `zt_stub.S` / `zt_stub_aarch64.S`
 
-`zt_stub.S` 是 `libzt_payload.so` 的一部分，是注入到目标进程里的汇编 stub，用于保存上下文信息并传入 `zt_payload` 中的 C 函数处理。当前 stub 会保存 / 恢复通用寄存器、`rflags`，并用 `fxsave64/fxrstor64` 保存 / 恢复 x87、MMX 和 XMM 浮点/SIMD 上下文。
+stub 是 `libzt_payload.so` 的一部分，是注入到目标进程里的汇编入口，用于保存上下文信息并传入 `zt_payload` 中的 C 函数处理。
 
-在调用 `zt_handle_entry()` / `zt_handle_return()` 时，stub 会把当前 `ctx_t *` 和临时 `fxsave64` 区域地址一起传给 payload。payload 从 `fxsave64` 区域的 XMM 保存区读取 `xmm0 ... xmm7` 的低 64 位，写入 trace event 的 `fp0 ... fp7` 字段。这样 tracer 侧可以在不进入目标进程再次取寄存器的情况下，根据函数签名显示 `float` / `double` 参数和 `double` 返回值。
+`x86_64` stub 会保存 / 恢复通用寄存器、`rflags`，并用 `fxsave64/fxrstor64` 保存 / 恢复 x87、MMX 和 XMM 浮点/SIMD 上下文。payload 从 `fxsave64` 区域的 XMM 保存区读取 `xmm0 ... xmm7` 的低 64 位，写入 trace event 的 `fp_args[0 ... 7]`。
+
+`aarch64` stub 会保存 / 恢复 `q0 ... q31`、`fpcr`、`fpsr` 和 `nzcv`，同时把 `x0 ... x5` 映射到通用参数槽，把 `x0` 映射到整数返回值槽，并把 `d0 ... d7` 映射到兼容 payload 读取逻辑的临时浮点快照区域。这样 tracer 侧统一读取 `args[]` 和 `fp_args[]`，不用让上层格式化逻辑关心底层寄存器名字。
 
 ### 1.7 `zt_trace_runner`
 
@@ -234,7 +261,7 @@ jmp r11
 
 这个配置文件由 `ltrace.conf` 适配而来，它的作用是帮助 trace 日志把原始寄存器值格式化成更接近函数签名的展示结果。
 
-整数 / 指针参数使用 x86-64 SysV ABI 的通用寄存器序列，浮点参数使用独立的 SSE 参数序列。也就是说，`int` / pointer 类参数从 `rdi/rsi/rdx/rcx/r8/r9` 对应的 `value0 ... value5` 读取，`float` / `double` 参数从 `xmm0 ... xmm7` 对应的 `fp0 ... fp7` 读取；浮点返回值从 return 事件中的 `fp0` 读取。
+整数 / 指针参数使用当前 ABI 的通用参数序列，浮点参数使用当前 ABI 的浮点参数序列。也就是说，`int` / pointer 类参数统一从 `args[0 ... 5]` 读取，`float` / `double` 参数统一从 `fp_args[0 ... 7]` 读取；浮点返回值从 return 事件中的 `fp_args[0]` 读取。`x86_64` 下它们分别对应 `rdi/rsi/rdx/rcx/r8/r9` 与 `xmm0 ... xmm7`；`aarch64` 下它们分别对应 `x0 ... x5` 与 `d0 ... d7`。
 
 具体配置语法请看 [README.md](../README.md)
 
@@ -275,7 +302,7 @@ trace probe_fn01 if arg0 >= 10
 
 当前会把 `if` 后面的字符串作为完整布尔表达式解析。表达式支持：
 
-- `arg0` 到 `arg5`，对应 x86-64 SysV ABI 的 `rdi/rsi/rdx/rcx/r8/r9`
+- `arg0` 到 `arg5`，对应当前 ABI 的前 6 个整型 / 指针参数；`x86_64` 为 `rdi/rsi/rdx/rcx/r8/r9`，`aarch64` 为 `x0 ... x5`
 - 十进制和 `0x` 十六进制数字
 - `==`、`!=`、`>`、`>=`、`<`、`<=`
 - `&&`、`||`、`!`
@@ -321,15 +348,27 @@ trace probe_fn01 if arg0 >= 10
 - `zt_arch_calc_patch_span()`
 - `zt_arch_install_jump()`
 
-`src/zt_injector.c` 只负责“什么时候需要远程 syscall/call、什么时候需要安装 patch”，不再直接编码 x86_64 的寄存器布局和跳转模板。当前实现的后端是 `src/zt_arch_x86_64.c`，后续增加 ARM64 时，应新增一个 `zt_arch_aarch64.c`，并在 Makefile 中通过 `ARCH=aarch64` 选择。
+`src/zt_injector.c` 只负责“什么时候需要远程 syscall/call、什么时候需要安装 patch”，不再直接编码具体架构的寄存器布局和跳转模板。当前 Makefile 会根据 `ARCH` 选择对应后端：
 
-仍然留在 x86_64 路径中的部分是：
+- `ARCH=x86_64`
+  - `src/zt_arch_x86_64.c`
+  - `src/zt_thunk_manager.c`
+  - `src/zt_stub.S`
+- `ARCH=aarch64`
+  - `src/zt_arch_aarch64.c`
+  - `src/zt_thunk_manager_aarch64.c`
+  - `src/zt_stub_aarch64.S`
 
-- `src/zt_stub.S`
-- `src/zt_thunk_manager.c`
-- `ctx_t` 的寄存器布局
+ARM64 后端当前支持：
 
-这三部分是下一步架构后端化的重点。ARM64 后端需要把 `x0 ... x7` 映射为通用参数，把 `x30/lr` 作为返回地址劫持点，并实现对 AArch64 PC-relative 指令的 thunk 重定位。
+- 通过 `PTRACE_GETREGSET` / `PTRACE_SETREGSET` 读写 `struct user_pt_regs`
+- 用 `x0 ... x5` / `x8` 执行远程 syscall
+- 用 `x0/x1` 调用远程函数，并从 `x0` 读取返回值
+- 用 `ldr x16, #8; br x16; .quad target` 安装函数入口跳转
+- 用 `x30/lr` 做返回地址劫持，返回时进入 `exit_stub`
+- 把 `x0 ... x5` 和 `d0 ... d7` 映射到统一的 `args[]` / `fp_args[]` 事件字段
+
+ARM64 thunk builder 目前采取安全优先策略：普通非 PC-relative 指令会原样复制；`adr/adrp`、直接分支、条件分支、test-and-branch、compare-and-branch、literal load 等依赖当前位置的前导指令会直接拒绝安装，避免错误重定位导致目标进程崩溃。后续如果要增强 ARM64 覆盖面，可以像 x86_64 后端一样逐类改写这些指令。
 
 ### 2.4 capture
 
@@ -473,7 +512,7 @@ payload 和 tracer 之间通过共享内存中的 ring buffer 传递事件。
 
 - `entry` 事件保存参数寄存器
 - `entry` 事件额外保存浮点参数寄存器快照，用于显示 `float` / `double` 参数
-- `return` 事件保存 `rax` 和 `xmm0`，分别用于整数 / 指针返回值和浮点返回值
+- `return` 事件保存当前 ABI 的整数 / 指针返回值和浮点返回值；`x86_64` 为 `rax` / `xmm0`，`aarch64` 为 `x0` / `d0`
 - `call_id` 用于把 entry / return 在 tracer 侧稳定关联起来
 - `timestamp_ns` 在目标进程命中 probe 时通过 `CLOCK_MONOTONIC` 记录
 - `tid` / `cpu_id` 用于多线程与 perf-style 事件流展示
@@ -501,7 +540,7 @@ payload 和 tracer 之间通过共享内存中的 ring buffer 传递事件。
 
 当前实现已经能稳定支持基本功能，但还有一些限制：
 
-- 主要面向 `x86_64 Linux`；`zt_arch` 已经抽出远程 syscall/call、入口 patch 和 patch span 计算，完整 ARM64 支持还需要继续后端化 stub、ctx 和 thunk builder
+- 当前包含 `x86_64` 与 `aarch64` 两套后端；`x86_64` 已通过自动化测试，`aarch64` 代码路径已补齐但仍需要在真实 ARM64 环境中做运行验证
 - 条件探针当前在 ztrace 事件消费侧过滤日志，不在目标进程 payload hot path 中执行过滤表达式
 - 已保存 / 恢复浮点上下文，并通过 `test_context_integrity` 覆盖浮点/SIMD 上下文不被 probe handler 破坏；当前支持 `float` / `double` 参数和返回值显示，但不覆盖 AVX YMM 高 128 位
 - `zt_trace_poll()` 的普通日志轮询已经改为 `process_vm_readv` 非暂停读取；代码 patch 类操作仍需要短暂停止目标进程
