@@ -119,41 +119,213 @@ static void zt_fill_nops(uint8_t *buf, size_t buf_size) {
     }
 }
 
-static int zt_aarch64_is_pc_relative(const cs_insn *insn) {
+static uint32_t zt_read_u32(const uint8_t *buf) {
+    uint32_t value;
+
+    memcpy(&value, buf, sizeof(value));
+    return value;
+}
+
+static int zt_aarch64_branch_target(const cs_insn *insn,
+                                    unsigned int operand_index,
+                                    uint64_t *target_out) {
     const cs_arm64 *arm64;
 
+    if (insn == NULL || insn->detail == NULL || target_out == NULL) {
+        return -1;
+    }
+
+    arm64 = &insn->detail->arm64;
+    if (operand_index >= arm64->op_count ||
+        arm64->operands[operand_index].type != ARM64_OP_IMM) {
+        return -1;
+    }
+
+    *target_out = (uint64_t)arm64->operands[operand_index].imm;
+    return 0;
+}
+
+static int zt_emit_abs_branch(uint8_t *buf,
+                              size_t buf_size,
+                              size_t *offset,
+                              uint64_t target_addr) {
+    if (zt_emit_mov_abs(buf, buf_size, offset, 16, target_addr) != 0 ||
+        zt_emit_u32(buf, buf_size, offset, 0xD61F0200u) != 0) { /* br x16 */
+        return -1;
+    }
+
+    return 0;
+}
+
+static int zt_emit_abs_call(uint8_t *buf,
+                            size_t buf_size,
+                            size_t *offset,
+                            uint64_t target_addr) {
+    if (zt_emit_mov_abs(buf, buf_size, offset, 16, target_addr) != 0 ||
+        zt_emit_u32(buf, buf_size, offset, 0xD63F0200u) != 0) { /* blr x16 */
+        return -1;
+    }
+
+    return 0;
+}
+
+static int zt_aarch64_inverse_cond(unsigned int cond, unsigned int *inverse_out) {
+    if (inverse_out == NULL || cond < ARM64_CC_EQ || cond > ARM64_CC_LE) {
+        return -1;
+    }
+
+    *inverse_out = cond ^ 1u;
+    return 0;
+}
+
+static uint32_t zt_aarch64_encode_b_cond(unsigned int cond, int32_t byte_offset) {
+    uint32_t imm19 = ((uint32_t)(byte_offset / ZT_AARCH64_INSN_SIZE)) & 0x7ffffu;
+
+    return 0x54000000u | (imm19 << 5) | (cond & 0xfu);
+}
+
+static int zt_emit_cond_abs_branch(uint8_t *buf,
+                                   size_t buf_size,
+                                   size_t *offset,
+                                   unsigned int cond,
+                                   uint64_t target_addr) {
+    unsigned int inverse;
+
+    if (zt_aarch64_inverse_cond(cond, &inverse) != 0) {
+        return -1;
+    }
+
+    if (zt_emit_u32(buf,
+                    buf_size,
+                    offset,
+                    zt_aarch64_encode_b_cond(inverse, 24)) != 0) {
+        return -1;
+    }
+
+    return zt_emit_abs_branch(buf, buf_size, offset, target_addr);
+}
+
+static int zt_emit_cb_abs_branch(uint8_t *buf,
+                                 size_t buf_size,
+                                 size_t *offset,
+                                 const cs_insn *insn,
+                                 uint64_t target_addr) {
+    uint32_t rewritten;
+
     if (insn == NULL) {
-        return 1;
+        return -1;
+    }
+
+    rewritten = zt_read_u32(insn->bytes);
+    rewritten ^= (1u << 24);       /* cbz <-> cbnz */
+    rewritten &= ~(0x7ffffu << 5); /* imm19 */
+    rewritten |= (6u << 5);        /* skip over mov_abs + br */
+
+    if (zt_emit_u32(buf, buf_size, offset, rewritten) != 0) {
+        return -1;
+    }
+
+    return zt_emit_abs_branch(buf, buf_size, offset, target_addr);
+}
+
+static int zt_emit_tb_abs_branch(uint8_t *buf,
+                                 size_t buf_size,
+                                 size_t *offset,
+                                 const cs_insn *insn,
+                                 uint64_t target_addr) {
+    uint32_t rewritten;
+
+    if (insn == NULL) {
+        return -1;
+    }
+
+    rewritten = zt_read_u32(insn->bytes);
+    rewritten ^= (1u << 24);       /* tbz <-> tbnz */
+    rewritten &= ~(0x3fffu << 5);  /* imm14 */
+    rewritten |= (6u << 5);        /* skip over mov_abs + br */
+
+    if (zt_emit_u32(buf, buf_size, offset, rewritten) != 0) {
+        return -1;
+    }
+
+    return zt_emit_abs_branch(buf, buf_size, offset, target_addr);
+}
+
+static int zt_emit_adr_like(uint8_t *buf,
+                            size_t buf_size,
+                            size_t *offset,
+                            const cs_insn *insn) {
+    uint64_t target_addr;
+    unsigned int rd;
+
+    if (insn == NULL || zt_aarch64_branch_target(insn, 1, &target_addr) != 0) {
+        return -1;
+    }
+
+    rd = zt_read_u32(insn->bytes) & 0x1fu;
+    return zt_emit_mov_abs(buf, buf_size, offset, rd, target_addr);
+}
+
+static int zt_emit_relocated_insn(uint8_t *buf,
+                                  size_t buf_size,
+                                  size_t *offset,
+                                  const cs_insn *insn) {
+    uint64_t target_addr;
+    unsigned int cc;
+
+    if (insn == NULL || insn->size != ZT_AARCH64_INSN_SIZE) {
+        return -1;
     }
 
     switch (insn->id) {
     case ARM64_INS_ADR:
     case ARM64_INS_ADRP:
-    case ARM64_INS_B:
+        return zt_emit_adr_like(buf, buf_size, offset, insn);
     case ARM64_INS_BL:
+        if (zt_aarch64_branch_target(insn, 0, &target_addr) != 0) {
+            return -1;
+        }
+        return zt_emit_abs_call(buf, buf_size, offset, target_addr);
+    case ARM64_INS_B:
+        if (zt_aarch64_branch_target(insn, 0, &target_addr) != 0 ||
+            insn->detail == NULL) {
+            return -1;
+        }
+
+        cc = (unsigned int)insn->detail->arm64.cc;
+        if (cc >= ARM64_CC_EQ && cc <= ARM64_CC_LE) {
+            return zt_emit_cond_abs_branch(buf, buf_size, offset, cc, target_addr);
+        }
+        return zt_emit_abs_branch(buf, buf_size, offset, target_addr);
     case ARM64_INS_CBNZ:
     case ARM64_INS_CBZ:
+        if (zt_aarch64_branch_target(insn, 1, &target_addr) != 0) {
+            return -1;
+        }
+        return zt_emit_cb_abs_branch(buf, buf_size, offset, insn, target_addr);
     case ARM64_INS_TBNZ:
     case ARM64_INS_TBZ:
-        return 1;
+        if (zt_aarch64_branch_target(insn, 2, &target_addr) != 0) {
+            return -1;
+        }
+        return zt_emit_tb_abs_branch(buf, buf_size, offset, insn, target_addr);
     case ARM64_INS_LDR:
     case ARM64_INS_LDRB:
     case ARM64_INS_LDRH:
     case ARM64_INS_LDRSB:
     case ARM64_INS_LDRSH:
     case ARM64_INS_LDRSW:
+        if (insn->detail != NULL &&
+            insn->detail->arm64.op_count >= 2 &&
+            insn->detail->arm64.operands[1].type == ARM64_OP_IMM) {
+            return -1;
+        }
         break;
     default:
-        return 0;
+        break;
     }
 
-    if (insn->detail == NULL) {
-        return 1;
-    }
-
-    arm64 = &insn->detail->arm64;
-    return arm64->op_count >= 2 &&
-           arm64->operands[1].type == ARM64_OP_IMM;
+    return zt_emit_bytes(buf, buf_size, offset, insn->bytes, insn->size);
 }
 
 static int zt_emit_relocated_orig_code(const zt_probe_info_t *probe,
@@ -190,12 +362,12 @@ static int zt_emit_relocated_orig_code(const zt_probe_info_t *probe,
     for (i = 0; i < count; ++i) {
         const cs_insn *cur = &insn[i];
 
-        if (cur->size != ZT_AARCH64_INSN_SIZE ||
-            zt_aarch64_is_pc_relative(cur)) {
-            goto fail;
-        }
-
-        if (zt_emit_bytes(buf, buf_size, &emitted, cur->bytes, cur->size) != 0) {
+        if (zt_emit_relocated_insn(buf, buf_size, &emitted, cur) != 0) {
+            fprintf(stderr,
+                    "unsupported aarch64 prologue insn at 0x%llx: %s %s\n",
+                    (unsigned long long)cur->address,
+                    cur->mnemonic,
+                    cur->op_str);
             goto fail;
         }
     }
