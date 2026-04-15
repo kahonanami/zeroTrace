@@ -85,6 +85,7 @@ static void zt_publish_event(const zt_trace_event_t *event) {
     zt_trace_buffer_t *buffer;
     uint64_t seq;
     zt_trace_event_t *slot;
+    size_t i;
 
     if (event == NULL) {
         return;
@@ -109,20 +110,12 @@ static void zt_publish_event(const zt_trace_event_t *event) {
     slot->timestamp_ns = event->timestamp_ns;
     slot->tid = event->tid;
     slot->cpu_id = event->cpu_id;
-    slot->value0 = event->value0;
-    slot->value1 = event->value1;
-    slot->value2 = event->value2;
-    slot->value3 = event->value3;
-    slot->value4 = event->value4;
-    slot->value5 = event->value5;
-    slot->fp0 = event->fp0;
-    slot->fp1 = event->fp1;
-    slot->fp2 = event->fp2;
-    slot->fp3 = event->fp3;
-    slot->fp4 = event->fp4;
-    slot->fp5 = event->fp5;
-    slot->fp6 = event->fp6;
-    slot->fp7 = event->fp7;
+    for (i = 0; i < ZT_TRACE_GP_ARG_COUNT; ++i) {
+        slot->args[i] = event->args[i];
+    }
+    for (i = 0; i < ZT_TRACE_FP_ARG_COUNT; ++i) {
+        slot->fp_args[i] = event->fp_args[i];
+    }
 
     __atomic_store_n(&slot->committed_seq, seq + 1, __ATOMIC_RELEASE);
 }
@@ -162,29 +155,27 @@ void zt_handle_entry(ctx_t *context, const void *fxsave_area) {
     call_id = __atomic_fetch_add(&g_call_id_seq, 1, __ATOMIC_RELAXED) + 1;
     last_call_id = call_id;
 
-    event = (zt_trace_event_t){
-        .committed_seq = 0,
-        .probe_id = context->func_id,
-        .event_type = ZT_TRACE_EVENT_ENTRY,
-        .call_id = call_id,
-        .timestamp_ns = zt_clock_monotonic_ns(),
-        .tid = zt_gettid_u64(),
-        .cpu_id = zt_getcpu_u64(),
-        .value0 = context->rdi,
-        .value1 = context->rsi,
-        .value2 = context->rdx,
-        .value3 = context->rcx,
-        .value4 = context->r8,
-        .value5 = context->r9,
-        .fp0 = zt_fxsave_xmm_low64(fxsave_area, 0),
-        .fp1 = zt_fxsave_xmm_low64(fxsave_area, 1),
-        .fp2 = zt_fxsave_xmm_low64(fxsave_area, 2),
-        .fp3 = zt_fxsave_xmm_low64(fxsave_area, 3),
-        .fp4 = zt_fxsave_xmm_low64(fxsave_area, 4),
-        .fp5 = zt_fxsave_xmm_low64(fxsave_area, 5),
-        .fp6 = zt_fxsave_xmm_low64(fxsave_area, 6),
-        .fp7 = zt_fxsave_xmm_low64(fxsave_area, 7),
-    };
+    memset(&event, 0, sizeof(event));
+    event.probe_id = context->func_id;
+    event.event_type = ZT_TRACE_EVENT_ENTRY;
+    event.call_id = call_id;
+    event.timestamp_ns = zt_clock_monotonic_ns();
+    event.tid = zt_gettid_u64();
+    event.cpu_id = zt_getcpu_u64();
+    event.args[0] = context->rdi;
+    event.args[1] = context->rsi;
+    event.args[2] = context->rdx;
+    event.args[3] = context->rcx;
+    event.args[4] = context->r8;
+    event.args[5] = context->r9;
+    event.fp_args[0] = zt_fxsave_xmm_low64(fxsave_area, 0);
+    event.fp_args[1] = zt_fxsave_xmm_low64(fxsave_area, 1);
+    event.fp_args[2] = zt_fxsave_xmm_low64(fxsave_area, 2);
+    event.fp_args[3] = zt_fxsave_xmm_low64(fxsave_area, 3);
+    event.fp_args[4] = zt_fxsave_xmm_low64(fxsave_area, 4);
+    event.fp_args[5] = zt_fxsave_xmm_low64(fxsave_area, 5);
+    event.fp_args[6] = zt_fxsave_xmm_low64(fxsave_area, 6);
+    event.fp_args[7] = zt_fxsave_xmm_low64(fxsave_area, 7);
 
     zt_publish_event(&event);
 }
@@ -202,17 +193,15 @@ void zt_handle_return(ctx_t *context, const void *fxsave_area) {
         return;
     }
 
-    event = (zt_trace_event_t){
-        .committed_seq = 0,
-        .probe_id = context->func_id,
-        .event_type = ZT_TRACE_EVENT_RETURN,
-        .call_id = call_id,
-        .timestamp_ns = zt_clock_monotonic_ns(),
-        .tid = zt_gettid_u64(),
-        .cpu_id = zt_getcpu_u64(),
-        .value0 = context->rax,
-        .fp0 = zt_fxsave_xmm_low64(fxsave_area, 0),
-    };
+    memset(&event, 0, sizeof(event));
+    event.probe_id = context->func_id;
+    event.event_type = ZT_TRACE_EVENT_RETURN;
+    event.call_id = call_id;
+    event.timestamp_ns = zt_clock_monotonic_ns();
+    event.tid = zt_gettid_u64();
+    event.cpu_id = zt_getcpu_u64();
+    event.args[0] = context->rax;
+    event.fp_args[0] = zt_fxsave_xmm_low64(fxsave_area, 0);
 
     zt_publish_event(&event);
 }

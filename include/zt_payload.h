@@ -7,6 +7,8 @@
 #define ZT_TRACE_BUFFER_MAGIC 0x5a54425546464552ULL
 #define ZT_PROBE_FILTER_EXPR_MAX 128
 #define ZT_PROBE_FILTER_TOKEN_CAP 64
+#define ZT_TRACE_GP_ARG_COUNT 6
+#define ZT_TRACE_FP_ARG_COUNT 8
 
 typedef enum {
     ZT_PROBE_FILTER_TOK_END = 0,
@@ -78,20 +80,30 @@ typedef struct {
     uint64_t timestamp_ns;
     uint64_t tid;
     uint64_t cpu_id;
-    uint64_t value0;
-    uint64_t value1;
-    uint64_t value2;
-    uint64_t value3;
-    uint64_t value4;
-    uint64_t value5;
-    uint64_t fp0;
-    uint64_t fp1;
-    uint64_t fp2;
-    uint64_t fp3;
-    uint64_t fp4;
-    uint64_t fp5;
-    uint64_t fp6;
-    uint64_t fp7;
+    union {
+        struct {
+            uint64_t value0;
+            uint64_t value1;
+            uint64_t value2;
+            uint64_t value3;
+            uint64_t value4;
+            uint64_t value5;
+        };
+        uint64_t args[ZT_TRACE_GP_ARG_COUNT];
+    };
+    union {
+        struct {
+            uint64_t fp0;
+            uint64_t fp1;
+            uint64_t fp2;
+            uint64_t fp3;
+            uint64_t fp4;
+            uint64_t fp5;
+            uint64_t fp6;
+            uint64_t fp7;
+        };
+        uint64_t fp_args[ZT_TRACE_FP_ARG_COUNT];
+    };
 } zt_trace_event_t;
 
 typedef struct {

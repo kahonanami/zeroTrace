@@ -34,6 +34,12 @@ sudo apt install build-essential libcapstone-dev libreadline-dev
 make
 ```
 
+默认会根据当前机器选择 `ARCH=x86_64` 后端；也可以显式指定：
+
+```bash
+make ARCH=x86_64
+```
+
 构建产物：
 
 - `bin/ztrace`
@@ -311,6 +317,8 @@ uninstall latency avg : 22006 ns (0.022 ms) over 1000 rounds
   CLI 命令入口
 - [src/zt_injector.c](./src/zt_injector.c)
   `ptrace`、远程内存读写、远程调用、probe 管理
+- [src/zt_arch_x86_64.c](./src/zt_arch_x86_64.c)
+  x86_64 架构后端，负责远程 syscall/call、入口跳转 patch 和 patch span 计算
 - [src/zt_trace_runner.c](./src/zt_trace_runner.c)
   payload 初始化、trace 轮询、probe 安装/卸载
 - [src/zt_thunk_manager.c](./src/zt_thunk_manager.c)
@@ -322,7 +330,7 @@ uninstall latency avg : 22006 ns (0.022 ms) over 1000 rounds
 
 ## 说明
 
-- 当前项目主要面向 `x86_64 Linux`
+- 当前项目主要面向 `x86_64 Linux`，核心注入流程已经通过 `zt_arch` 接口拆出架构边界，后续可按同一接口增加 `aarch64` 后端
 - 已支持通过 `conf/zttrace.conf` 对常见 libc/POSIX 函数做签名感知格式化；未配置到的函数会回退到寄存器风格显示
 - 已支持保存 / 恢复通用寄存器、标志寄存器和浮点上下文，并支持 `float` / `double` 参数与返回值显示
 - 对复杂函数前导指令的支持依赖 Capstone 解析；如果函数入口包含当前未处理的情况，probe 安装可能失败

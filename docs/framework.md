@@ -302,7 +302,36 @@ trace probe_fn01 if arg0 >= 10
 14. 把目标函数入口 patch 到 thunk
 15. `PTRACE_CONT` 恢复目标进程运行
 
-### 2.3 capture
+### 2.3 架构后端边界
+
+`ptrace` 注入主流程本身和具体 CPU 架构关系不大，但下面这些步骤强依赖目标架构：
+
+- 远程 syscall 的参数寄存器和 syscall 编号寄存器
+- 远程函数调用的参数寄存器、返回值寄存器和临时调用代码
+- 目标函数入口 patch 的机器码模板
+- 需要覆盖多少字节才能完整替换函数前导指令
+- thunk builder 对原始前导指令的重定位规则
+- payload stub 保存 / 恢复寄存器时的 ABI 约定
+
+当前代码把其中一部分已经收敛到 `zt_arch` 接口：
+
+- `zt_arch_remote_syscall6()`
+- `zt_arch_remote_call2()`
+- `zt_arch_probe_patch_len()`
+- `zt_arch_calc_patch_span()`
+- `zt_arch_install_jump()`
+
+`src/zt_injector.c` 只负责“什么时候需要远程 syscall/call、什么时候需要安装 patch”，不再直接编码 x86_64 的寄存器布局和跳转模板。当前实现的后端是 `src/zt_arch_x86_64.c`，后续增加 ARM64 时，应新增一个 `zt_arch_aarch64.c`，并在 Makefile 中通过 `ARCH=aarch64` 选择。
+
+仍然留在 x86_64 路径中的部分是：
+
+- `src/zt_stub.S`
+- `src/zt_thunk_manager.c`
+- `ctx_t` 的寄存器布局
+
+这三部分是下一步架构后端化的重点。ARM64 后端需要把 `x0 ... x7` 映射为通用参数，把 `x30/lr` 作为返回地址劫持点，并实现对 AArch64 PC-relative 指令的 thunk 重定位。
+
+### 2.4 capture
 
 目标进程继续运行后，CLI 空闲时会定期调用：
 
@@ -342,7 +371,7 @@ test_libc_io_loop-1705732/1705732 [001] 157114.775572037: ztrace:return: read ->
 
 对于配置中存在名为 `fmt` 的参数的可变参数函数，`zt_sigconf` 会读取 format string，并在 tracer 侧展开仍处于寄存器快照内的可变参数。例如 `%zu`、`%d`、`%p`、`%s` 会被解析成对应的整数、指针或远程字符串，`%f` / `%g` 这类浮点格式会从 `fp0 ... fp7` 读取。超出寄存器、已经落到栈上的可变参数当前不会异步读取，避免在函数返回后读取到已经失效或被复用的调用栈内容。
 
-### 2.4 条件探针过滤
+### 2.5 条件探针过滤
 
 条件探针没有把过滤表达式放进目标进程 payload 的热路径里执行，而是在 tracer 消费共享 trace buffer 时完成过滤。这样 payload 侧仍然只负责记录寄存器快照，避免在被 trace 的进程里增加复杂判断逻辑。
 
@@ -357,7 +386,7 @@ test_libc_io_loop-1705732/1705732 [001] 157114.775572037: ztrace:return: read ->
 
 因此条件 probe 只影响 ztrace 输出，不改变目标函数执行路径，也不会改变 thunk / stub 的运行方式。
 
-### 2.5 probe filter 热更新
+### 2.6 probe filter 热更新
 
 `update <symbol|id> if <expr>` 会在 probe 已安装的情况下直接替换 `zt_probe_info_t.filter`，包括原始表达式字符串和已经编译好的 token 序列。
 `update <symbol|id> clear` 会清空 filter，让该 probe 重新输出所有命中事件。
@@ -374,7 +403,7 @@ test_libc_io_loop-1705732/1705732 [001] 157114.775572037: ztrace:return: read ->
 当前 `update` 是替换语义，不会和旧 filter 做 `&&` / `||` 组合。
 由于 filter 只影响 tracer 侧日志消费，`update` 不需要调用 `zt_trace_ensure_stopped()`，也不会触发任何远程内存 patch。
 
-### 2.6 disable / enable
+### 2.7 disable / enable
 
 `disable <symbol|id>`：
 
@@ -389,7 +418,7 @@ test_libc_io_loop-1705732/1705732 [001] 157114.775572037: ztrace:return: read ->
 2. 重新为 probe 安装 thunk 和入口 patch
 3. 继续目标进程
 
-### 2.7 untrace
+### 2.8 untrace
 
 `untrace <symbol|id>`：
 
@@ -436,14 +465,14 @@ payload 和 tracer 之间通过共享内存中的 ring buffer 传递事件。
 - `timestamp_ns`
 - `tid`
 - `cpu_id`
-- `value0 ... value5`
-- `fp0 ... fp7`
+- `args[0 ... 5]`，兼容字段名 `value0 ... value5`
+- `fp_args[0 ... 7]`，兼容字段名 `fp0 ... fp7`
 - `committed_seq`
 
 其中：
 
 - `entry` 事件保存参数寄存器
-- `entry` 事件额外保存 `xmm0 ... xmm7` 的低 64 位，用于显示 `float` / `double` 参数
+- `entry` 事件额外保存浮点参数寄存器快照，用于显示 `float` / `double` 参数
 - `return` 事件保存 `rax` 和 `xmm0`，分别用于整数 / 指针返回值和浮点返回值
 - `call_id` 用于把 entry / return 在 tracer 侧稳定关联起来
 - `timestamp_ns` 在目标进程命中 probe 时通过 `CLOCK_MONOTONIC` 记录
@@ -472,7 +501,7 @@ payload 和 tracer 之间通过共享内存中的 ring buffer 传递事件。
 
 当前实现已经能稳定支持基本功能，但还有一些限制：
 
-- 主要面向 `x86_64 Linux`，后续可支持 `ARM64` 架构（题目 A1）
+- 主要面向 `x86_64 Linux`；`zt_arch` 已经抽出远程 syscall/call、入口 patch 和 patch span 计算，完整 ARM64 支持还需要继续后端化 stub、ctx 和 thunk builder
 - 条件探针当前在 ztrace 事件消费侧过滤日志，不在目标进程 payload hot path 中执行过滤表达式
 - 已保存 / 恢复浮点上下文，并通过 `test_context_integrity` 覆盖浮点/SIMD 上下文不被 probe handler 破坏；当前支持 `float` / `double` 参数和返回值显示，但不覆盖 AVX YMM 高 128 位
 - `zt_trace_poll()` 的普通日志轮询已经改为 `process_vm_readv` 非暂停读取；代码 patch 类操作仍需要短暂停止目标进程

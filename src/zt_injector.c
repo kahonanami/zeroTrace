@@ -12,14 +12,11 @@
 #include <sys/types.h>
 #include <stdlib.h>
 #include <sys/ptrace.h>
-#include <sys/user.h>
-#include <sys/wait.h>
-#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
-#include <signal.h>
-#include <capstone/capstone.h>
+#include <sys/wait.h>
 
+#include "../include/zt_arch.h"
 #include "../include/zt_injector.h"
 
 static int zt_read_elf_header(const char *exe_path, Elf64_Ehdr *header) {
@@ -207,100 +204,6 @@ int zt_write_remote_memory(pid_t pid, uint64_t remote_addr, const void *buffer, 
     return 0;
 }
 
-static int zt_remote_syscall6(pid_t pid,
-                              long syscall_no,
-                              uint64_t arg1,
-                              uint64_t arg2,
-                              uint64_t arg3,
-                              uint64_t arg4,
-                              uint64_t arg5,
-                              uint64_t arg6,
-                              uint64_t *ret_out) {
-    struct user_regs_struct saved_regs;
-    struct user_regs_struct regs;
-    uint64_t saved_word;
-    uint64_t patched_word;
-    int status;
-
-    if (ret_out == NULL) {
-        return -1;
-    }
-
-    if (ptrace(PTRACE_GETREGS, pid, NULL, &saved_regs) != 0) {
-        return -1;
-    }
-
-    if (zt_read_remote_memory(pid, saved_regs.rip, &saved_word, sizeof(saved_word)) != 0) {
-        return -1;
-    }
-
-    patched_word = saved_word;
-    ((uint8_t *)&patched_word)[0] = 0x0f; /* syscall */
-    ((uint8_t *)&patched_word)[1] = 0x05;
-    ((uint8_t *)&patched_word)[2] = 0xcc; /* int3 */
-
-    if (ptrace(PTRACE_POKEDATA,
-               pid,
-               (void *)(uintptr_t)saved_regs.rip,
-               (void *)(uintptr_t)patched_word) != 0) {
-        return -1;
-    }
-
-    regs = saved_regs;
-    regs.rax = (uint64_t)syscall_no;
-    regs.rdi = arg1;
-    regs.rsi = arg2;
-    regs.rdx = arg3;
-    regs.r10 = arg4;
-    regs.r8 = arg5;
-    regs.r9 = arg6;
-
-    if (ptrace(PTRACE_SETREGS, pid, NULL, &regs) != 0) {
-        ptrace(PTRACE_POKEDATA, pid, (void *)(uintptr_t)saved_regs.rip, (void *)(uintptr_t)saved_word);
-        return -1;
-    }
-
-    if (ptrace(PTRACE_CONT, pid, NULL, NULL) != 0) {
-        ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs);
-        ptrace(PTRACE_POKEDATA, pid, (void *)(uintptr_t)saved_regs.rip, (void *)(uintptr_t)saved_word);
-        return -1;
-    }
-
-    if (waitpid(pid, &status, 0) < 0) {
-        ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs);
-        ptrace(PTRACE_POKEDATA, pid, (void *)(uintptr_t)saved_regs.rip, (void *)(uintptr_t)saved_word);
-        return -1;
-    }
-
-    if (!WIFSTOPPED(status) || WSTOPSIG(status) != SIGTRAP) {
-        ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs);
-        ptrace(PTRACE_POKEDATA, pid, (void *)(uintptr_t)saved_regs.rip, (void *)(uintptr_t)saved_word);
-        return -1;
-    }
-
-    if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) != 0) {
-        ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs);
-        ptrace(PTRACE_POKEDATA, pid, (void *)(uintptr_t)saved_regs.rip, (void *)(uintptr_t)saved_word);
-        return -1;
-    }
-
-    *ret_out = regs.rax;
-
-    if (ptrace(PTRACE_POKEDATA,
-               pid,
-               (void *)(uintptr_t)saved_regs.rip,
-               (void *)(uintptr_t)saved_word) != 0) {
-        ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs);
-        return -1;
-    }
-
-    if (ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs) != 0) {
-        return -1;
-    }
-
-    return 0;
-}
-
 int zt_remote_mmap(pid_t pid,
                    size_t size,
                    int prot,
@@ -312,15 +215,15 @@ int zt_remote_mmap(pid_t pid,
         return -1;
     }
 
-    if (zt_remote_syscall6(pid,
-                           SYS_mmap,
-                           0,
-                           size,
-                           (uint64_t)prot,
-                           (uint64_t)flags,
-                           (uint64_t)-1,
-                           0,
-                           &ret) != 0) {
+    if (zt_arch_remote_syscall6(pid,
+                                SYS_mmap,
+                                0,
+                                size,
+                                (uint64_t)prot,
+                                (uint64_t)flags,
+                                (uint64_t)-1,
+                                0,
+                                &ret) != 0) {
         return -1;
     }
 
@@ -341,15 +244,15 @@ int zt_remote_munmap(pid_t pid,
         return -1;
     }
 
-    if (zt_remote_syscall6(pid,
-                           SYS_munmap,
-                           remote_addr,
-                           size,
-                           0,
-                           0,
-                           0,
-                           0,
-                           &ret) != 0) {
+    if (zt_arch_remote_syscall6(pid,
+                                SYS_munmap,
+                                remote_addr,
+                                size,
+                                0,
+                                0,
+                                0,
+                                0,
+                                &ret) != 0) {
         return -1;
     }
 
@@ -365,80 +268,7 @@ int zt_remote_call2(pid_t pid,
                     uint64_t arg1,
                     uint64_t arg2,
                     uint64_t *ret_out) {
-    struct user_regs_struct saved_regs;
-    struct user_regs_struct regs;
-    uint8_t saved_code[16];
-    uint8_t call_code[16];
-    int status;
-
-    if (func_addr == 0 || ret_out == NULL) {
-        return -1;
-    }
-
-    if (ptrace(PTRACE_GETREGS, pid, NULL, &saved_regs) != 0) {
-        return -1;
-    }
-
-    if (zt_read_remote_memory(pid, saved_regs.rip, saved_code, sizeof(saved_code)) != 0) {
-        return -1;
-    }
-
-    memcpy(call_code, saved_code, sizeof(call_code));
-    call_code[0] = 0x48; /* movabs rax, imm64 */
-    call_code[1] = 0xB8;
-    memcpy(call_code + 2, &func_addr, sizeof(func_addr));
-    call_code[10] = 0xFF; /* call rax */
-    call_code[11] = 0xD0;
-    call_code[12] = 0xCC; /* int3 */
-
-    if (zt_write_remote_memory(pid, saved_regs.rip, call_code, sizeof(call_code)) != 0) {
-        return -1;
-    }
-
-    regs = saved_regs;
-    regs.rdi = arg1;
-    regs.rsi = arg2;
-    if (ptrace(PTRACE_SETREGS, pid, NULL, &regs) != 0) {
-        zt_write_remote_memory(pid, saved_regs.rip, saved_code, sizeof(saved_code));
-        return -1;
-    }
-
-    if (ptrace(PTRACE_CONT, pid, NULL, NULL) != 0) {
-        ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs);
-        zt_write_remote_memory(pid, saved_regs.rip, saved_code, sizeof(saved_code));
-        return -1;
-    }
-
-    if (waitpid(pid, &status, 0) < 0) {
-        ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs);
-        zt_write_remote_memory(pid, saved_regs.rip, saved_code, sizeof(saved_code));
-        return -1;
-    }
-
-    if (!WIFSTOPPED(status) || WSTOPSIG(status) != SIGTRAP) {
-        ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs);
-        zt_write_remote_memory(pid, saved_regs.rip, saved_code, sizeof(saved_code));
-        return -1;
-    }
-
-    if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) != 0) {
-        ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs);
-        zt_write_remote_memory(pid, saved_regs.rip, saved_code, sizeof(saved_code));
-        return -1;
-    }
-
-    *ret_out = regs.rax;
-
-    if (zt_write_remote_memory(pid, saved_regs.rip, saved_code, sizeof(saved_code)) != 0) {
-        ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs);
-        return -1;
-    }
-
-    if (ptrace(PTRACE_SETREGS, pid, NULL, &saved_regs) != 0) {
-        return -1;
-    }
-
-    return 0;
+    return zt_arch_remote_call2(pid, func_addr, arg1, arg2, ret_out);
 }
 
 int zt_remote_call1(pid_t pid,
@@ -446,75 +276,6 @@ int zt_remote_call1(pid_t pid,
                     uint64_t arg1,
                     uint64_t *ret_out) {
     return zt_remote_call2(pid, func_addr, arg1, 0, ret_out);
-}
-
-static int zt_insn_has_rip_relative(const cs_insn *insn) {
-    cs_x86 *x86;
-    uint8_t i;
-
-    if (insn == NULL || insn->detail == NULL) {
-        return 0;
-    }
-
-    x86 = &insn->detail->x86;
-    for (i = 0; i < x86->op_count; ++i) {
-        if (x86->operands[i].type == X86_OP_MEM &&
-            x86->operands[i].mem.base == X86_REG_RIP) {
-            return 1;
-        }
-    }
-
-    return 0;
-}
-
-static int zt_calc_patch_span(const uint8_t *code,
-                              size_t code_size,
-                              size_t min_len,
-                              size_t *patch_len_out,
-                              bool *has_rip_relative_out) {
-    csh handle;
-    cs_insn *insn;
-    size_t count;
-    size_t total_len;
-    size_t i;
-    bool has_rip_relative;
-
-    if (code == NULL || patch_len_out == NULL || has_rip_relative_out == NULL) {
-        return -1;
-    }
-
-    if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) != CS_ERR_OK) {
-        return -1;
-    }
-
-    cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
-
-    count = cs_disasm(handle, code, code_size, 0, 0, &insn);
-    if (count == 0) {
-        cs_close(&handle);
-        return -1;
-    }
-
-    total_len = 0;
-    has_rip_relative = false;
-    for (i = 0; i < count; ++i) {
-        total_len += insn[i].size;
-        if (zt_insn_has_rip_relative(&insn[i])) {
-            has_rip_relative = true;
-        }
-
-        if (total_len >= min_len) {
-            *patch_len_out = total_len;
-            *has_rip_relative_out = has_rip_relative;
-            cs_free(insn, count);
-            cs_close(&handle);
-            return 0;
-        }
-    }
-
-    cs_free(insn, count);
-    cs_close(&handle);
-    return -1;
 }
 
 int zt_find_symbol_addr(const char *elf_path, const char *symbol_name, uint64_t *symbol_addr_out) {
@@ -849,7 +610,6 @@ int zt_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
     zt_probe_info_t *probe;
     uint8_t code[ZT_PROBE_ORIG_CODE_MAX];
     size_t patch_len;
-    bool has_rip_relative;
 
     if (session == NULL) {
         return -1;
@@ -868,19 +628,16 @@ int zt_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
         return -1;
     }
 
-    if (zt_calc_patch_span(code,
-                           sizeof(code),
-                           ZT_PROBE_PATCH_LEN,
-                           &patch_len,
-                           &has_rip_relative) != 0) {
+    if (zt_arch_calc_patch_span(code,
+                                sizeof(code),
+                                zt_arch_probe_patch_len(),
+                                &patch_len) != 0) {
         return -1;
     }
 
     if (patch_len > ZT_PROBE_ORIG_CODE_MAX) {
         return -1;
     }
-
-    (void)has_rip_relative;
 
     memcpy(probe->orig_code, code, patch_len);
     probe->orig_len = (uint8_t)patch_len;
@@ -892,7 +649,6 @@ int zt_install_probe_patch(zt_injector_session_t *session,
                            uint64_t probe_id,
                            uint64_t thunk_addr) {
     zt_probe_info_t *probe;
-    uint8_t patch[ZT_PROBE_PATCH_LEN];
 
     if (session == NULL || thunk_addr == 0) {
         return -1;
@@ -903,19 +659,12 @@ int zt_install_probe_patch(zt_injector_session_t *session,
         return -1;
     }
 
-    if (probe->state != ZT_PROBE_PREPARED || probe->orig_len < ZT_PROBE_PATCH_LEN) {
+    if (probe->state != ZT_PROBE_PREPARED ||
+        probe->orig_len < zt_arch_probe_patch_len()) {
         return -1;
     }
 
-    patch[0] = 0xFF; /* jmp qword ptr [rip + 0] */
-    patch[1] = 0x25;
-    memset(patch + 2, 0, 4);
-    memcpy(patch + 6, &thunk_addr, sizeof(thunk_addr));
-
-    if (zt_write_remote_memory(session->pid,
-                               probe->target.remote_addr,
-                               patch,
-                               sizeof(patch)) != 0) {
+    if (zt_arch_install_jump(session->pid, probe->target.remote_addr, thunk_addr) != 0) {
         return -1;
     }
 
@@ -964,6 +713,10 @@ int zt_injector_attach(zt_injector_session_t *session, pid_t pid) {
     memset(session, 0, sizeof(*session));
     session->pid = pid;
     session->next_probe_id = 1;
+
+    if (!zt_arch_is_supported()) {
+        return -1;
+    }
 
     if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) != 0) {
         return -1;

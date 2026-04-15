@@ -11,10 +11,19 @@ TEST_DIR := src/test
 BUILD_DIR := build
 BIN_DIR := bin
 TEST_BIN_DIR := $(BIN_DIR)/tests
+ARCH ?= $(shell uname -m)
 
-SRC_C := $(wildcard $(SRC_DIR)/*.c)
+ifeq ($(ARCH),x86_64)
+ARCH_SRC_C := $(SRC_DIR)/zt_arch_x86_64.c
+ARCH_SRC_S := $(SRC_DIR)/zt_stub.S
+else
+$(error Unsupported ARCH=$(ARCH). Supported: x86_64)
+endif
+
+SRC_C_ALL := $(wildcard $(SRC_DIR)/*.c)
+SRC_C := $(filter-out $(SRC_DIR)/zt_arch_%.c,$(SRC_C_ALL)) $(ARCH_SRC_C)
 SRC_C_CORE := $(filter-out $(SRC_DIR)/zt_main.c, $(SRC_C))
-SRC_S := $(wildcard $(SRC_DIR)/*.S)
+SRC_S := $(ARCH_SRC_S)
 
 OBJ_CORE := $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/%.o, $(SRC_C_CORE)) \
             $(patsubst $(SRC_DIR)/%.S, $(BUILD_DIR)/%.o, $(SRC_S))
