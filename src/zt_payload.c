@@ -17,8 +17,8 @@ typedef struct {
 } zt_saved_probe_frame_t;
 
 enum {
-    ZT_FXSAVE_XMM_OFFSET = 160,
-    ZT_FXSAVE_XMM_STRIDE = 16,
+    ZT_FP_STATE_VEC_OFFSET = 160,
+    ZT_FP_STATE_VEC_STRIDE = 16,
 };
 
 static __thread zt_saved_probe_frame_t saved_frames[MAX_SAVED_RET_ADDR];
@@ -62,18 +62,18 @@ static zt_trace_buffer_t *zt_get_trace_buffer(void) {
     return (zt_trace_buffer_t *)(uintptr_t)g_payload_config.shared_buffer_addr;
 }
 
-static uint64_t zt_fxsave_xmm_low64(const void *fxsave_area, int index) {
+static uint64_t zt_fp_state_vec_low64(const void *fp_state_area, int index) {
     uint64_t value = 0;
     const unsigned char *base;
     unsigned int i;
 
-    if (fxsave_area == NULL || index < 0 || index >= 8) {
+    if (fp_state_area == NULL || index < 0 || index >= 8) {
         return 0;
     }
 
-    base = (const unsigned char *)fxsave_area +
-           ZT_FXSAVE_XMM_OFFSET +
-           ((size_t)index * ZT_FXSAVE_XMM_STRIDE);
+    base = (const unsigned char *)fp_state_area +
+           ZT_FP_STATE_VEC_OFFSET +
+           ((size_t)index * ZT_FP_STATE_VEC_STRIDE);
 
     for (i = 0; i < sizeof(value); ++i) {
         value |= ((uint64_t)base[i]) << (i * 8);
@@ -144,7 +144,7 @@ void *zt_payload_get_entry_stub_addr(void) {
     return (void *)entry_stub;
 }
 
-void zt_handle_entry(ctx_t *context, const void *fxsave_area) {
+void zt_handle_entry(ctx_t *context, const void *fp_state_area) {
     zt_trace_event_t event;
     uint64_t call_id;
 
@@ -162,25 +162,25 @@ void zt_handle_entry(ctx_t *context, const void *fxsave_area) {
     event.timestamp_ns = zt_clock_monotonic_ns();
     event.tid = zt_gettid_u64();
     event.cpu_id = zt_getcpu_u64();
-    event.args[0] = context->rdi;
-    event.args[1] = context->rsi;
-    event.args[2] = context->rdx;
-    event.args[3] = context->rcx;
-    event.args[4] = context->r8;
-    event.args[5] = context->r9;
-    event.fp_args[0] = zt_fxsave_xmm_low64(fxsave_area, 0);
-    event.fp_args[1] = zt_fxsave_xmm_low64(fxsave_area, 1);
-    event.fp_args[2] = zt_fxsave_xmm_low64(fxsave_area, 2);
-    event.fp_args[3] = zt_fxsave_xmm_low64(fxsave_area, 3);
-    event.fp_args[4] = zt_fxsave_xmm_low64(fxsave_area, 4);
-    event.fp_args[5] = zt_fxsave_xmm_low64(fxsave_area, 5);
-    event.fp_args[6] = zt_fxsave_xmm_low64(fxsave_area, 6);
-    event.fp_args[7] = zt_fxsave_xmm_low64(fxsave_area, 7);
+    event.args[0] = context->gp_arg0;
+    event.args[1] = context->gp_arg1;
+    event.args[2] = context->gp_arg2;
+    event.args[3] = context->gp_arg3;
+    event.args[4] = context->gp_arg4;
+    event.args[5] = context->gp_arg5;
+    event.fp_args[0] = zt_fp_state_vec_low64(fp_state_area, 0);
+    event.fp_args[1] = zt_fp_state_vec_low64(fp_state_area, 1);
+    event.fp_args[2] = zt_fp_state_vec_low64(fp_state_area, 2);
+    event.fp_args[3] = zt_fp_state_vec_low64(fp_state_area, 3);
+    event.fp_args[4] = zt_fp_state_vec_low64(fp_state_area, 4);
+    event.fp_args[5] = zt_fp_state_vec_low64(fp_state_area, 5);
+    event.fp_args[6] = zt_fp_state_vec_low64(fp_state_area, 6);
+    event.fp_args[7] = zt_fp_state_vec_low64(fp_state_area, 7);
 
     zt_publish_event(&event);
 }
 
-void zt_handle_return(ctx_t *context, const void *fxsave_area) {
+void zt_handle_return(ctx_t *context, const void *fp_state_area) {
     zt_trace_event_t event;
     uint64_t call_id;
 
@@ -200,8 +200,8 @@ void zt_handle_return(ctx_t *context, const void *fxsave_area) {
     event.timestamp_ns = zt_clock_monotonic_ns();
     event.tid = zt_gettid_u64();
     event.cpu_id = zt_getcpu_u64();
-    event.args[0] = context->rax;
-    event.fp_args[0] = zt_fxsave_xmm_low64(fxsave_area, 0);
+    event.args[0] = context->gp_retval0;
+    event.fp_args[0] = zt_fp_state_vec_low64(fp_state_area, 0);
 
     zt_publish_event(&event);
 }

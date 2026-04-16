@@ -2,7 +2,7 @@
 
 > proj40 题目要求见 [题面.md](./docs/题面.md)
 
-`zeroTrace` 是一个基于 `ptrace` 的用户态函数追踪工具。它会通过 `dlopen` 把 `libzt_payload.so` 注入到目标进程，并搜索符号表给指定函数安装探针，通过 CLI 中持续输出函数入口参数和返回值。
+`zeroTrace` 是一个基于 `ptrace` 的用户态函数追踪工具。它会通过远程 `dlopen` 把 `libzt_payload.so` 注入到目标进程，并搜索符号表给指定函数安装探针，通过 CLI 中持续输出函数入口参数和返回值。
 
 ## 功能
 
@@ -203,7 +203,7 @@ ztrace.1473057.log
 例如：
 
 ```text
-test_threaded_target-22520/22521 [010] 157114.775569202: ztrace:entry: thread_add(rdi=0x1, rsi=0x32, rdx=0x1, rcx=0x0, r8=0x0, r9=0x7f175be7d6c0)
+test_threaded_target-22520/22521 [010] 157114.775569202: ztrace:entry: thread_add(arg0=0x1, arg1=0x32, arg2=0x1, arg3=0x0, arg4=0x0, arg5=0x7f175be7d6c0)
 test_threaded_target-22520/22521 [010] 157114.775572037: ztrace:return: thread_add -> 0x33
 ```
 
@@ -262,11 +262,12 @@ make test
 make benchmark
 ```
 
-脚本会自动完成三组测试：
+脚本会自动完成四组测试：
 
 - baseline：无探针
 - kernel uprobe：使用 `bpftrace` 挂 `bench_getpid`
 - zeroTrace：使用 `zeroTrace` 安装用户态 probe
+- probe lifecycle latency：测量安装/卸载延迟
 
 benchmark 目标函数是 `bench_getpid()`，它是测试程序中的一个 `noinline` wrapper，内部调用 `syscall(SYS_getpid)`，这样可以避免 libc/vDSO 细节干扰测量。
 
@@ -312,38 +313,9 @@ uninstall latency avg : 22006 ns (0.022 ms) over 1000 rounds
 - [x] 增强信号安全测试，覆盖目标进程收到异步信号时的 trace 行为
 - [x] 补充浮点寄存器 / SIMD 上下文保存与恢复验证
 - [x] 优化 `zt_trace_poll()` 的轮询策略，使用 `process_vm_readv` 非暂停读取 trace buffer
+- [x] 支持 ARM 架构
 
-## 项目结构
-
-- [src/zt_cli.c](./src/zt_cli.c)
-  CLI 命令入口
-- [src/zt_injector.c](./src/zt_injector.c)
-  `ptrace`、远程内存读写、远程调用、probe 管理
-- [src/zt_arch_x86_64.c](./src/zt_arch_x86_64.c)
-  x86_64 架构后端，负责远程 syscall/call、入口跳转 patch 和 patch span 计算
-- [src/zt_arch_aarch64.c](./src/zt_arch_aarch64.c)
-  aarch64 架构后端，负责 `PTRACE_GETREGSET` 远程 syscall/call 和 ARM64 入口跳转 patch
-- [src/zt_trace_runner.c](./src/zt_trace_runner.c)
-  payload 初始化、trace 轮询、probe 安装/卸载
-- [src/zt_thunk_manager.c](./src/zt_thunk_manager.c)
-  x86_64 thunk 构造与远程 thunk pool 管理
-- [src/zt_thunk_manager_aarch64.c](./src/zt_thunk_manager_aarch64.c)
-  aarch64 thunk 构造与远程 thunk pool 管理
-- [src/zt_payload.c](./src/zt_payload.c)
-  注入到目标进程中的 payload
-- [src/zt_stub.S](./src/zt_stub.S)
-  x86_64 入口 / 返回 stub
-- [src/zt_stub_aarch64.S](./src/zt_stub_aarch64.S)
-  aarch64 入口 / 返回 stub
-
-## 说明
-
-- 当前已拆出 `x86_64` / `aarch64` 架构后端；`x86_64` 已通过本项目自动化测试，`aarch64` 后端包含远程 syscall/call、入口 patch、thunk 和 stub，但需要在 ARM64 环境中做运行验证
-- 已支持通过 `conf/zttrace.conf` 对常见 libc/POSIX 函数做签名感知格式化；未配置到的函数会回退到寄存器风格显示
-- 已支持保存 / 恢复通用寄存器、标志寄存器和浮点上下文，并支持 `float` / `double` 参数与返回值显示
-- 对复杂函数前导指令的支持依赖 Capstone 解析；如果函数入口包含当前未处理的情况，probe 安装可能失败。ARM64 后端当前对 PC-relative 前导指令采取保守拒绝策略
-
-更底层的设计说明可以参考：
+## 文档
 
 - [docs/framework.md](./docs/framework.md)
 - [docs/stub.md](./docs/stub.md)
