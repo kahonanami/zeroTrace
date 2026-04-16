@@ -7,6 +7,10 @@ LDFLAGS_SO := -shared
 LDLIBS := -lcapstone -ldl -lreadline
 
 SRC_DIR := src
+ISA_DIR := $(SRC_DIR)/isa
+ISA_COMMON_DIR := $(ISA_DIR)/common
+ISA_X86_64_DIR := $(ISA_DIR)/x86_64
+ISA_AARCH64_DIR := $(ISA_DIR)/aarch64
 TEST_DIR := src/test
 BUILD_DIR := build
 BIN_DIR := bin
@@ -14,22 +18,31 @@ TEST_BIN_DIR := $(BIN_DIR)/tests
 ARCH ?= $(shell uname -m)
 
 ifeq ($(ARCH),x86_64)
-ARCH_SRC_C := $(SRC_DIR)/zt_arch_x86_64.c $(SRC_DIR)/zt_thunk_manager.c
-ARCH_SRC_S := $(SRC_DIR)/zt_stub.S
+ARCH_SRC_C := $(ISA_X86_64_DIR)/arch.c $(ISA_X86_64_DIR)/thunk_manager.c
+ARCH_SRC_S := $(ISA_X86_64_DIR)/stub.S
 else ifeq ($(ARCH),aarch64)
-ARCH_SRC_C := $(SRC_DIR)/zt_arch_aarch64.c $(SRC_DIR)/zt_thunk_manager_aarch64.c
-ARCH_SRC_S := $(SRC_DIR)/zt_stub_aarch64.S
+ARCH_SRC_C := $(ISA_AARCH64_DIR)/arch.c $(ISA_AARCH64_DIR)/thunk_manager.c
+ARCH_SRC_S := $(ISA_AARCH64_DIR)/stub.S
 else
 $(error Unsupported ARCH=$(ARCH). Supported: x86_64 aarch64)
 endif
 
-SRC_C_ALL := $(wildcard $(SRC_DIR)/*.c)
-SRC_C := $(filter-out $(SRC_DIR)/zt_arch_%.c $(SRC_DIR)/zt_thunk_manager%.c,$(SRC_C_ALL)) $(ARCH_SRC_C)
+SRC_C_ALL := \
+	$(wildcard $(SRC_DIR)/*.c) \
+	$(wildcard $(ISA_COMMON_DIR)/*.c) \
+	$(wildcard $(ISA_X86_64_DIR)/*.c) \
+	$(wildcard $(ISA_AARCH64_DIR)/*.c)
+SRC_C := $(filter-out \
+	$(ISA_X86_64_DIR)/arch.c \
+	$(ISA_AARCH64_DIR)/arch.c \
+	$(ISA_X86_64_DIR)/thunk_manager.c \
+	$(ISA_AARCH64_DIR)/thunk_manager.c, \
+	$(SRC_C_ALL)) $(ARCH_SRC_C)
 SRC_C_CORE := $(filter-out $(SRC_DIR)/zt_main.c, $(SRC_C))
 SRC_S := $(ARCH_SRC_S)
 
-OBJ_CORE := $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/%.o, $(SRC_C_CORE)) \
-            $(patsubst $(SRC_DIR)/%.S, $(BUILD_DIR)/%.o, $(SRC_S))
+OBJ_CORE := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRC_C_CORE)) \
+            $(patsubst $(SRC_DIR)/%.S,$(BUILD_DIR)/%.o,$(SRC_S))
 
 OBJ_MAIN := $(BUILD_DIR)/zt_main.o
 
@@ -43,7 +56,7 @@ TEST_S := $(wildcard $(TEST_DIR)/*.S)
 
 OBJ_TEST_HELPERS := $(patsubst $(TEST_DIR)/%.S, $(BUILD_DIR)/%.o, $(TEST_S))
 PAYLOAD_SO := $(BIN_DIR)/libzt_payload.so
-PAYLOAD_PIC_OBJ := $(BUILD_DIR)/zt_payload.pic.o $(patsubst $(SRC_DIR)/%.S, $(BUILD_DIR)/%.pic.o, $(ARCH_SRC_S))
+PAYLOAD_PIC_OBJ := $(BUILD_DIR)/zt_payload.pic.o $(patsubst $(SRC_DIR)/%.S,$(BUILD_DIR)/%.pic.o,$(ARCH_SRC_S))
 .PRECIOUS: $(BUILD_DIR)/%.o
 
 TEST_BINS := $(patsubst $(TEST_DIR)/%.c, $(TEST_BIN_DIR)/%, $(TEST_C))
@@ -86,6 +99,10 @@ run-tests:
 
 directories:
 	@mkdir -p $(BUILD_DIR)
+	@mkdir -p $(BUILD_DIR)/isa
+	@mkdir -p $(BUILD_DIR)/isa/common
+	@mkdir -p $(BUILD_DIR)/isa/x86_64
+	@mkdir -p $(BUILD_DIR)/isa/aarch64
 	@mkdir -p $(BIN_DIR)
 	@mkdir -p $(TEST_BIN_DIR)
 
