@@ -19,7 +19,7 @@ ARCH ?= $(shell uname -m)
 
 ifeq ($(ARCH),x86_64)
 ARCH_SRC_C := $(ISA_X86_64_DIR)/arch.c $(ISA_X86_64_DIR)/thunk_manager.c
-ARCH_SRC_S := $(ISA_X86_64_DIR)/stub.S
+ARCH_SRC_S := $(ISA_X86_64_DIR)/zt_stub.S
 else ifeq ($(ARCH),aarch64)
 ARCH_SRC_C := $(ISA_AARCH64_DIR)/arch.c $(ISA_AARCH64_DIR)/thunk_manager.c
 ARCH_SRC_S := $(ISA_AARCH64_DIR)/stub.S
