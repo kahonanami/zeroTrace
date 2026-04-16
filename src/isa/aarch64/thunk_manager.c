@@ -118,12 +118,23 @@ static int zt_emit_abs_call(uint8_t *buf,
     return 0;
 }
 
-static int zt_aarch64_inverse_cond(unsigned int cond, unsigned int *inverse_out) {
-    if (inverse_out == NULL || cond < ARM64_CC_EQ || cond > ARM64_CC_LE) {
+static int zt_aarch64_cond_code(unsigned int cond, unsigned int *code_out) {
+    if (code_out == NULL || cond < ARM64_CC_EQ || cond > ARM64_CC_LE) {
         return -1;
     }
 
-    *inverse_out = cond ^ 1u;
+    *code_out = cond - ARM64_CC_EQ;
+    return 0;
+}
+
+static int zt_aarch64_inverse_cond(unsigned int cond, unsigned int *inverse_out) {
+    unsigned int code;
+
+    if (zt_aarch64_cond_code(cond, &code) != 0) {
+        return -1;
+    }
+
+    *inverse_out = code ^ 1u;
     return 0;
 }
 
