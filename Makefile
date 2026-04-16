@@ -50,7 +50,7 @@ TEST_C_ALL := $(wildcard $(TEST_DIR)/*.c)
 ifeq ($(ARCH),aarch64)
 TEST_C := $(filter-out $(TEST_DIR)/test_thunk_builder.c,$(TEST_C_ALL))
 else
-TEST_C := $(TEST_C_ALL)
+TEST_C := $(filter-out $(TEST_DIR)/test_thunk_builder_aarch64.c,$(TEST_C_ALL))
 endif
 TEST_S := $(wildcard $(TEST_DIR)/*.S)
 
