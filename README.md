@@ -1,6 +1,6 @@
 # zeroTrace: A Lightweight Dynamic probe for User Space
 
-> proj40 题目要求见 [题面.md](./docs/题面.md)
+> proj40 题目要求见 [project-requirements.md](./docs/project-requirements.md)
 
 `zeroTrace` 是一个基于 `ptrace` 的用户态函数追踪工具。它会通过远程 `dlopen` 把 `libzt_payload.so` 注入到目标进程，并搜索符号表给指定函数安装探针，通过 CLI 中持续输出函数入口参数和返回值。
 
@@ -317,5 +317,5 @@ uninstall latency avg : 22006 ns (0.022 ms) over 1000 rounds
 
 ## 文档
 
-- [docs/framework.md](./docs/framework.md)
-- [docs/stub.md](./docs/stub.md)
+- [docs/architecture.md](./docs/architecture.md)
+- [docs/stub-control-flow.md](./docs/stub-control-flow.md)
