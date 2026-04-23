@@ -38,13 +38,10 @@ SRC_C := $(filter-out \
 	$(ISA_X86_64_DIR)/trampoline_manager.c \
 	$(ISA_AARCH64_DIR)/trampoline_manager.c, \
 	$(SRC_C_ALL)) $(ARCH_SRC_C)
-SRC_C_CORE := $(filter-out $(SRC_DIR)/zt_main.c, $(SRC_C))
 SRC_S := $(ARCH_SRC_S)
 
-OBJ_CORE := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRC_C_CORE)) \
+OBJ_CORE := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRC_C)) \
             $(patsubst $(SRC_DIR)/%.S,$(BUILD_DIR)/%.o,$(SRC_S))
-
-OBJ_MAIN := $(BUILD_DIR)/zt_main.o
 
 TEST_C_ALL := $(wildcard $(TEST_DIR)/*.c)
 ifeq ($(ARCH),aarch64)
@@ -106,7 +103,7 @@ directories:
 	@mkdir -p $(BIN_DIR)
 	@mkdir -p $(TEST_BIN_DIR)
 
-$(APP_TARGET): $(OBJ_CORE) $(OBJ_MAIN)
+$(APP_TARGET): $(OBJ_CORE)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 	@echo "[✓] Built main app: $@"
 
