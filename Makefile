@@ -18,10 +18,10 @@ TEST_BIN_DIR := $(BIN_DIR)/tests
 ARCH ?= $(shell uname -m)
 
 ifeq ($(ARCH),x86_64)
-ARCH_SRC_C := $(ISA_X86_64_DIR)/arch.c $(ISA_X86_64_DIR)/thunk_manager.c
+ARCH_SRC_C := $(ISA_X86_64_DIR)/arch.c $(ISA_X86_64_DIR)/trampoline_manager.c
 ARCH_SRC_S := $(ISA_X86_64_DIR)/zt_stub.S
 else ifeq ($(ARCH),aarch64)
-ARCH_SRC_C := $(ISA_AARCH64_DIR)/arch.c $(ISA_AARCH64_DIR)/thunk_manager.c
+ARCH_SRC_C := $(ISA_AARCH64_DIR)/arch.c $(ISA_AARCH64_DIR)/trampoline_manager.c
 ARCH_SRC_S := $(ISA_AARCH64_DIR)/stub.S
 else
 $(error Unsupported ARCH=$(ARCH). Supported: x86_64 aarch64)
@@ -35,8 +35,8 @@ SRC_C_ALL := \
 SRC_C := $(filter-out \
 	$(ISA_X86_64_DIR)/arch.c \
 	$(ISA_AARCH64_DIR)/arch.c \
-	$(ISA_X86_64_DIR)/thunk_manager.c \
-	$(ISA_AARCH64_DIR)/thunk_manager.c, \
+	$(ISA_X86_64_DIR)/trampoline_manager.c \
+	$(ISA_AARCH64_DIR)/trampoline_manager.c, \
 	$(SRC_C_ALL)) $(ARCH_SRC_C)
 SRC_C_CORE := $(filter-out $(SRC_DIR)/zt_main.c, $(SRC_C))
 SRC_S := $(ARCH_SRC_S)
@@ -48,9 +48,9 @@ OBJ_MAIN := $(BUILD_DIR)/zt_main.o
 
 TEST_C_ALL := $(wildcard $(TEST_DIR)/*.c)
 ifeq ($(ARCH),aarch64)
-TEST_C := $(filter-out $(TEST_DIR)/test_thunk_builder.c,$(TEST_C_ALL))
+TEST_C := $(filter-out $(TEST_DIR)/test_trampoline_builder.c,$(TEST_C_ALL))
 else
-TEST_C := $(filter-out $(TEST_DIR)/test_thunk_builder_aarch64.c,$(TEST_C_ALL))
+TEST_C := $(filter-out $(TEST_DIR)/test_trampoline_builder_aarch64.c,$(TEST_C_ALL))
 endif
 TEST_S := $(wildcard $(TEST_DIR)/*.S)
 

@@ -30,8 +30,8 @@ typedef enum {
 typedef struct{
     uint64_t probe_id;
     zt_symbol_target_t target;
-    uint64_t thunk_addr;
-    int thunk_slot;
+    uint64_t trampoline_addr;
+    int trampoline_slot;
     uint8_t orig_code[ZT_PROBE_ORIG_CODE_MAX];
     uint8_t orig_len;
     zt_probe_state_t state;
@@ -86,5 +86,5 @@ int zt_unregister_probe(zt_injector_session_t *session, uint64_t probe_id);
 int zt_enable_probe(zt_injector_session_t *session, uint64_t probe_id);
 int zt_install_probe_patch(zt_injector_session_t *session,
                            uint64_t probe_id,
-                           uint64_t thunk_addr);
+                           uint64_t trampoline_addr);
 int zt_uninstall_probe_patch(zt_injector_session_t *session, uint64_t probe_id);

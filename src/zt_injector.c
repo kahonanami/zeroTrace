@@ -555,8 +555,8 @@ zt_probe_info_t *zt_probe_alloc(zt_injector_session_t *session, const zt_symbol_
         }
 
         session->probes[i].target = *target;
-        session->probes[i].thunk_addr = 0;
-        session->probes[i].thunk_slot = -1;
+        session->probes[i].trampoline_addr = 0;
+        session->probes[i].trampoline_slot = -1;
         session->probes[i].orig_len = 0;
         session->probes[i].state = ZT_PROBE_RESOLVED;
         ++session->probe_count;
@@ -647,10 +647,10 @@ int zt_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
 
 int zt_install_probe_patch(zt_injector_session_t *session,
                            uint64_t probe_id,
-                           uint64_t thunk_addr) {
+                           uint64_t trampoline_addr) {
     zt_probe_info_t *probe;
 
-    if (session == NULL || thunk_addr == 0) {
+    if (session == NULL || trampoline_addr == 0) {
         return -1;
     }
 
@@ -664,11 +664,11 @@ int zt_install_probe_patch(zt_injector_session_t *session,
         return -1;
     }
 
-    if (zt_arch_install_jump(session->pid, probe->target.remote_addr, thunk_addr) != 0) {
+    if (zt_arch_install_jump(session->pid, probe->target.remote_addr, trampoline_addr) != 0) {
         return -1;
     }
 
-    probe->thunk_addr = thunk_addr;
+    probe->trampoline_addr = trampoline_addr;
     probe->state = ZT_PROBE_INSTALLED;
     return 0;
 }

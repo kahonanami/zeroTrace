@@ -246,7 +246,7 @@ make test
 当前测试覆盖：
 
 - 通用寄存器、flags、浮点/SIMD 上下文保存恢复
-- thunk 构造
+- trampoline 构造
 - libc/POSIX 动态库函数 trace
 - 16 个并发 probe 的生命周期测试
 - 多线程目标函数追踪稳定性测试

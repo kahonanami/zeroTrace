@@ -1,6 +1,6 @@
-# Stub / Thunk Control Flow
+# Stub / Trampoline Control Flow
 
-本文专门说明 `zeroTrace` 中一次函数命中时，控制流如何从原函数入口跳到 thunk，再进入 `entry_stub`，以及如何在不破坏原函数栈语义的前提下劫持返回地址，让函数返回时再进入 `exit_stub`。
+本文专门说明 `zeroTrace` 中一次函数命中时，控制流如何从原函数入口跳到 trampoline，再进入 `entry_stub`，以及如何在不破坏原函数栈语义的前提下劫持返回地址，让函数返回时再进入 `exit_stub`。
 
 当前代码结构中：
 
@@ -10,7 +10,7 @@
 其中每个架构目录都保持一致的文件划分：
 
 - `arch.c`
-- `thunk_manager.c`
+- `trampoline_manager.c`
 - `x86_64` 使用 `zt_stub.S`
 - `aarch64` 使用 `stub.S`
 
@@ -21,32 +21,32 @@
 对每个被 trace 的函数，`zeroTrace` 会做两件事：
 
 1. 把原函数入口改写成一段固定长度的绝对跳转 patch
-2. 为这个 probe 准备一个专属 thunk
+2. 为这个 probe 准备一个专属 trampoline
 
 `x86_64` 原函数入口 patch 逻辑上等价于：
 
 ```asm
 jmp qword ptr [rip + 0]
-.quad thunk_addr
+.quad trampoline_addr
 ```
 
-也就是说，原函数一进入，就不再直接执行自身前导指令，而是先跳到 thunk。这个 14 字节模板不需要借用 `rax`，因此不会破坏可变参数函数依赖的 `al` 或其他寄存器状态。
+也就是说，原函数一进入，就不再直接执行自身前导指令，而是先跳到 trampoline。这个 14 字节模板不需要借用 `rax`，因此不会破坏可变参数函数依赖的 `al` 或其他寄存器状态。
 
 `aarch64` 入口 patch 逻辑上等价于：
 
 ```asm
 ldr x16, #8
 br  x16
-.quad thunk_addr
+.quad trampoline_addr
 ```
 
 这个模板使用 AAPCS64 中的 scratch register `x16/ip0`，跳转后原函数参数寄存器 `x0 ... x7` 和浮点参数寄存器 `d0 ... d7` 仍保持原值。
 
 ---
 
-## 2. `thunk`
+## 2. `trampoline`
 
-`x86_64` thunk 的逻辑可以理解成：
+`x86_64` trampoline 的逻辑可以理解成：
 
 ```asm
 push <probe_id>
@@ -66,7 +66,7 @@ jmp [continue_addr]
 
 - `call [entry_stub_addr]`
   调用 payload 中的 `entry_stub`
-  这一步会额外在栈上压入一个返回地址，指向 thunk 中 `call` 后面的下一条指令
+  这一步会额外在栈上压入一个返回地址，指向 trampoline 中 `call` 后面的下一条指令
 
 - `lea rsp, [rsp + 8]`
   `entry_stub` 返回后，把最开始压栈的 `probe_id` 弹掉
@@ -77,13 +77,13 @@ jmp [continue_addr]
 - `jmp [continue_addr]`
   跳回 `原函数地址 + orig_len`，继续执行原函数剩余部分
 
-所以从控制流上看，thunk 并不是“代替整个函数”，而是：
+所以从控制流上看，trampoline 并不是“代替整个函数”，而是：
 
 1. 先进入 `entry_stub`
 2. 再补做原函数前导若干条被覆盖掉的指令
 3. 再跳回原函数剩余部分继续执行
 
-`aarch64` 没有像 x86 那样天然把返回地址放在栈上，函数返回地址通常在 `x30/lr` 中。因此 ARM64 thunk 会显式保存和改写 `x30`：
+`aarch64` 没有像 x86 那样天然把返回地址放在栈上，函数返回地址通常在 `x30/lr` 中。因此 ARM64 trampoline 会显式保存和改写 `x30`：
 
 ```asm
 mov x15, x30          // 保存原始 LR
@@ -108,7 +108,7 @@ br x16
 
 `call entry_stub` 会自动把一个返回地址压栈。
 
-这个返回地址本来应该让 `entry_stub` 执行完之后回到 thunk 里，继续执行：
+这个返回地址本来应该让 `entry_stub` 执行完之后回到 trampoline 里，继续执行：
 
 ```asm
 lea rsp, [rsp + 8]
@@ -200,14 +200,14 @@ offset +0x60 : rcx
 offset +0x68 : rbx
 offset +0x70 : rax
 offset +0x78 : status_flags
-offset +0x80 : thunk_ret_addr
+offset +0x80 : trampoline_ret_addr
 offset +0x88 : func_id
 ```
 
 这里有两个特别重要的槽位：
 
 - `[r12 + 0x88]`
-  这里是 thunk 最开始 `push <probe_id>` 压进去的 probe id
+  这里是 trampoline 最开始 `push <probe_id>` 压进去的 probe id
 
 - `[r12 + 0x90]`
   这里是真实调用者压入的原始返回地址
@@ -218,8 +218,8 @@ offset +0x88 : func_id
 高地址
 │
 │  [r12 + 0x90]  真实调用者的原始返回地址
-│  [r12 + 0x88]  probe_id（由 thunk 里的 push <probe_id> 压入）
-│  [r12 + 0x80]  thunk 中 call entry_stub 的返回地址
+│  [r12 + 0x88]  probe_id（由 trampoline 里的 push <probe_id> 压入）
+│  [r12 + 0x80]  trampoline 中 call entry_stub 的返回地址
 │  [r12 + 0x78]  status_flags
 │  [r12 + 0x70]  rax
 │  [r12 + 0x68]  rbx
@@ -261,10 +261,10 @@ offset +0x88 : func_id
 - `POP_ALL`
 - `ret`
 
-这次 `ret` 取到的已经不是原来的 thunk 返回地址，而是刚刚写进去的 `exit_stub` 入口地址。
+这次 `ret` 取到的已经不是原来的 trampoline 返回地址，而是刚刚写进去的 `exit_stub` 入口地址。
 
 不过要注意，这个“ret 到 exit_stub”并不会立刻发生在 `entry_stub` 结束后。  
-`entry_stub` 结束后，控制流先回到 thunk，继续执行：
+`entry_stub` 结束后，控制流先回到 trampoline，继续执行：
 
 ```asm
 lea rsp, [rsp + 8]
@@ -291,7 +291,7 @@ jmp continue_addr
 - 参数寄存器已经恢复
 - 通用寄存器和 flags 已恢复
 - 对应架构的浮点和 SIMD 上下文已恢复
-- thunk 又把原函数前导指令补执行了一遍
+- trampoline 又把原函数前导指令补执行了一遍
 - 最后跳回 `func_addr + orig_len`
 
 所以对原函数来说，它看到的仍然是一条合法调用链，只是它未来 `ret` 时先回 `exit_stub`，而不是直接回调用者。
@@ -380,7 +380,7 @@ call get_ret_addr_c
 ```text
 caller
   -> patched function entry
-  -> thunk
+  -> trampoline
   -> entry_stub
   -> original function body
   -> exit_stub
@@ -437,24 +437,24 @@ caller
 
 由于架构问题，ARM64 的返回链闭环和 `x86_64` 不一样，关键不在“改栈上的返回地址”，而在于：
 
-- thunk 先把原始 `x30/lr` 暂存在 `x15`
+- trampoline 先把原始 `x30/lr` 暂存在 `x15`
 - `entry_stub` 把这个真实 LR 写进 TLS shadow stack
-- `entry_stub` 返回 thunk 时，再把 `exit_stub` 地址放回 `x15`
-- thunk 执行 `mov x30, x15`
+- `entry_stub` 返回 trampoline 时，再把 `exit_stub` 地址放回 `x15`
+- trampoline 执行 `mov x30, x15`
 - 原函数最终 `ret` 时，先跳进 `exit_stub`
 - `exit_stub` 再从 TLS shadow stack 取回真实 LR，写回 `x30`，最后 `ret` 回调用者
 
 也就是说，ARM64 的“返回地址劫持”发生在 `lr` 寄存器链路里，而不是发生在调用者栈槽里。
 
-### 7.1 `aarch64 thunk`
+### 7.1 `aarch64 trampoline`
 
-当前 ARM64 thunk 的逻辑是：
+当前 ARM64 trampoline 的逻辑是：
 
 ```asm
 mov x15, x30          // 保存原始 LR
 mov x17, probe_id     // 传递 probe id
 mov x16, entry_stub
-blr x16               // x30 会被改成 thunk 中下一条指令
+blr x16               // x30 会被改成 trampoline 中下一条指令
 mov x30, x15          // entry_stub 返回后，x15 中已经变成 exit_stub
 <relocated original instructions>
 mov x16, continue_addr
@@ -464,17 +464,17 @@ br x16
 这里几个寄存器的职责要分开看：
 
 - `x30`
-  在 `blr x16` 时被硬件自动写成“回到 thunk 的返回地址”
+  在 `blr x16` 时被硬件自动写成“回到 trampoline 的返回地址”
 
 - `x15`
-  先装原始 LR，进入 `entry_stub` 后会被当作 `thunk_ret_addr` 保存；`entry_stub` 返回前再改成 `exit_stub`
+  先装原始 LR，进入 `entry_stub` 后会被当作 `trampoline_ret_addr` 保存；`entry_stub` 返回前再改成 `exit_stub`
 
 - `x17`
   用来传 `probe_id`
 
 因此 `entry_stub` 看到的是两条独立链路：
 
-1. `x30` 是“stub 执行完后回 thunk 的地址”
+1. `x30` 是“stub 执行完后回 trampoline 的地址”
 2. `x15` 是“原函数最终应该回调用者的真实 LR”
 
 ### 7.2 `aarch64 entry_stub`
@@ -521,7 +521,7 @@ entry_stub:
 
 1. 把恢复执行所需的通用寄存器集合、`q0 ... q31`、`fpcr`、`fpsr` 和 `nzcv` 保存到固定栈帧，并单独整理 `x15/x17` 元信息
 2. 把 ABI 参数和元信息整理成一份兼容 `ctx_t` 的视图，交给 `zt_handle_entry()`
-3. 把“真实 LR + probe_id”压进 TLS shadow stack，随后把 `exit_stub` 地址带回 thunk
+3. 把“真实 LR + probe_id”压进 TLS shadow stack，随后把 `exit_stub` 地址带回 trampoline
 
 `ctx_t` 里的参数/返回值字段已经统一成 ABI 槽位命名，在 `aarch64` 下直接映射到对应寄存器位置：
 
@@ -531,8 +531,8 @@ entry_stub:
 - `context->status_flags`
   存的是 `nzcv`
 
-- `context->thunk_ret_addr`
-  在 ARM64 下实际存的是 thunk 传进来的“真实 LR”，也就是之前的 `x15`
+- `context->trampoline_ret_addr`
+  在 ARM64 下实际存的是 trampoline 传进来的“真实 LR”，也就是之前的 `x15`
 
 - `context->func_id`
   存的是 `x17`
@@ -543,10 +543,10 @@ stub 会在自己的栈帧里手工铺出一块兼容 payload 读取偏移的浮
 
 `entry_stub` 里虽然把真实 LR 保存到了 TLS，并且准备把 `exit_stub` 带回去，但它自己执行完时并不会直接跳到 `exit_stub`。原因是：
 
-- `blr x16` 进入 `entry_stub` 时，硬件已经把 `x30` 写成了“thunk 中下一条指令地址”
+- `blr x16` 进入 `entry_stub` 时，硬件已经把 `x30` 写成了“trampoline 中下一条指令地址”
 - `SAVE_GPRS` 把这个 `x30` 一并保存到了栈帧里
 - `RESTORE_GPRS` 会把这个值恢复回 `x30`
-- 最后的 `ret` 因此仍然回到 thunk，而不是回到调用者
+- 最后的 `ret` 因此仍然回到 trampoline，而不是回到调用者
 
 真正被改写的是 `x15`：
 
@@ -558,10 +558,10 @@ ret
 
 也就是：
 
-- `ret` 用 `x30` 回 thunk
-- `x15` 则把 `exit_stub` 地址带回 thunk
+- `ret` 用 `x30` 回 trampoline
+- `x15` 则把 `exit_stub` 地址带回 trampoline
 
-因此 thunk 紧接着执行：
+因此 trampoline 紧接着执行：
 
 ```asm
 mov x30, x15
@@ -637,9 +637,9 @@ ldr x30, [sp, #ZT_FRAME_RETADDR_OFF]
 ```text
 caller
   -> patched function entry
-  -> aarch64 thunk
+  -> aarch64 trampoline
   -> entry_stub
-  -> thunk
+  -> trampoline
   -> original function body, x30 = exit_stub
   -> exit_stub
   -> caller, x30 = original LR
@@ -648,10 +648,10 @@ caller
 如果只看“返回地址在哪一刻被改掉”，时间线可以再压缩成：
 
 1. 调用者正常 `bl target`
-2. thunk 先把原始 `x30` 备份到 `x15`
+2. trampoline 先把原始 `x30` 备份到 `x15`
 3. `entry_stub` 把这个真实 LR 存进 TLS shadow stack
 4. `entry_stub` 返回前把 `exit_stub` 塞回 `x15`
-5. thunk 执行 `mov x30, x15`
+5. trampoline 执行 `mov x30, x15`
 6. 原函数 `ret` 先到 `exit_stub`
 7. `exit_stub` 从 TLS 恢复真实 LR 到 `x30`
 8. `ret` 回调用者

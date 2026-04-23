@@ -63,7 +63,7 @@ typedef struct {
     uint64_t rbx;
     uint64_t gp_retval0;
     uint64_t status_flags;
-    uint64_t thunk_ret_addr;
+    uint64_t trampoline_ret_addr;
     uint64_t func_id;
 } ctx_t;
 

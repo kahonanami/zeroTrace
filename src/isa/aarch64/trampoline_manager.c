@@ -4,7 +4,7 @@
 
 #include <capstone/capstone.h>
 
-#include "../../../include/zt_thunk_manager.h"
+#include "../../../include/zt_trampoline_manager.h"
 
 enum {
     ZT_AARCH64_INSN_SIZE = 4,
@@ -343,18 +343,18 @@ fail:
     return -1;
 }
 
-int zt_build_thunk(const zt_probe_info_t *probe,
+int zt_build_trampoline(const zt_probe_info_t *probe,
                    uint64_t entry_stub_addr,
-                   uint64_t thunk_addr,
-                   uint8_t *thunk_buf,
-                   size_t thunk_buf_size,
-                   size_t *thunk_size_out) {
+                   uint64_t trampoline_addr,
+                   uint8_t *trampoline_buf,
+                   size_t trampoline_buf_size,
+                   size_t *trampoline_size_out) {
     size_t offset = 0;
     size_t relocated_size;
     uint64_t continue_addr;
 
-    if (probe == NULL || thunk_buf == NULL || thunk_size_out == NULL ||
-        thunk_addr == 0 || entry_stub_addr == 0) {
+    if (probe == NULL || trampoline_buf == NULL || trampoline_size_out == NULL ||
+        trampoline_addr == 0 || entry_stub_addr == 0) {
         return -1;
     }
 
@@ -363,32 +363,32 @@ int zt_build_thunk(const zt_probe_info_t *probe,
     }
 
     continue_addr = probe->target.remote_addr + probe->orig_len;
-    zt_fill_nops(thunk_buf, thunk_buf_size);
+    zt_fill_nops(trampoline_buf, trampoline_buf_size);
 
-    if (zt_emit_u32(thunk_buf, thunk_buf_size, &offset, 0xAA1E03EFu) != 0 || /* mov x15, x30 */
-        zt_emit_mov_abs(thunk_buf, thunk_buf_size, &offset, 17, probe->probe_id) != 0 ||
-        zt_emit_mov_abs(thunk_buf, thunk_buf_size, &offset, 16, entry_stub_addr) != 0 ||
-        zt_emit_u32(thunk_buf, thunk_buf_size, &offset, 0xD63F0200u) != 0) { /* blr x16 */
+    if (zt_emit_u32(trampoline_buf, trampoline_buf_size, &offset, 0xAA1E03EFu) != 0 || /* mov x15, x30 */
+        zt_emit_mov_abs(trampoline_buf, trampoline_buf_size, &offset, 17, probe->probe_id) != 0 ||
+        zt_emit_mov_abs(trampoline_buf, trampoline_buf_size, &offset, 16, entry_stub_addr) != 0 ||
+        zt_emit_u32(trampoline_buf, trampoline_buf_size, &offset, 0xD63F0200u) != 0) { /* blr x16 */
         return -1;
     }
 
-    if (zt_emit_u32(thunk_buf, thunk_buf_size, &offset, 0xAA0F03FEu) != 0) { /* mov x30, x15 */
+    if (zt_emit_u32(trampoline_buf, trampoline_buf_size, &offset, 0xAA0F03FEu) != 0) { /* mov x30, x15 */
         return -1;
     }
 
     if (zt_emit_relocated_orig_code(probe,
-                                    thunk_buf + offset,
-                                    thunk_buf_size - offset,
+                                    trampoline_buf + offset,
+                                    trampoline_buf_size - offset,
                                     &relocated_size) != 0) {
         return -1;
     }
     offset += relocated_size;
 
-    if (zt_emit_mov_abs(thunk_buf, thunk_buf_size, &offset, 16, continue_addr) != 0 ||
-        zt_emit_u32(thunk_buf, thunk_buf_size, &offset, 0xD61F0200u) != 0) { /* br x16 */
+    if (zt_emit_mov_abs(trampoline_buf, trampoline_buf_size, &offset, 16, continue_addr) != 0 ||
+        zt_emit_u32(trampoline_buf, trampoline_buf_size, &offset, 0xD61F0200u) != 0) { /* br x16 */
         return -1;
     }
 
-    *thunk_size_out = offset;
+    *trampoline_size_out = offset;
     return 0;
 }
