@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include <signal.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -44,6 +45,9 @@ int main(int argc, char **argv) {
     if (wait_env != NULL && strcmp(wait_env, "1") == 0) {
         sigset_t set;
         int sig;
+
+        /* Allow the external benchmark runner to ptrace-attach under Yama ptrace_scope=1. */
+        prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY, 0, 0, 0);
 
         sigemptyset(&set);
         sigaddset(&set, SIGUSR1);

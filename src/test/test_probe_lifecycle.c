@@ -184,9 +184,9 @@ static int run_conditional_probe(void) {
         goto cleanup_trace;
     }
 
-    if (strstr(log_text, "probe_fn01(rdi=0x0") != NULL ||
-        strstr(log_text, "probe_fn01(rdi=0x9") != NULL ||
-        strstr(log_text, "probe_fn01(rdi=0xa") == NULL) {
+    if (strstr(log_text, "probe_fn01(arg0=0x0") != NULL ||
+        strstr(log_text, "probe_fn01(arg0=0x9") != NULL ||
+        strstr(log_text, "probe_fn01(arg0=0xa") == NULL) {
         fprintf(stderr, "conditional probe log does not match arg0 >= 10\n");
         goto cleanup_trace;
     }
@@ -286,8 +286,8 @@ static int run_probe_filter_update(void) {
         goto cleanup_trace;
     }
 
-    if (strstr(log_text, "probe_fn01(rdi=0xe") != NULL ||
-        strstr(log_text, "probe_fn01(rdi=0xf") == NULL) {
+    if (strstr(log_text, "probe_fn01(arg0=0xe") != NULL ||
+        strstr(log_text, "probe_fn01(arg0=0xf") == NULL) {
         fprintf(stderr, "probe update log does not match arg0 >= 15\n");
         goto cleanup_trace;
     }

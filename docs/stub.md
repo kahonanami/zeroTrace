@@ -2,6 +2,18 @@
 
 本文专门说明 `zeroTrace` 中一次函数命中时，控制流如何从原函数入口跳到 thunk，再进入 `entry_stub`，以及如何在不破坏原函数栈语义的前提下劫持返回地址，让函数返回时再进入 `exit_stub`。
 
+当前代码结构中：
+
+- `x86_64` 相关实现位于 `src/isa/x86_64/`
+- `aarch64` 相关实现位于 `src/isa/aarch64/`
+
+其中每个架构目录都保持一致的文件划分：
+
+- `arch.c`
+- `thunk_manager.c`
+- `x86_64` 使用 `zt_stub.S`
+- `aarch64` 使用 `stub.S`
+
 ---
 
 ## 1. 总体思路
@@ -11,7 +23,7 @@
 1. 把原函数入口改写成一段固定长度的绝对跳转 patch
 2. 为这个 probe 准备一个专属 thunk
 
-原函数入口 patch 逻辑上等价于：
+`x86_64` 原函数入口 patch 逻辑上等价于：
 
 ```asm
 jmp qword ptr [rip + 0]
@@ -20,11 +32,21 @@ jmp qword ptr [rip + 0]
 
 也就是说，原函数一进入，就不再直接执行自身前导指令，而是先跳到 thunk。这个 14 字节模板不需要借用 `rax`，因此不会破坏可变参数函数依赖的 `al` 或其他寄存器状态。
 
+`aarch64` 入口 patch 逻辑上等价于：
+
+```asm
+ldr x16, #8
+br  x16
+.quad thunk_addr
+```
+
+这个模板使用 AAPCS64 中的 scratch register `x16/ip0`，跳转后原函数参数寄存器 `x0 ... x7` 和浮点参数寄存器 `d0 ... d7` 仍保持原值。
+
 ---
 
-## 2. thunk 做了什么
+## 2. `thunk`
 
-当前 thunk 的逻辑可以理解成：
+`x86_64` thunk 的逻辑可以理解成：
 
 ```asm
 push <probe_id>
@@ -61,9 +83,26 @@ jmp [continue_addr]
 2. 再补做原函数前导若干条被覆盖掉的指令
 3. 再跳回原函数剩余部分继续执行
 
+`aarch64` 没有像 x86 那样天然把返回地址放在栈上，函数返回地址通常在 `x30/lr` 中。因此 ARM64 thunk 会显式保存和改写 `x30`：
+
+```asm
+mov x15, x30          // 保存原始 LR
+mov x17, probe_id
+mov x16, entry_stub
+blr x16               // entry_stub 返回时，把 exit_stub 放到 x15
+mov x30, x15          // 让原函数最终 ret 到 exit_stub
+<relocated original instructions>
+mov x16, continue_addr
+br x16
+```
+
+也就是说，ARM64 的返回劫持不是改写调用者栈上的返回地址，而是把原函数继续执行前的 `x30` 改成 `exit_stub`。真实 LR 会被保存到 payload 的线程本地 shadow stack，`exit_stub` 记录返回值后再取出真实 LR 并 `ret` 回调用者。
+
 ---
 
-## 3. 为什么返回地址可以被劫持
+## 3. 返回地址劫持
+
+这一节先以 `x86_64` 为例说明栈上返回地址的改写方式；`aarch64` 的 LR 链路见第 7 节。
 
 关键点在于：
 
@@ -94,9 +133,9 @@ jmp continue_addr
 
 ---
 
-## 4. `entry_stub` 的栈布局
+## 4. `x86_64 entry_stub`
 
-当前 `entry_stub` 的代码主干是：
+当前 `x86_64 entry_stub` 的代码主干是：
 
 ```asm
 entry_stub:
@@ -144,8 +183,6 @@ push r15
 
 所以 `PUSH_ALL` 之后，`rsp` 指向的是保存下来的 `r15`，整个保存区可以被当作一个连续的上下文结构来看。
 
-在当前实现里，`ctx_t` 的逻辑布局与这段保存区一一对应：
-
 ```text
 offset +0x00 : r15
 offset +0x08 : r14
@@ -162,10 +199,9 @@ offset +0x58 : rdx
 offset +0x60 : rcx
 offset +0x68 : rbx
 offset +0x70 : rax
-offset +0x78 : rflags
+offset +0x78 : status_flags
 offset +0x80 : thunk_ret_addr
 offset +0x88 : func_id
-offset +0x90 : real return address
 ```
 
 这里有两个特别重要的槽位：
@@ -175,7 +211,6 @@ offset +0x90 : real return address
 
 - `[r12 + 0x90]`
   这里是真实调用者压入的原始返回地址
-  `entry_stub` 会把它保存到 TLS shadow stack，并改写成 `exit_stub`
 
 可以把 `entry_stub` 中 `PUSH_ALL` 之后、但还没改写返回地址之前的栈理解成下面这样：
 
@@ -185,7 +220,7 @@ offset +0x90 : real return address
 │  [r12 + 0x90]  真实调用者的原始返回地址
 │  [r12 + 0x88]  probe_id（由 thunk 里的 push <probe_id> 压入）
 │  [r12 + 0x80]  thunk 中 call entry_stub 的返回地址
-│  [r12 + 0x78]  rflags
+│  [r12 + 0x78]  status_flags
 │  [r12 + 0x70]  rax
 │  [r12 + 0x68]  rbx
 │  [r12 + 0x60]  rcx
@@ -210,7 +245,7 @@ offset +0x90 : real return address
 1. `call zt_handle_entry`
    - 把当前保存区当成 `ctx_t *` 传给 C handler
    - C handler 直接从保存区里读取参数寄存器值
-   - 调用 C handler 前已经通过 `fxsave64` 保存浮点/SIMD 上下文，并把 `fxsave64` 区域地址作为第二个参数传入，用于读取 `xmm0 ... xmm7`
+   - 调用 C handler 前已经通过 `fxsave64` 保存浮点/SIMD 上下文，并把这块通用 `fp_state_area` 的地址作为第二个参数传入，用于读取前 8 个浮点参数槽
 
 2. `call save_probe_frame_c`
    - `rdi = [r12 + 0x90]`，也就是真实返回地址
@@ -239,11 +274,11 @@ jmp continue_addr
 
 真正等到原函数跑完执行 `ret` 时，才会跳进 `exit_stub`。
 
-`SAVE_FP` / `RESTORE_FP` 会在当前栈下方临时开出一块 16 字节对齐的 512 字节区域，执行 `fxsave64 [rsp]` 和 `fxrstor64 [rsp]`。这样不会改变 `ctx_t` 的偏移布局，同时可以保护 x87、MMX、XMM 和 MXCSR 状态。需要注意的是，`fxsave64` 不覆盖 AVX YMM 寄存器的高 128 位；如果后续要完整支持 AVX，需要升级为 `xsave/xrstor`。
+`SAVE_FP` / `RESTORE_FP` 会在当前栈下方临时开出一块 16 字节对齐的 512 字节区域，执行 `fxsave64 [rsp]` 和 `fxrstor64 [rsp]`。payload 侧把它统一当作 `fp_state_area` 读取，因此不会把 x86 的 `fxsave` 格式泄漏到上层事件接口。需要注意的是，`fxsave64` 不覆盖 AVX YMM 寄存器的高 128 位；如果后续要完整支持 AVX，需要升级为 `xsave/xrstor`。
 
 ---
 
-## 5. 为什么原函数本身不会出问题
+## 5. 原函数执行
 
 这里最容易误解的一点是：
 
@@ -255,7 +290,7 @@ jmp continue_addr
 
 - 参数寄存器已经恢复
 - 通用寄存器和 flags 已恢复
-- x87 / MMX / XMM 浮点和 SIMD 上下文已恢复
+- 对应架构的浮点和 SIMD 上下文已恢复
 - thunk 又把原函数前导指令补执行了一遍
 - 最后跳回 `func_addr + orig_len`
 
@@ -263,9 +298,9 @@ jmp continue_addr
 
 ---
 
-## 6. `exit_stub` 是怎么把返回链接回去的
+## 6. `x86_64 exit_stub`
 
-当前 `exit_stub` 的主干是：
+当前 `x86_64 exit_stub` 的主干是：
 
 ```asm
 exit_stub:
@@ -296,7 +331,7 @@ exit_stub:
 
 这里分成两步理解。
 
-### 6.1 先人为构造一段和 `entry_stub` 兼容的上下文
+### 6.1 上下文构造
 
 `exit_stub` 不是通过 `call` 进入的，而是原函数 `ret` 直接跳进来的。
 
@@ -311,13 +346,13 @@ exit_stub:
 这样就人为伪造出了一段和 `entry_stub` 类似的栈布局，使得：
 
 - `zt_handle_return` 仍然可以把当前 `rsp` 当成 `ctx_t *`
-- `zt_handle_return` 同样会收到当前 `fxsave64` 区域地址，用于读取 `xmm0` 浮点返回值
+- `zt_handle_return` 同样会收到当前 `fp_state_area` 地址，用于读取 `fp_args[0]` 对应的浮点返回值槽
 - `[rsp + 0x88]` 这一格先写入 `peek_probe_id_c()` 取回的 `probe_id`
 - 记录 return 事件之后，同一个 `[rsp + 0x88]` 槽位会被改写成真实返回地址
 
 这样 `zt_handle_return` 可以先用同一套 `ctx_t` 视图读到 `func_id`，最终 `ret` 又能从同一槽位拿回真实返回地址。
 
-### 6.2 再把真实返回地址写回占位槽
+### 6.2 返回地址恢复
 
 `entry_stub` 之前已经把原始返回地址保存在 TLS shadow stack 里了。  
 所以 `exit_stub` 在记录返回值之后，通过：
@@ -365,7 +400,7 @@ caller
 │  [r12 + 0x88]  预留的“最终 ret 使用的返回地址槽位”
 │                调 zt_handle_return 前写入 probe_id，之后改写成真实返回地址
 │  [r12 + 0x80]  占位槽，POP_ALL 后通过 lea rsp, [rsp + 8] 跳过
-│  [r12 + 0x78]  rflags
+│  [r12 + 0x78]  status_flags
 │  [r12 + 0x70]  rax
 │  [r12 + 0x68]  rbx
 │  [r12 + 0x60]  rcx
@@ -397,3 +432,226 @@ caller
 这样最后这个 `ret` 才会真正回到原始调用者，而不是停在 `exit_stub` 自己伪造的链条里。
 
 ---
+
+## 7. `aarch64`
+
+由于架构问题，ARM64 的返回链闭环和 `x86_64` 不一样，关键不在“改栈上的返回地址”，而在于：
+
+- thunk 先把原始 `x30/lr` 暂存在 `x15`
+- `entry_stub` 把这个真实 LR 写进 TLS shadow stack
+- `entry_stub` 返回 thunk 时，再把 `exit_stub` 地址放回 `x15`
+- thunk 执行 `mov x30, x15`
+- 原函数最终 `ret` 时，先跳进 `exit_stub`
+- `exit_stub` 再从 TLS shadow stack 取回真实 LR，写回 `x30`，最后 `ret` 回调用者
+
+也就是说，ARM64 的“返回地址劫持”发生在 `lr` 寄存器链路里，而不是发生在调用者栈槽里。
+
+### 7.1 `aarch64 thunk`
+
+当前 ARM64 thunk 的逻辑是：
+
+```asm
+mov x15, x30          // 保存原始 LR
+mov x17, probe_id     // 传递 probe id
+mov x16, entry_stub
+blr x16               // x30 会被改成 thunk 中下一条指令
+mov x30, x15          // entry_stub 返回后，x15 中已经变成 exit_stub
+<relocated original instructions>
+mov x16, continue_addr
+br x16
+```
+
+这里几个寄存器的职责要分开看：
+
+- `x30`
+  在 `blr x16` 时被硬件自动写成“回到 thunk 的返回地址”
+
+- `x15`
+  先装原始 LR，进入 `entry_stub` 后会被当作 `thunk_ret_addr` 保存；`entry_stub` 返回前再改成 `exit_stub`
+
+- `x17`
+  用来传 `probe_id`
+
+因此 `entry_stub` 看到的是两条独立链路：
+
+1. `x30` 是“stub 执行完后回 thunk 的地址”
+2. `x15` 是“原函数最终应该回调用者的真实 LR”
+
+### 7.2 `aarch64 entry_stub`
+
+当前 `src/isa/aarch64/stub.S` 的 `entry_stub` 主干是：
+
+```asm
+entry_stub:
+    sub sp, sp, #ZT_FRAME_SIZE
+    SAVE_GPRS
+    SAVE_FP_SNAPSHOT
+
+    add x19, sp, #ZT_FRAME_CTX_OFF
+    mrs x20, nzcv
+    str x0,  [x19, #ZT_CTX_GP_ARG0_OFF]
+    str x1,  [x19, #ZT_CTX_GP_ARG1_OFF]
+    str x2,  [x19, #ZT_CTX_GP_ARG2_OFF]
+    str x3,  [x19, #ZT_CTX_GP_ARG3_OFF]
+    str x4,  [x19, #ZT_CTX_GP_ARG4_OFF]
+    str x5,  [x19, #ZT_CTX_GP_ARG5_OFF]
+    str x20, [x19, #ZT_CTX_STATUS_FLAGS_OFF]
+    str x15, [x19, #ZT_CTX_SAVED_RET_OFF]
+    str x17, [x19, #ZT_CTX_FUNC_ID_OFF]
+
+    mov x0, x19
+    add x1, sp, #ZT_FRAME_FP_OFF
+    bl zt_handle_entry
+
+    ldr x0, [x19, #ZT_CTX_SAVED_RET_OFF]
+    ldr x1, [x19, #ZT_CTX_FUNC_ID_OFF]
+    bl save_probe_frame_c
+
+    RESTORE_FP_SNAPSHOT
+    ldr x20, [x19, #ZT_CTX_STATUS_FLAGS_OFF]
+    msr nzcv, x20
+    RESTORE_GPRS
+    adrp x15, exit_stub
+    add x15, x15, :lo12:exit_stub
+    add sp, sp, #ZT_FRAME_SIZE
+    ret
+```
+
+这段代码做了三件事：
+
+1. 把恢复执行所需的通用寄存器集合、`q0 ... q31`、`fpcr`、`fpsr` 和 `nzcv` 保存到固定栈帧，并单独整理 `x15/x17` 元信息
+2. 把 ABI 参数和元信息整理成一份兼容 `ctx_t` 的视图，交给 `zt_handle_entry()`
+3. 把“真实 LR + probe_id”压进 TLS shadow stack，随后把 `exit_stub` 地址带回 thunk
+
+`ctx_t` 里的参数/返回值字段已经统一成 ABI 槽位命名，在 `aarch64` 下直接映射到对应寄存器位置：
+
+- `context->gp_arg0 ... context->gp_arg5`
+  分别映射 `x0 ... x5`
+
+- `context->status_flags`
+  存的是 `nzcv`
+
+- `context->thunk_ret_addr`
+  在 ARM64 下实际存的是 thunk 传进来的“真实 LR”，也就是之前的 `x15`
+
+- `context->func_id`
+  存的是 `x17`
+
+stub 会在自己的栈帧里手工铺出一块兼容 payload 读取偏移的浮点快照区，并把 `q0 ... q31`、`fpcr`、`fpsr` 存进去
+
+### 7.3 `entry_stub` 返回路径
+
+`entry_stub` 里虽然把真实 LR 保存到了 TLS，并且准备把 `exit_stub` 带回去，但它自己执行完时并不会直接跳到 `exit_stub`。原因是：
+
+- `blr x16` 进入 `entry_stub` 时，硬件已经把 `x30` 写成了“thunk 中下一条指令地址”
+- `SAVE_GPRS` 把这个 `x30` 一并保存到了栈帧里
+- `RESTORE_GPRS` 会把这个值恢复回 `x30`
+- 最后的 `ret` 因此仍然回到 thunk，而不是回到调用者
+
+真正被改写的是 `x15`：
+
+```asm
+adrp x15, exit_stub
+add  x15, x15, :lo12:exit_stub
+ret
+```
+
+也就是：
+
+- `ret` 用 `x30` 回 thunk
+- `x15` 则把 `exit_stub` 地址带回 thunk
+
+因此 thunk 紧接着执行：
+
+```asm
+mov x30, x15
+```
+
+从这一刻开始，原函数未来的最终返回落点才变成 `exit_stub`。
+
+### 7.4 `aarch64 exit_stub`
+
+当前 `exit_stub` 主干是：
+
+```asm
+exit_stub:
+    sub sp, sp, #ZT_FRAME_SIZE
+    SAVE_GPRS
+    SAVE_FP_SNAPSHOT
+
+    add x19, sp, #ZT_FRAME_CTX_OFF
+    mrs x20, nzcv
+    str x0, [x19, #ZT_CTX_GP_RETVAL0_OFF]
+    str x20, [x19, #ZT_CTX_STATUS_FLAGS_OFF]
+
+    bl peek_probe_id_c
+    str x0, [x19, #ZT_CTX_FUNC_ID_OFF]
+
+    mov x0, x19
+    add x1, sp, #ZT_FRAME_FP_OFF
+    bl zt_handle_return
+
+    bl get_ret_addr_c
+    str x0, [sp, #ZT_FRAME_RETADDR_OFF]
+
+    RESTORE_FP_SNAPSHOT
+    ldr x20, [x19, #ZT_CTX_STATUS_FLAGS_OFF]
+    msr nzcv, x20
+    RESTORE_GPRS
+    ldr x30, [sp, #ZT_FRAME_RETADDR_OFF]
+    add sp, sp, #ZT_FRAME_SIZE
+    ret
+```
+
+这里的顺序是：
+
+1. 先保存当前返回现场
+   此时 `x0` 是整数 / 指针返回值，`d0` 在 `q0` 里；它们都先被保存进固定栈帧
+
+2. `peek_probe_id_c()`
+   从 TLS shadow stack 顶部读回当前 probe id，填进 `context->func_id`
+
+3. `zt_handle_return()`
+   记录 return 事件；整数返回值从 `context->gp_retval0` 读，浮点返回值从快照区对应的 `fp_args[0]` 槽读
+
+4. `get_ret_addr_c()`
+   从 TLS shadow stack 弹出真实 LR，并写到 `ZT_FRAME_RETADDR_OFF`
+
+5. 恢复寄存器 / 浮点状态后，把真实 LR 装回 `x30`
+
+6. `ret`
+   这次才真正回到原调用者
+
+注意这里的 `RESTORE_GPRS` 会先把保存下来的旧 `x30` 恢复回来，但这个值只是 `exit_stub` 自己入口时看到的 LR。紧接着：
+
+```asm
+ldr x30, [sp, #ZT_FRAME_RETADDR_OFF]
+```
+
+会再次覆盖成 TLS 中取回的真实 LR，所以最终返回目标仍然正确。
+
+### 7.5 `aarch64` 控制流
+
+把上面的链路合起来，就是：
+
+```text
+caller
+  -> patched function entry
+  -> aarch64 thunk
+  -> entry_stub
+  -> thunk
+  -> original function body, x30 = exit_stub
+  -> exit_stub
+  -> caller, x30 = original LR
+```
+
+如果只看“返回地址在哪一刻被改掉”，时间线可以再压缩成：
+
+1. 调用者正常 `bl target`
+2. thunk 先把原始 `x30` 备份到 `x15`
+3. `entry_stub` 把这个真实 LR 存进 TLS shadow stack
+4. `entry_stub` 返回前把 `exit_stub` 塞回 `x15`
+5. thunk 执行 `mov x30, x15`
+6. 原函数 `ret` 先到 `exit_stub`
+7. `exit_stub` 从 TLS 恢复真实 LR 到 `x30`
+8. `ret` 回调用者

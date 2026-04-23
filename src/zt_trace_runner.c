@@ -281,7 +281,7 @@ static void zt_dump_trace_events_since(zt_injector_session_t *session,
 
         if (event->event_type == ZT_TRACE_EVENT_ENTRY) {
             fprintf(out,
-                    "%s-%d/%llu [%03llu] %5llu.%09llu: ztrace:entry: %s(rdi=0x%llx, rsi=0x%llx, rdx=0x%llx, rcx=0x%llx, r8=0x%llx, r9=0x%llx)\n",
+                    "%s-%d/%llu [%03llu] %5llu.%09llu: ztrace:entry: %s(arg0=0x%llx, arg1=0x%llx, arg2=0x%llx, arg3=0x%llx, arg4=0x%llx, arg5=0x%llx)\n",
                     comm,
                     session->pid,
                     (unsigned long long)event->tid,
@@ -329,7 +329,6 @@ static int zt_setup_remote_payload(zt_injector_session_t *session,
                                    zt_runtime_state_t *runtime) {
     uint64_t remote_call_ret;
     zt_symbol_target_t target;
-    int embedded_payload;
 
     if (session == NULL || runtime == NULL) {
         return -1;
@@ -340,73 +339,59 @@ static int zt_setup_remote_payload(zt_injector_session_t *session,
         return -1;
     }
 
-    embedded_payload =
-        zt_find_remote_symbol_addr(session->pid,
-                                   session->exe_path,
-                                   "entry_stub",
-                                   &runtime->remote_entry_stub_addr) == 0 &&
-        zt_find_remote_symbol_addr(session->pid,
-                                   session->exe_path,
-                                   "zt_payload_init",
-                                   &runtime->remote_payload_init_addr) == 0;
+    memset(&target, 0, sizeof(target));
+    if (zt_resolve_symbol_target(session, "dlopen", &target) != 0) {
+        printf("Failed to resolve remote dlopen addr\n");
+        return -1;
+    }
+    runtime->remote_dlopen_addr = target.remote_addr;
+    printf("Remote dlopen addr: 0x%llx\n",
+           (unsigned long long)runtime->remote_dlopen_addr);
 
-    if (embedded_payload) {
-        printf("Using embedded payload from target executable\n");
-    } else {
-        memset(&target, 0, sizeof(target));
-        if (zt_resolve_symbol_target(session, "dlopen", &target) != 0) {
-            printf("Failed to resolve remote dlopen addr\n");
-            return -1;
-        }
-        runtime->remote_dlopen_addr = target.remote_addr;
-        printf("Remote dlopen addr: 0x%llx\n",
-               (unsigned long long)runtime->remote_dlopen_addr);
+    if (zt_remote_mmap(session->pid,
+                       strlen(runtime->payload_so_path) + 1,
+                       PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS,
+                       &runtime->remote_payload_path_addr) != 0) {
+        printf("Failed to mmap remote payload path\n");
+        return -1;
+    }
+    printf("Remote payload path addr: 0x%llx\n",
+           (unsigned long long)runtime->remote_payload_path_addr);
 
-        if (zt_remote_mmap(session->pid,
-                           strlen(runtime->payload_so_path) + 1,
-                           PROT_READ | PROT_WRITE,
-                           MAP_PRIVATE | MAP_ANONYMOUS,
-                           &runtime->remote_payload_path_addr) != 0) {
-            printf("Failed to mmap remote payload path\n");
-            return -1;
-        }
-        printf("Remote payload path addr: 0x%llx\n",
-               (unsigned long long)runtime->remote_payload_path_addr);
+    if (zt_write_remote_memory(session->pid,
+                               runtime->remote_payload_path_addr,
+                               runtime->payload_so_path,
+                               strlen(runtime->payload_so_path) + 1) != 0) {
+        printf("Failed to write remote payload path\n");
+        return -1;
+    }
 
-        if (zt_write_remote_memory(session->pid,
-                                   runtime->remote_payload_path_addr,
+    if (zt_remote_call2(session->pid,
+                        runtime->remote_dlopen_addr,
+                        runtime->remote_payload_path_addr,
+                        RTLD_NOW | RTLD_GLOBAL,
+                        &remote_call_ret) != 0 || remote_call_ret == 0) {
+        printf("Failed to call remote dlopen for %s\n", runtime->payload_so_path);
+        return -1;
+    }
+    printf("Remote dlopen handle: 0x%llx\n",
+           (unsigned long long)remote_call_ret);
+
+    if (zt_find_remote_symbol_addr(session->pid,
                                    runtime->payload_so_path,
-                                   strlen(runtime->payload_so_path) + 1) != 0) {
-            printf("Failed to write remote payload path\n");
-            return -1;
-        }
+                                   "entry_stub",
+                                   &runtime->remote_entry_stub_addr) != 0) {
+        printf("Failed to resolve remote entry_stub addr from %s\n", runtime->payload_so_path);
+        return -1;
+    }
 
-        if (zt_remote_call2(session->pid,
-                            runtime->remote_dlopen_addr,
-                            runtime->remote_payload_path_addr,
-                            RTLD_NOW | RTLD_GLOBAL,
-                            &remote_call_ret) != 0 || remote_call_ret == 0) {
-            printf("Failed to call remote dlopen for %s\n", runtime->payload_so_path);
-            return -1;
-        }
-        printf("Remote dlopen handle: 0x%llx\n",
-               (unsigned long long)remote_call_ret);
-
-        if (zt_find_remote_symbol_addr(session->pid,
-                                       runtime->payload_so_path,
-                                       "entry_stub",
-                                       &runtime->remote_entry_stub_addr) != 0) {
-            printf("Failed to resolve remote entry_stub addr from %s\n", runtime->payload_so_path);
-            return -1;
-        }
-
-        if (zt_find_remote_symbol_addr(session->pid,
-                                       runtime->payload_so_path,
-                                       "zt_payload_init",
-                                       &runtime->remote_payload_init_addr) != 0) {
-            printf("Failed to resolve remote zt_payload_init addr from %s\n", runtime->payload_so_path);
-            return -1;
-        }
+    if (zt_find_remote_symbol_addr(session->pid,
+                                   runtime->payload_so_path,
+                                   "zt_payload_init",
+                                   &runtime->remote_payload_init_addr) != 0) {
+        printf("Failed to resolve remote zt_payload_init addr from %s\n", runtime->payload_so_path);
+        return -1;
     }
 
     printf("Remote entry_stub addr: 0x%llx\n",

@@ -2,7 +2,7 @@
 
 > proj40 题目要求见 [题面.md](./docs/题面.md)
 
-`zeroTrace` 是一个基于 `ptrace` 的用户态函数追踪工具。它会通过 `dlopen` 把 `libzt_payload.so` 注入到目标进程，并搜索符号表给指定函数安装探针，通过 CLI 中持续输出函数入口参数和返回值。
+`zeroTrace` 是一个基于 `ptrace` 的用户态函数追踪工具。它会通过远程 `dlopen` 把 `libzt_payload.so` 注入到目标进程，并搜索符号表给指定函数安装探针，通过 CLI 中持续输出函数入口参数和返回值。
 
 ## 功能
 
@@ -32,6 +32,14 @@ sudo apt install build-essential libcapstone-dev libreadline-dev
 
 ```bash
 make
+```
+
+默认会根据当前机器选择架构后端；也可以显式指定：
+
+```bash
+make ARCH=x86_64
+make ARCH=aarch64
+make ARCH=aarch64 CC=aarch64-linux-gnu-gcc
 ```
 
 构建产物：
@@ -160,7 +168,7 @@ update add_loop clear
 
 当前条件表达式会把 `if` 后面的字符串作为完整布尔表达式解析。表达式支持：
 
-- `arg0` 到 `arg5`，对应 x86-64 SysV ABI 的 `rdi/rsi/rdx/rcx/r8/r9`
+- `arg0` 到 `arg5`，对应当前 ABI 的前 6 个整型 / 指针参数；`x86_64` 为 `rdi/rsi/rdx/rcx/r8/r9`，`aarch64` 为 `x0 ... x5`
 - 十进制和 `0x` 十六进制数字
 - 比较运算：`==`、`!=`、`>`、`>=`、`<`、`<=`
 - 布尔运算：`&&`、`||`、`!`
@@ -195,7 +203,7 @@ ztrace.1473057.log
 例如：
 
 ```text
-test_threaded_target-22520/22521 [010] 157114.775569202: ztrace:entry: thread_add(rdi=0x1, rsi=0x32, rdx=0x1, rcx=0x0, r8=0x0, r9=0x7f175be7d6c0)
+test_threaded_target-22520/22521 [010] 157114.775569202: ztrace:entry: thread_add(arg0=0x1, arg1=0x32, arg2=0x1, arg3=0x0, arg4=0x0, arg5=0x7f175be7d6c0)
 test_threaded_target-22520/22521 [010] 157114.775572037: ztrace:return: thread_add -> 0x33
 ```
 
@@ -206,7 +214,7 @@ test_threaded_target-22520/22521 [010] 157114.775572037: ztrace:return: thread_a
 - 该文件是一个从 `ltrace.conf` 思路适配而来的配置文件
 - 命中已配置函数时，会优先按签名格式化参数和返回值
 - 字符串中非打印字符会转义成 `\xNN`
-- `float` / `double` 参数和返回值会按 x86-64 SysV ABI 从 `xmm` 寄存器快照中解码
+- `float` / `double` 参数和返回值会按当前 ABI 从浮点寄存器快照中解码；`x86_64` 为 `xmm0 ... xmm7`，`aarch64` 为 `d0 ... d7`
 - 对配置中存在名为 `fmt` 的参数的可变参数函数，会根据 format string 展开仍在寄存器快照内的整型、指针和浮点可变参数
 
 `zttrace.conf` 使用简化版的函数签名语法，基本形式如下：
@@ -254,11 +262,12 @@ make test
 make benchmark
 ```
 
-脚本会自动完成三组测试：
+脚本会自动完成四组测试：
 
 - baseline：无探针
 - kernel uprobe：使用 `bpftrace` 挂 `bench_getpid`
 - zeroTrace：使用 `zeroTrace` 安装用户态 probe
+- probe lifecycle latency：测量安装/卸载延迟
 
 benchmark 目标函数是 `bench_getpid()`，它是测试程序中的一个 `noinline` wrapper，内部调用 `syscall(SYS_getpid)`，这样可以避免 libc/vDSO 细节干扰测量。
 
@@ -304,30 +313,9 @@ uninstall latency avg : 22006 ns (0.022 ms) over 1000 rounds
 - [x] 增强信号安全测试，覆盖目标进程收到异步信号时的 trace 行为
 - [x] 补充浮点寄存器 / SIMD 上下文保存与恢复验证
 - [x] 优化 `zt_trace_poll()` 的轮询策略，使用 `process_vm_readv` 非暂停读取 trace buffer
+- [x] 支持 ARM 架构
 
-## 项目结构
-
-- [src/zt_cli.c](./src/zt_cli.c)
-  CLI 命令入口
-- [src/zt_injector.c](./src/zt_injector.c)
-  `ptrace`、远程内存读写、远程调用、probe 管理
-- [src/zt_trace_runner.c](./src/zt_trace_runner.c)
-  payload 初始化、trace 轮询、probe 安装/卸载
-- [src/zt_thunk_manager.c](./src/zt_thunk_manager.c)
-  thunk 构造与远程 thunk pool 管理
-- [src/zt_payload.c](./src/zt_payload.c)
-  注入到目标进程中的 payload
-- [src/zt_stub.S](./src/zt_stub.S)
-  入口 / 返回 stub
-
-## 说明
-
-- 当前项目主要面向 `x86_64 Linux`
-- 已支持通过 `conf/zttrace.conf` 对常见 libc/POSIX 函数做签名感知格式化；未配置到的函数会回退到寄存器风格显示
-- 已支持保存 / 恢复通用寄存器、标志寄存器和浮点上下文，并支持 `float` / `double` 参数与返回值显示
-- 对复杂函数前导指令的支持依赖 Capstone 解析；如果函数入口包含当前未处理的情况，probe 安装可能失败
-
-更底层的设计说明可以参考：
+## 文档
 
 - [docs/framework.md](./docs/framework.md)
 - [docs/stub.md](./docs/stub.md)

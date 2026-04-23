@@ -1,4 +1,4 @@
-CC := gcc
+CC ?= gcc
 CFLAGS := -Wall -Wextra -g -Iinclude
 ASMFLAGS := -g -Wa,--noexecstack
 PIC_CFLAGS := $(CFLAGS) -fPIC
@@ -7,26 +7,56 @@ LDFLAGS_SO := -shared
 LDLIBS := -lcapstone -ldl -lreadline
 
 SRC_DIR := src
+ISA_DIR := $(SRC_DIR)/isa
+ISA_COMMON_DIR := $(ISA_DIR)/common
+ISA_X86_64_DIR := $(ISA_DIR)/x86_64
+ISA_AARCH64_DIR := $(ISA_DIR)/aarch64
 TEST_DIR := src/test
 BUILD_DIR := build
 BIN_DIR := bin
 TEST_BIN_DIR := $(BIN_DIR)/tests
+ARCH ?= $(shell uname -m)
 
-SRC_C := $(wildcard $(SRC_DIR)/*.c)
+ifeq ($(ARCH),x86_64)
+ARCH_SRC_C := $(ISA_X86_64_DIR)/arch.c $(ISA_X86_64_DIR)/thunk_manager.c
+ARCH_SRC_S := $(ISA_X86_64_DIR)/zt_stub.S
+else ifeq ($(ARCH),aarch64)
+ARCH_SRC_C := $(ISA_AARCH64_DIR)/arch.c $(ISA_AARCH64_DIR)/thunk_manager.c
+ARCH_SRC_S := $(ISA_AARCH64_DIR)/stub.S
+else
+$(error Unsupported ARCH=$(ARCH). Supported: x86_64 aarch64)
+endif
+
+SRC_C_ALL := \
+	$(wildcard $(SRC_DIR)/*.c) \
+	$(wildcard $(ISA_COMMON_DIR)/*.c) \
+	$(wildcard $(ISA_X86_64_DIR)/*.c) \
+	$(wildcard $(ISA_AARCH64_DIR)/*.c)
+SRC_C := $(filter-out \
+	$(ISA_X86_64_DIR)/arch.c \
+	$(ISA_AARCH64_DIR)/arch.c \
+	$(ISA_X86_64_DIR)/thunk_manager.c \
+	$(ISA_AARCH64_DIR)/thunk_manager.c, \
+	$(SRC_C_ALL)) $(ARCH_SRC_C)
 SRC_C_CORE := $(filter-out $(SRC_DIR)/zt_main.c, $(SRC_C))
-SRC_S := $(wildcard $(SRC_DIR)/*.S)
+SRC_S := $(ARCH_SRC_S)
 
-OBJ_CORE := $(patsubst $(SRC_DIR)/%.c, $(BUILD_DIR)/%.o, $(SRC_C_CORE)) \
-            $(patsubst $(SRC_DIR)/%.S, $(BUILD_DIR)/%.o, $(SRC_S))
+OBJ_CORE := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRC_C_CORE)) \
+            $(patsubst $(SRC_DIR)/%.S,$(BUILD_DIR)/%.o,$(SRC_S))
 
 OBJ_MAIN := $(BUILD_DIR)/zt_main.o
 
-TEST_C := $(wildcard $(TEST_DIR)/*.c)
+TEST_C_ALL := $(wildcard $(TEST_DIR)/*.c)
+ifeq ($(ARCH),aarch64)
+TEST_C := $(filter-out $(TEST_DIR)/test_thunk_builder.c,$(TEST_C_ALL))
+else
+TEST_C := $(filter-out $(TEST_DIR)/test_thunk_builder_aarch64.c,$(TEST_C_ALL))
+endif
 TEST_S := $(wildcard $(TEST_DIR)/*.S)
 
 OBJ_TEST_HELPERS := $(patsubst $(TEST_DIR)/%.S, $(BUILD_DIR)/%.o, $(TEST_S))
 PAYLOAD_SO := $(BIN_DIR)/libzt_payload.so
-PAYLOAD_PIC_OBJ := $(BUILD_DIR)/zt_payload.pic.o $(BUILD_DIR)/zt_stub.pic.o
+PAYLOAD_PIC_OBJ := $(BUILD_DIR)/zt_payload.pic.o $(patsubst $(SRC_DIR)/%.S,$(BUILD_DIR)/%.pic.o,$(ARCH_SRC_S))
 .PRECIOUS: $(BUILD_DIR)/%.o
 
 TEST_BINS := $(patsubst $(TEST_DIR)/%.c, $(TEST_BIN_DIR)/%, $(TEST_C))
@@ -69,6 +99,10 @@ run-tests:
 
 directories:
 	@mkdir -p $(BUILD_DIR)
+	@mkdir -p $(BUILD_DIR)/isa
+	@mkdir -p $(BUILD_DIR)/isa/common
+	@mkdir -p $(BUILD_DIR)/isa/x86_64
+	@mkdir -p $(BUILD_DIR)/isa/aarch64
 	@mkdir -p $(BIN_DIR)
 	@mkdir -p $(TEST_BIN_DIR)
 

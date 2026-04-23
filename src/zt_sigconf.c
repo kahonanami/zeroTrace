@@ -299,33 +299,19 @@ const zt_func_sig_t *zt_sigconf_find(const char *symbol) {
 }
 
 static uint64_t zt_event_arg_value(const zt_trace_event_t *event, int index) {
-    switch (index) {
-    case 0: return event->value0;
-    case 1: return event->value1;
-    case 2: return event->value2;
-    case 3: return event->value3;
-    case 4: return event->value4;
-    case 5: return event->value5;
-    default: return 0;
-    }
-}
-
-static uint64_t zt_event_fp_arg_value(const zt_trace_event_t *event, int index) {
-    if (event == NULL) {
+    if (event == NULL || index < 0 || index >= ZT_TRACE_GP_ARG_COUNT) {
         return 0;
     }
 
-    switch (index) {
-    case 0: return event->fp0;
-    case 1: return event->fp1;
-    case 2: return event->fp2;
-    case 3: return event->fp3;
-    case 4: return event->fp4;
-    case 5: return event->fp5;
-    case 6: return event->fp6;
-    case 7: return event->fp7;
-    default: return 0;
+    return event->args[index];
+}
+
+static uint64_t zt_event_fp_arg_value(const zt_trace_event_t *event, int index) {
+    if (event == NULL || index < 0 || index >= ZT_TRACE_FP_ARG_COUNT) {
+        return 0;
     }
+
+    return event->fp_args[index];
 }
 
 static int zt_event_arg_value_ext(const zt_trace_event_t *event,

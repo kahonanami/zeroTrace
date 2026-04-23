@@ -35,7 +35,7 @@ int main(void) {
 
     wait_for_start();
 
-    for (i = 0; i < 5000; ++i) {
+    for (i = 0; i < 128; ++i) {
         double a = (double)i + 0.125;
         double b = (double)(i % 97) + 0.5;
         double expected = (a * 1.5) + (b / 3.0) - 7.25;

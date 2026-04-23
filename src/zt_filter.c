@@ -42,15 +42,11 @@ static const zt_filter_op_rule_t k_one_char_ops[] = {
 #define ZT_ARRAY_LEN(x) (sizeof(x) / sizeof((x)[0]))
 
 static uint64_t zt_filter_event_arg(const zt_trace_event_t *event, uint64_t arg_index) {
-    switch (arg_index) {
-    case 0: return event->value0;
-    case 1: return event->value1;
-    case 2: return event->value2;
-    case 3: return event->value3;
-    case 4: return event->value4;
-    case 5: return event->value5;
-    default: return 0;
+    if (event == NULL || arg_index >= ZT_TRACE_GP_ARG_COUNT) {
+        return 0;
     }
+
+    return event->args[arg_index];
 }
 
 static const zt_probe_filter_token_t *zt_filter_peek(zt_filter_eval_t *ctx) {

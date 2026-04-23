@@ -31,6 +31,22 @@ def write_text(path: Path, data: str) -> None:
     path.write_text(data, encoding="utf-8")
 
 
+def find_uprobe_events_path() -> Path | None:
+    for candidate in (
+        Path("/sys/kernel/tracing/uprobe_events"),
+        Path("/sys/kernel/debug/tracing/uprobe_events"),
+    ):
+        proc = subprocess.run(
+            ["sudo", "-n", "test", "-e", str(candidate)],
+            cwd=ROOT_DIR,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if proc.returncode == 0:
+            return candidate
+    return None
+
+
 def extract_total_ns(text: str) -> int:
     match = re.search(r"\btotal_ns=(\d+)\b", text)
     if match is None:
@@ -44,6 +60,13 @@ def extract_latency_ns(text: str) -> tuple[int, int]:
     if install is None or uninstall is None:
         raise RuntimeError(f"failed to parse latency metrics from output:\n{text}")
     return int(install.group(1)), int(uninstall.group(1))
+
+
+def extract_bpftrace_count(text: str) -> int:
+    match = re.search(r"@n:\s*(\d+)", text)
+    if match is None:
+        raise RuntimeError(f"failed to parse bpftrace count from output:\n{text}")
+    return int(match.group(1))
 
 
 def run_and_capture(cmd, env=None) -> str:
@@ -174,6 +197,22 @@ def run_uprobe() -> int:
     bpftrace_proc.send_signal(signal.SIGINT)
     bpftrace_output, _ = bpftrace_proc.communicate(timeout=5.0)
 
+    if bpftrace_proc.returncode not in (0, 130):
+        raise RuntimeError(
+            f"bpftrace failed with code {bpftrace_proc.returncode} during uprobe benchmark:\n"
+            f"{bpftrace_output}"
+        )
+
+    if "ERROR:" in bpftrace_output:
+        raise RuntimeError(f"bpftrace reported an error during uprobe benchmark:\n{bpftrace_output}")
+
+    hit_count = extract_bpftrace_count(bpftrace_output)
+    if hit_count != ITERATIONS:
+        raise RuntimeError(
+            f"unexpected uprobe hit count: expected {ITERATIONS}, got {hit_count}\n"
+            f"{bpftrace_output}"
+        )
+
     write_text(UPROBE_TRACE_OUT, bpftrace_output)
     write_text(UPROBE_OUT, target_output)
     total_ns = extract_total_ns(target_output)
@@ -251,18 +290,44 @@ def run_latency() -> tuple[int, int]:
 
 
 def format_report(baseline_ns: int,
-                  uprobe_ns: int,
+                  uprobe_ns: int | None,
                   ztrace_ns: int,
                   install_ns: int,
-                  uninstall_ns: int) -> str:
+                  uninstall_ns: int,
+                  uprobe_skip_reason: str | None = None) -> str:
     baseline_per_call = baseline_ns / ITERATIONS
-    uprobe_per_call = uprobe_ns / ITERATIONS
     ztrace_per_call = ztrace_ns / ITERATIONS
 
-    uprobe_overhead = (uprobe_ns - baseline_ns) / ITERATIONS
     ztrace_overhead = (ztrace_ns - baseline_ns) / ITERATIONS
 
-    ztrace_vs_uprobe = uprobe_overhead / ztrace_overhead if ztrace_overhead > 0 else 0.0
+    if uprobe_ns is not None:
+        uprobe_per_call = uprobe_ns / ITERATIONS
+        uprobe_overhead = (uprobe_ns - baseline_ns) / ITERATIONS
+        ztrace_vs_uprobe = uprobe_overhead / ztrace_overhead if ztrace_overhead > 0 else 0.0
+        uprobe_section = (
+            f"uprobe total ns       : {uprobe_ns}\n"
+            f"uprobe per call       : {uprobe_per_call:.2f} ns\n"
+            f"uprobe overhead/call  : {uprobe_overhead:.2f} ns\n"
+            f"ztrace vs uprobe      : {ztrace_vs_uprobe:.2f}x lower overhead\n"
+        )
+        uprobe_file_lines = (
+            f"uprobe output   : {UPROBE_OUT}\n"
+            f"uprobe trace    : {UPROBE_TRACE_OUT}\n"
+        )
+    else:
+        if uprobe_skip_reason is None:
+            uprobe_skip_reason = "kernel uprobe benchmark skipped"
+        uprobe_section = (
+            "uprobe total ns       : skipped\n"
+            f"uprobe note           : {uprobe_skip_reason}\n"
+            "uprobe per call       : skipped\n"
+            "uprobe overhead/call  : skipped\n"
+            "ztrace vs uprobe      : skipped\n"
+        )
+        uprobe_file_lines = (
+            "uprobe output   : skipped\n"
+            "uprobe trace    : skipped\n"
+        )
 
     return (
         "Benchmark report\n"
@@ -270,13 +335,11 @@ def format_report(baseline_ns: int,
         f"iterations            : {ITERATIONS}\n"
         f"baseline total ns     : {baseline_ns}\n"
         f"baseline per call     : {baseline_per_call:.2f} ns\n"
-        f"uprobe total ns       : {uprobe_ns}\n"
-        f"uprobe per call       : {uprobe_per_call:.2f} ns\n"
-        f"uprobe overhead/call  : {uprobe_overhead:.2f} ns\n"
+        f"{uprobe_section}"
         f"ztrace total ns       : {ztrace_ns}\n"
         f"ztrace per call       : {ztrace_per_call:.2f} ns\n"
         f"ztrace overhead/call  : {ztrace_overhead:.2f} ns\n"
-        f"ztrace vs uprobe      : {ztrace_vs_uprobe:.2f}x lower overhead\n\n"
+        "\n"
         "Probe lifecycle latency\n"
         "-----------------------\n"
         f"install latency avg   : {install_ns} ns ({install_ns / 1000000.0:.3f} ms) over {LATENCY_ROUNDS} rounds\n"
@@ -284,8 +347,7 @@ def format_report(baseline_ns: int,
         "Files\n"
         "-----\n"
         f"baseline output : {BASELINE_OUT}\n"
-        f"uprobe output   : {UPROBE_OUT}\n"
-        f"uprobe trace    : {UPROBE_TRACE_OUT}\n"
+        f"{uprobe_file_lines}"
         f"ztrace output   : {ZTRACE_OUT}\n"
         f"ztrace runner   : {ZTRACE_RUNNER_OUT}\n"
         f"ztrace trace log : {ZTRACE_LOG_OUT}\n"
@@ -321,11 +383,32 @@ def main() -> int:
     ensure_sudo()
 
     baseline_ns = run_baseline()
-    uprobe_ns = run_uprobe()
+
+    uprobe_skip_reason = None
+    uprobe_events_path = find_uprobe_events_path()
+    if uprobe_events_path is None:
+        uprobe_ns = None
+        uprobe_skip_reason = (
+            "kernel uprobe benchmark unsupported: "
+            "no uprobe_events interface under /sys/kernel/tracing or /sys/kernel/debug/tracing"
+        )
+        print("[2/3] Skipping kernel uprobe benchmark...")
+        print(f"  - {uprobe_skip_reason}")
+    else:
+        print(f"  - detected uprobe_events at {uprobe_events_path}")
+        uprobe_ns = run_uprobe()
+
     ztrace_ns = run_ztrace()
     install_ns, uninstall_ns = run_latency()
 
-    report = format_report(baseline_ns, uprobe_ns, ztrace_ns, install_ns, uninstall_ns)
+    report = format_report(
+        baseline_ns,
+        uprobe_ns,
+        ztrace_ns,
+        install_ns,
+        uninstall_ns,
+        uprobe_skip_reason=uprobe_skip_reason,
+    )
     write_text(REPORT_OUT, report)
     print()
     print(report, end="")
