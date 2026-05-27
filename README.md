@@ -286,27 +286,27 @@ benchmark 目标函数是 `bench_getpid()`，它是测试程序中的一个 `noi
 
 ```text
 iterations            : 1000000
-baseline total ns     : 66624927
-baseline per call     : 66.62 ns
-uprobe total ns       : 2083309485
-uprobe per call       : 2083.31 ns
-uprobe overhead/call  : 2016.68 ns
-ztrace total ns       : 228685596
-ztrace per call       : 228.69 ns
-ztrace overhead/call  : 162.06 ns
-ztrace vs uprobe      : 12.44x lower overhead
+baseline total ns     : 67149375
+baseline per call     : 67.15 ns
+uprobe total ns       : 2029606250
+uprobe per call       : 2029.61 ns
+uprobe overhead/call  : 1962.46 ns
+ztrace total ns       : 368134041
+ztrace per call       : 368.13 ns
+ztrace overhead/call  : 300.98 ns
+ztrace vs uprobe      : 6.52x lower overhead
 
 Probe lifecycle latency
 -----------------------
-install latency avg   : 265480 ns (0.265 ms) over 1000 rounds
-uninstall latency avg : 22006 ns (0.022 ms) over 1000 rounds
+install latency avg   : 252122 ns (0.252 ms) over 1000 rounds
+uninstall latency avg : 20732 ns (0.021 ms) over 1000 rounds
 ```
 
 从这组数据可以看到：
 
-- `zeroTrace` 单次额外开销约为 `162.06 ns`，明显低于题目要求的 `< 1000 ns`
-- `probe` 安装延迟平均约为 `0.265 ms`，清理延迟平均约为 `0.022 ms`，都低于题目要求的 `< 10 ms`
-- 相比 `uprobe`，额外开销约低 `12.44x`
+- `zeroTrace` 单次额外开销约为 `300.98 ns`，明显低于题目要求的 `< 1000 ns`
+- `probe` 安装延迟平均约为 `0.252 ms`，清理延迟平均约为 `0.021 ms`，都低于题目要求的 `< 10 ms`
+- 相比 `uprobe`，额外开销约低 `6.52x`
 
 ## TODO List
 
