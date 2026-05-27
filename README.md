@@ -1,6 +1,6 @@
 # zeroTrace: A Lightweight Dynamic probe for User Space
 
-> proj40 题目要求见 [题面.md](./docs/题面.md)
+> proj40 题目要求见 [project-requirements.md](./docs/project-requirements.md)
 
 `zeroTrace` 是一个基于 `ptrace` 的用户态函数追踪工具。它会通过远程 `dlopen` 把 `libzt_payload.so` 注入到目标进程，并搜索符号表给指定函数安装探针，通过 CLI 中持续输出函数入口参数和返回值。
 
@@ -246,7 +246,7 @@ make test
 当前测试覆盖：
 
 - 通用寄存器、flags、浮点/SIMD 上下文保存恢复
-- thunk 构造
+- trampoline 构造
 - libc/POSIX 动态库函数 trace
 - 16 个并发 probe 的生命周期测试
 - 多线程目标函数追踪稳定性测试
@@ -286,27 +286,27 @@ benchmark 目标函数是 `bench_getpid()`，它是测试程序中的一个 `noi
 
 ```text
 iterations            : 1000000
-baseline total ns     : 66624927
-baseline per call     : 66.62 ns
-uprobe total ns       : 2083309485
-uprobe per call       : 2083.31 ns
-uprobe overhead/call  : 2016.68 ns
-ztrace total ns       : 228685596
-ztrace per call       : 228.69 ns
-ztrace overhead/call  : 162.06 ns
-ztrace vs uprobe      : 12.44x lower overhead
+baseline total ns     : 67149375
+baseline per call     : 67.15 ns
+uprobe total ns       : 2029606250
+uprobe per call       : 2029.61 ns
+uprobe overhead/call  : 1962.46 ns
+ztrace total ns       : 368134041
+ztrace per call       : 368.13 ns
+ztrace overhead/call  : 300.98 ns
+ztrace vs uprobe      : 6.52x lower overhead
 
 Probe lifecycle latency
 -----------------------
-install latency avg   : 265480 ns (0.265 ms) over 1000 rounds
-uninstall latency avg : 22006 ns (0.022 ms) over 1000 rounds
+install latency avg   : 252122 ns (0.252 ms) over 1000 rounds
+uninstall latency avg : 20732 ns (0.021 ms) over 1000 rounds
 ```
 
 从这组数据可以看到：
 
-- `zeroTrace` 单次额外开销约为 `162.06 ns`，明显低于题目要求的 `< 1000 ns`
-- `probe` 安装延迟平均约为 `0.265 ms`，清理延迟平均约为 `0.022 ms`，都低于题目要求的 `< 10 ms`
-- 相比 `uprobe`，额外开销约低 `12.44x`
+- `zeroTrace` 单次额外开销约为 `300.98 ns`，明显低于题目要求的 `< 1000 ns`
+- `probe` 安装延迟平均约为 `0.252 ms`，清理延迟平均约为 `0.021 ms`，都低于题目要求的 `< 10 ms`
+- 相比 `uprobe`，额外开销约低 `6.52x`
 
 ## TODO List
 
@@ -317,5 +317,5 @@ uninstall latency avg : 22006 ns (0.022 ms) over 1000 rounds
 
 ## 文档
 
-- [docs/framework.md](./docs/framework.md)
-- [docs/stub.md](./docs/stub.md)
+- [docs/architecture.md](./docs/architecture.md)
+- [docs/stub-control-flow.md](./docs/stub-control-flow.md)

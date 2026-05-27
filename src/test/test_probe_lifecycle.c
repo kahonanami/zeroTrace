@@ -217,8 +217,8 @@ static int run_probe_filter_update(void) {
     zt_probe_info_t *probe;
     char *log_text = NULL;
     char log_path[256];
-    uint64_t thunk_addr;
-    int thunk_slot;
+    uint64_t trampoline_addr;
+    int trampoline_slot;
     pid_t child;
     int entry_count;
     int rc = 1;
@@ -248,8 +248,8 @@ static int run_probe_filter_update(void) {
         goto cleanup_trace;
     }
 
-    thunk_addr = probe->thunk_addr;
-    thunk_slot = probe->thunk_slot;
+    trampoline_addr = probe->trampoline_addr;
+    trampoline_slot = probe->trampoline_slot;
 
     if (zt_trace_update_probe_filter(&session, probe->probe_id, NULL) != 0 ||
         zt_trace_update_probe_filter(&session, probe->probe_id, &updated_filter) != 0) {
@@ -257,10 +257,10 @@ static int run_probe_filter_update(void) {
         goto cleanup_trace;
     }
 
-    if (probe->thunk_addr != thunk_addr ||
-        probe->thunk_slot != thunk_slot ||
+    if (probe->trampoline_addr != trampoline_addr ||
+        probe->trampoline_slot != trampoline_slot ||
         probe->state != ZT_PROBE_INSTALLED) {
-        fprintf(stderr, "probe update unexpectedly rebuilt thunk or changed state\n");
+        fprintf(stderr, "probe update unexpectedly rebuilt trampoline or changed state\n");
         goto cleanup_trace;
     }
 

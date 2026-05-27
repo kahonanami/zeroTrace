@@ -5,15 +5,15 @@
 
 #include <capstone/capstone.h>
 
-#include "../../../include/zt_thunk_manager.h"
+#include "../../../include/zt_trampoline_manager.h"
 
-static const uint8_t ZT_THUNK_TEMPLATE_PREFIX[] = {
+static const uint8_t ZT_TRAMPOLINE_TEMPLATE_PREFIX[] = {
     0x68, 0x00, 0x00, 0x00, 0x00,       /* push imm32 */
     0xFF, 0x15, 0x00, 0x00, 0x00, 0x00, /* call qword ptr [rip + disp32] */
     0x48, 0x8D, 0x64, 0x24, 0x08,       /* lea rsp, [rsp + 8] */
 };
 
-static const uint8_t ZT_THUNK_TEMPLATE_SUFFIX[] = {
+static const uint8_t ZT_TRAMPOLINE_TEMPLATE_SUFFIX[] = {
     0xFF, 0x25, 0x00, 0x00, 0x00, 0x00, /* jmp qword ptr [rip + disp32] */
     /* .quad entry_stub_addr */
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -188,7 +188,7 @@ static int zt_rewrite_cond_jmp(uint8_t *buf,
 }
 
 static int zt_emit_relocated_orig_code(const zt_probe_info_t *probe,
-                                       uint64_t thunk_code_addr,
+                                       uint64_t trampoline_code_addr,
                                        uint8_t *buf,
                                        size_t buf_size,
                                        size_t *emitted_size_out) {
@@ -272,7 +272,7 @@ static int zt_emit_relocated_orig_code(const zt_probe_info_t *probe,
                     uint64_t old_next = cur->address + cur->size;
                     int64_t old_disp = x86->disp;
                     uint64_t old_target = (uint64_t)((int64_t)old_next + old_disp);
-                    uint64_t new_next = thunk_code_addr + insn_offset + cur->size;
+                    uint64_t new_next = trampoline_code_addr + insn_offset + cur->size;
                     int64_t new_disp = (int64_t)old_target - (int64_t)new_next;
 
                     if (zt_patch_disp32(buf,
@@ -302,12 +302,12 @@ fail:
     return -1;
 }
 
-int zt_build_thunk(const zt_probe_info_t *probe,
+int zt_build_trampoline(const zt_probe_info_t *probe,
                    uint64_t entry_stub_addr,
-                   uint64_t thunk_addr,
-                   uint8_t *thunk_buf,
-                   size_t thunk_buf_size,
-                   size_t *thunk_size_out) {
+                   uint64_t trampoline_addr,
+                   uint8_t *trampoline_buf,
+                   size_t trampoline_buf_size,
+                   size_t *trampoline_size_out) {
     size_t offset;
     size_t needed_size;
     size_t relocated_size;
@@ -317,7 +317,7 @@ int zt_build_thunk(const zt_probe_info_t *probe,
     int32_t call_disp;
     int32_t jmp_disp;
 
-    if (probe == NULL || thunk_buf == NULL || thunk_size_out == NULL || thunk_addr == 0) {
+    if (probe == NULL || trampoline_buf == NULL || trampoline_size_out == NULL || trampoline_addr == 0) {
         return -1;
     }
 
@@ -328,61 +328,61 @@ int zt_build_thunk(const zt_probe_info_t *probe,
     continue_addr = probe->target.remote_addr + probe->orig_len;
     offset = 0;
 
-    memset(thunk_buf, 0x90, thunk_buf_size);
+    memset(trampoline_buf, 0x90, trampoline_buf_size);
 
-    if (zt_emit_bytes(thunk_buf,
-                      thunk_buf_size,
+    if (zt_emit_bytes(trampoline_buf,
+                      trampoline_buf_size,
                       &offset,
-                      ZT_THUNK_TEMPLATE_PREFIX,
-                      sizeof(ZT_THUNK_TEMPLATE_PREFIX)) != 0) {
+                      ZT_TRAMPOLINE_TEMPLATE_PREFIX,
+                      sizeof(ZT_TRAMPOLINE_TEMPLATE_PREFIX)) != 0) {
         return -1;
     }
 
     {
         uint32_t probe_id = (uint32_t)probe->probe_id;
-        memcpy(thunk_buf + 1, &probe_id, sizeof(probe_id));
+        memcpy(trampoline_buf + 1, &probe_id, sizeof(probe_id));
     }
 
     if (zt_emit_relocated_orig_code(probe,
-                                    thunk_addr + sizeof(ZT_THUNK_TEMPLATE_PREFIX),
-                                    thunk_buf + offset,
-                                    thunk_buf_size - offset,
+                                    trampoline_addr + sizeof(ZT_TRAMPOLINE_TEMPLATE_PREFIX),
+                                    trampoline_buf + offset,
+                                    trampoline_buf_size - offset,
                                     &relocated_size) != 0) {
         return -1;
     }
     offset += relocated_size;
 
-    if (zt_emit_bytes(thunk_buf,
-                      thunk_buf_size,
+    if (zt_emit_bytes(trampoline_buf,
+                      trampoline_buf_size,
                       &offset,
-                      ZT_THUNK_TEMPLATE_SUFFIX,
-                      sizeof(ZT_THUNK_TEMPLATE_SUFFIX)) != 0) {
+                      ZT_TRAMPOLINE_TEMPLATE_SUFFIX,
+                      sizeof(ZT_TRAMPOLINE_TEMPLATE_SUFFIX)) != 0) {
         return -1;
     }
 
-    needed_size = sizeof(ZT_THUNK_TEMPLATE_PREFIX) + relocated_size + sizeof(ZT_THUNK_TEMPLATE_SUFFIX);
+    needed_size = sizeof(ZT_TRAMPOLINE_TEMPLATE_PREFIX) + relocated_size + sizeof(ZT_TRAMPOLINE_TEMPLATE_SUFFIX);
     if (offset != needed_size) {
         return -1;
     }
 
-    entry_slot_offset = sizeof(ZT_THUNK_TEMPLATE_PREFIX) + relocated_size + 6u;
+    entry_slot_offset = sizeof(ZT_TRAMPOLINE_TEMPLATE_PREFIX) + relocated_size + 6u;
     continue_slot_offset = entry_slot_offset + 8u;
 
     call_disp = (int32_t)(entry_slot_offset - 11u);
-    memcpy(thunk_buf + 7, &call_disp, sizeof(call_disp));
+    memcpy(trampoline_buf + 7, &call_disp, sizeof(call_disp));
 
-    jmp_disp = (int32_t)(continue_slot_offset - (sizeof(ZT_THUNK_TEMPLATE_PREFIX) + relocated_size + 6u));
-    memcpy(thunk_buf + sizeof(ZT_THUNK_TEMPLATE_PREFIX) + relocated_size + 2,
+    jmp_disp = (int32_t)(continue_slot_offset - (sizeof(ZT_TRAMPOLINE_TEMPLATE_PREFIX) + relocated_size + 6u));
+    memcpy(trampoline_buf + sizeof(ZT_TRAMPOLINE_TEMPLATE_PREFIX) + relocated_size + 2,
            &jmp_disp,
            sizeof(jmp_disp));
 
-    memcpy(thunk_buf + sizeof(ZT_THUNK_TEMPLATE_PREFIX) + relocated_size + 6,
+    memcpy(trampoline_buf + sizeof(ZT_TRAMPOLINE_TEMPLATE_PREFIX) + relocated_size + 6,
            &entry_stub_addr,
            sizeof(entry_stub_addr));
-    memcpy(thunk_buf + sizeof(ZT_THUNK_TEMPLATE_PREFIX) + relocated_size + 14,
+    memcpy(trampoline_buf + sizeof(ZT_TRAMPOLINE_TEMPLATE_PREFIX) + relocated_size + 14,
            &continue_addr,
            sizeof(continue_addr));
 
-    *thunk_size_out = offset;
+    *trampoline_size_out = offset;
     return 0;
 }

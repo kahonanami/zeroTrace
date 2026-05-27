@@ -750,3 +750,8 @@ void zt_cli_main_loop(void) {
         }
     }
 }
+
+int __attribute__((weak)) main(void) {
+    zt_cli_main_loop();
+    return 0;
+}

@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../../include/zt_thunk_manager.h"
+#include "../../include/zt_trampoline_manager.h"
 
 enum {
     kInsnSize = 4,
@@ -68,31 +68,31 @@ static int expect_mov_abs_at(const uint8_t *buf,
 }
 
 static int check_common_layout(const zt_probe_info_t *probe,
-                               const uint8_t *thunk,
+                               const uint8_t *trampoline,
                                size_t relocated_size,
                                uint64_t entry_stub_addr) {
     uint64_t continue_addr = probe->target.remote_addr + probe->orig_len;
     size_t tail_offset = kPrefixSize + relocated_size;
 
-    if (expect_u32_at(thunk, 0, 0xAA1E03EFu, "missing mov x15, x30 in thunk prefix") != 0 ||
-        expect_mov_abs_at(thunk,
+    if (expect_u32_at(trampoline, 0, 0xAA1E03EFu, "missing mov x15, x30 in trampoline prefix") != 0 ||
+        expect_mov_abs_at(trampoline,
                           4,
                           17,
                           probe->probe_id,
-                          "wrong mov_abs x17 probe id in thunk prefix") != 0 ||
-        expect_mov_abs_at(thunk,
+                          "wrong mov_abs x17 probe id in trampoline prefix") != 0 ||
+        expect_mov_abs_at(trampoline,
                           20,
                           16,
                           entry_stub_addr,
-                          "wrong mov_abs x16 entry stub in thunk prefix") != 0 ||
-        expect_u32_at(thunk, 36, 0xD63F0200u, "missing blr x16 in thunk prefix") != 0 ||
-        expect_u32_at(thunk, 40, 0xAA0F03FEu, "missing mov x30, x15 after entry call") != 0 ||
-        expect_mov_abs_at(thunk,
+                          "wrong mov_abs x16 entry stub in trampoline prefix") != 0 ||
+        expect_u32_at(trampoline, 36, 0xD63F0200u, "missing blr x16 in trampoline prefix") != 0 ||
+        expect_u32_at(trampoline, 40, 0xAA0F03FEu, "missing mov x30, x15 after entry call") != 0 ||
+        expect_mov_abs_at(trampoline,
                           tail_offset,
                           16,
                           continue_addr,
-                          "wrong mov_abs x16 continue addr in thunk tail") != 0 ||
-        expect_u32_at(thunk, tail_offset + 16, 0xD61F0200u, "missing br x16 in thunk tail") != 0) {
+                          "wrong mov_abs x16 continue addr in trampoline tail") != 0 ||
+        expect_u32_at(trampoline, tail_offset + 16, 0xD61F0200u, "missing br x16 in trampoline tail") != 0) {
         return -1;
     }
 
@@ -101,8 +101,8 @@ static int check_common_layout(const zt_probe_info_t *probe,
 
 static int test_plain_copy(void) {
     zt_probe_info_t probe = {0};
-    uint8_t thunk[ZT_THUNK_MAX_SIZE];
-    size_t thunk_size;
+    uint8_t trampoline[ZT_TRAMPOLINE_MAX_SIZE];
+    size_t trampoline_size;
     size_t relocated_size;
     static const uint8_t kOrig[] = {
         0x1F, 0x20, 0x03, 0xD5, /* nop */
@@ -114,26 +114,26 @@ static int test_plain_copy(void) {
     probe.orig_len = sizeof(kOrig);
     memcpy(probe.orig_code, kOrig, sizeof(kOrig));
 
-    if (zt_build_thunk(&probe, 0x500000, 0x700000, thunk, sizeof(thunk), &thunk_size) != 0) {
-        return fail_msg("zt_build_thunk failed for aarch64 plain copy");
+    if (zt_build_trampoline(&probe, 0x500000, 0x700000, trampoline, sizeof(trampoline), &trampoline_size) != 0) {
+        return fail_msg("zt_build_trampoline failed for aarch64 plain copy");
     }
 
-    relocated_size = thunk_size - kPrefixSize - kTailSize;
+    relocated_size = trampoline_size - kPrefixSize - kTailSize;
     if (relocated_size != sizeof(kOrig)) {
         return fail_msg("unexpected relocated size for aarch64 plain copy");
     }
 
-    if (memcmp(thunk + kPrefixSize, kOrig, sizeof(kOrig)) != 0) {
+    if (memcmp(trampoline + kPrefixSize, kOrig, sizeof(kOrig)) != 0) {
         return fail_msg("plain aarch64 instructions were not copied verbatim");
     }
 
-    return check_common_layout(&probe, thunk, relocated_size, 0x500000);
+    return check_common_layout(&probe, trampoline, relocated_size, 0x500000);
 }
 
 static int test_adr_rewrite(void) {
     zt_probe_info_t probe = {0};
-    uint8_t thunk[ZT_THUNK_MAX_SIZE];
-    size_t thunk_size;
+    uint8_t trampoline[ZT_TRAMPOLINE_MAX_SIZE];
+    size_t trampoline_size;
     size_t relocated_size;
     uint64_t target_addr;
     static const uint8_t kOrig[] = {0xC3, 0x00, 0x00, 0x10}; /* adr x3, +0x18 */
@@ -143,17 +143,17 @@ static int test_adr_rewrite(void) {
     probe.orig_len = sizeof(kOrig);
     memcpy(probe.orig_code, kOrig, sizeof(kOrig));
 
-    if (zt_build_thunk(&probe, 0x500000, 0x700000, thunk, sizeof(thunk), &thunk_size) != 0) {
-        return fail_msg("zt_build_thunk failed for aarch64 adr rewrite");
+    if (zt_build_trampoline(&probe, 0x500000, 0x700000, trampoline, sizeof(trampoline), &trampoline_size) != 0) {
+        return fail_msg("zt_build_trampoline failed for aarch64 adr rewrite");
     }
 
-    relocated_size = thunk_size - kPrefixSize - kTailSize;
+    relocated_size = trampoline_size - kPrefixSize - kTailSize;
     if (relocated_size != 16u) {
         return fail_msg("unexpected relocated size for aarch64 adr rewrite");
     }
 
     target_addr = probe.target.remote_addr + 0x18u;
-    if (expect_mov_abs_at(thunk,
+    if (expect_mov_abs_at(trampoline,
                           kPrefixSize,
                           3,
                           target_addr,
@@ -161,13 +161,13 @@ static int test_adr_rewrite(void) {
         return -1;
     }
 
-    return check_common_layout(&probe, thunk, relocated_size, 0x500000);
+    return check_common_layout(&probe, trampoline, relocated_size, 0x500000);
 }
 
 static int test_bl_rewrite(void) {
     zt_probe_info_t probe = {0};
-    uint8_t thunk[ZT_THUNK_MAX_SIZE];
-    size_t thunk_size;
+    uint8_t trampoline[ZT_TRAMPOLINE_MAX_SIZE];
+    size_t trampoline_size;
     size_t relocated_size;
     uint64_t target_addr;
     static const uint8_t kOrig[] = {0x05, 0x00, 0x00, 0x94}; /* bl +0x14 => target 0x18 */
@@ -177,32 +177,32 @@ static int test_bl_rewrite(void) {
     probe.orig_len = sizeof(kOrig);
     memcpy(probe.orig_code, kOrig, sizeof(kOrig));
 
-    if (zt_build_thunk(&probe, 0x500000, 0x700000, thunk, sizeof(thunk), &thunk_size) != 0) {
-        return fail_msg("zt_build_thunk failed for aarch64 bl rewrite");
+    if (zt_build_trampoline(&probe, 0x500000, 0x700000, trampoline, sizeof(trampoline), &trampoline_size) != 0) {
+        return fail_msg("zt_build_trampoline failed for aarch64 bl rewrite");
     }
 
-    relocated_size = thunk_size - kPrefixSize - kTailSize;
+    relocated_size = trampoline_size - kPrefixSize - kTailSize;
     if (relocated_size != 20u) {
         return fail_msg("unexpected relocated size for aarch64 bl rewrite");
     }
 
     target_addr = 0x401018u;
-    if (expect_mov_abs_at(thunk,
+    if (expect_mov_abs_at(trampoline,
                           kPrefixSize,
                           16,
                           target_addr,
                           "aarch64 bl target rewrite mismatch") != 0 ||
-        expect_u32_at(thunk, kPrefixSize + 16, 0xD63F0200u, "aarch64 bl missing blr x16") != 0) {
+        expect_u32_at(trampoline, kPrefixSize + 16, 0xD63F0200u, "aarch64 bl missing blr x16") != 0) {
         return -1;
     }
 
-    return check_common_layout(&probe, thunk, relocated_size, 0x500000);
+    return check_common_layout(&probe, trampoline, relocated_size, 0x500000);
 }
 
 static int test_b_rewrite(void) {
     zt_probe_info_t probe = {0};
-    uint8_t thunk[ZT_THUNK_MAX_SIZE];
-    size_t thunk_size;
+    uint8_t trampoline[ZT_TRAMPOLINE_MAX_SIZE];
+    size_t trampoline_size;
     size_t relocated_size;
     uint64_t target_addr;
     static const uint8_t kOrig[] = {0x06, 0x00, 0x00, 0x14}; /* b +0x18 */
@@ -212,32 +212,32 @@ static int test_b_rewrite(void) {
     probe.orig_len = sizeof(kOrig);
     memcpy(probe.orig_code, kOrig, sizeof(kOrig));
 
-    if (zt_build_thunk(&probe, 0x500000, 0x700000, thunk, sizeof(thunk), &thunk_size) != 0) {
-        return fail_msg("zt_build_thunk failed for aarch64 b rewrite");
+    if (zt_build_trampoline(&probe, 0x500000, 0x700000, trampoline, sizeof(trampoline), &trampoline_size) != 0) {
+        return fail_msg("zt_build_trampoline failed for aarch64 b rewrite");
     }
 
-    relocated_size = thunk_size - kPrefixSize - kTailSize;
+    relocated_size = trampoline_size - kPrefixSize - kTailSize;
     if (relocated_size != 20u) {
         return fail_msg("unexpected relocated size for aarch64 b rewrite");
     }
 
     target_addr = probe.target.remote_addr + 0x18u;
-    if (expect_mov_abs_at(thunk,
+    if (expect_mov_abs_at(trampoline,
                           kPrefixSize,
                           16,
                           target_addr,
                           "aarch64 b target rewrite mismatch") != 0 ||
-        expect_u32_at(thunk, kPrefixSize + 16, 0xD61F0200u, "aarch64 b missing br x16") != 0) {
+        expect_u32_at(trampoline, kPrefixSize + 16, 0xD61F0200u, "aarch64 b missing br x16") != 0) {
         return -1;
     }
 
-    return check_common_layout(&probe, thunk, relocated_size, 0x500000);
+    return check_common_layout(&probe, trampoline, relocated_size, 0x500000);
 }
 
 static int test_b_cond_rewrite(void) {
     zt_probe_info_t probe = {0};
-    uint8_t thunk[ZT_THUNK_MAX_SIZE];
-    size_t thunk_size;
+    uint8_t trampoline[ZT_TRAMPOLINE_MAX_SIZE];
+    size_t trampoline_size;
     size_t relocated_size;
     uint64_t target_addr;
     static const uint8_t kOrig[] = {0x80, 0x00, 0x00, 0x54}; /* b.eq +0x10 => target 0x18 */
@@ -247,36 +247,36 @@ static int test_b_cond_rewrite(void) {
     probe.orig_len = sizeof(kOrig);
     memcpy(probe.orig_code, kOrig, sizeof(kOrig));
 
-    if (zt_build_thunk(&probe, 0x500000, 0x700000, thunk, sizeof(thunk), &thunk_size) != 0) {
-        return fail_msg("zt_build_thunk failed for aarch64 conditional branch rewrite");
+    if (zt_build_trampoline(&probe, 0x500000, 0x700000, trampoline, sizeof(trampoline), &trampoline_size) != 0) {
+        return fail_msg("zt_build_trampoline failed for aarch64 conditional branch rewrite");
     }
 
-    relocated_size = thunk_size - kPrefixSize - kTailSize;
+    relocated_size = trampoline_size - kPrefixSize - kTailSize;
     if (relocated_size != 24u) {
         return fail_msg("unexpected relocated size for aarch64 conditional branch rewrite");
     }
 
     target_addr = 0x401018u;
-    if (expect_u32_at(thunk,
+    if (expect_u32_at(trampoline,
                       kPrefixSize,
                       0x540000C1u,
                       "aarch64 conditional branch inverse-skip rewrite mismatch") != 0 ||
-        expect_mov_abs_at(thunk,
+        expect_mov_abs_at(trampoline,
                           kPrefixSize + 4,
                           16,
                           target_addr,
                           "aarch64 conditional branch target rewrite mismatch") != 0 ||
-        expect_u32_at(thunk, kPrefixSize + 20, 0xD61F0200u, "aarch64 conditional branch missing br x16") != 0) {
+        expect_u32_at(trampoline, kPrefixSize + 20, 0xD61F0200u, "aarch64 conditional branch missing br x16") != 0) {
         return -1;
     }
 
-    return check_common_layout(&probe, thunk, relocated_size, 0x500000);
+    return check_common_layout(&probe, trampoline, relocated_size, 0x500000);
 }
 
 static int test_cbz_rewrite(void) {
     zt_probe_info_t probe = {0};
-    uint8_t thunk[ZT_THUNK_MAX_SIZE];
-    size_t thunk_size;
+    uint8_t trampoline[ZT_TRAMPOLINE_MAX_SIZE];
+    size_t trampoline_size;
     size_t relocated_size;
     uint32_t rewritten;
     uint64_t target_addr;
@@ -287,11 +287,11 @@ static int test_cbz_rewrite(void) {
     probe.orig_len = sizeof(kOrig);
     memcpy(probe.orig_code, kOrig, sizeof(kOrig));
 
-    if (zt_build_thunk(&probe, 0x500000, 0x700000, thunk, sizeof(thunk), &thunk_size) != 0) {
-        return fail_msg("zt_build_thunk failed for aarch64 cbz rewrite");
+    if (zt_build_trampoline(&probe, 0x500000, 0x700000, trampoline, sizeof(trampoline), &trampoline_size) != 0) {
+        return fail_msg("zt_build_trampoline failed for aarch64 cbz rewrite");
     }
 
-    relocated_size = thunk_size - kPrefixSize - kTailSize;
+    relocated_size = trampoline_size - kPrefixSize - kTailSize;
     if (relocated_size != 24u) {
         return fail_msg("unexpected relocated size for aarch64 cbz rewrite");
     }
@@ -301,23 +301,23 @@ static int test_cbz_rewrite(void) {
     rewritten |= (6u << 5);
     target_addr = 0x401018u;
 
-    if (expect_u32_at(thunk, kPrefixSize, rewritten, "aarch64 cbz inverse-skip rewrite mismatch") != 0 ||
-        expect_mov_abs_at(thunk,
+    if (expect_u32_at(trampoline, kPrefixSize, rewritten, "aarch64 cbz inverse-skip rewrite mismatch") != 0 ||
+        expect_mov_abs_at(trampoline,
                           kPrefixSize + 4,
                           16,
                           target_addr,
                           "aarch64 cbz target rewrite mismatch") != 0 ||
-        expect_u32_at(thunk, kPrefixSize + 20, 0xD61F0200u, "aarch64 cbz missing br x16") != 0) {
+        expect_u32_at(trampoline, kPrefixSize + 20, 0xD61F0200u, "aarch64 cbz missing br x16") != 0) {
         return -1;
     }
 
-    return check_common_layout(&probe, thunk, relocated_size, 0x500000);
+    return check_common_layout(&probe, trampoline, relocated_size, 0x500000);
 }
 
 static int test_tbz_rewrite(void) {
     zt_probe_info_t probe = {0};
-    uint8_t thunk[ZT_THUNK_MAX_SIZE];
-    size_t thunk_size;
+    uint8_t trampoline[ZT_TRAMPOLINE_MAX_SIZE];
+    size_t trampoline_size;
     size_t relocated_size;
     uint32_t rewritten;
     uint64_t target_addr;
@@ -328,11 +328,11 @@ static int test_tbz_rewrite(void) {
     probe.orig_len = sizeof(kOrig);
     memcpy(probe.orig_code, kOrig, sizeof(kOrig));
 
-    if (zt_build_thunk(&probe, 0x500000, 0x700000, thunk, sizeof(thunk), &thunk_size) != 0) {
-        return fail_msg("zt_build_thunk failed for aarch64 tbz rewrite");
+    if (zt_build_trampoline(&probe, 0x500000, 0x700000, trampoline, sizeof(trampoline), &trampoline_size) != 0) {
+        return fail_msg("zt_build_trampoline failed for aarch64 tbz rewrite");
     }
 
-    relocated_size = thunk_size - kPrefixSize - kTailSize;
+    relocated_size = trampoline_size - kPrefixSize - kTailSize;
     if (relocated_size != 24u) {
         return fail_msg("unexpected relocated size for aarch64 tbz rewrite");
     }
@@ -342,17 +342,17 @@ static int test_tbz_rewrite(void) {
     rewritten |= (6u << 5);
     target_addr = 0x401018u;
 
-    if (expect_u32_at(thunk, kPrefixSize, rewritten, "aarch64 tbz inverse-skip rewrite mismatch") != 0 ||
-        expect_mov_abs_at(thunk,
+    if (expect_u32_at(trampoline, kPrefixSize, rewritten, "aarch64 tbz inverse-skip rewrite mismatch") != 0 ||
+        expect_mov_abs_at(trampoline,
                           kPrefixSize + 4,
                           16,
                           target_addr,
                           "aarch64 tbz target rewrite mismatch") != 0 ||
-        expect_u32_at(thunk, kPrefixSize + 20, 0xD61F0200u, "aarch64 tbz missing br x16") != 0) {
+        expect_u32_at(trampoline, kPrefixSize + 20, 0xD61F0200u, "aarch64 tbz missing br x16") != 0) {
         return -1;
     }
 
-    return check_common_layout(&probe, thunk, relocated_size, 0x500000);
+    return check_common_layout(&probe, trampoline, relocated_size, 0x500000);
 }
 
 int main(void) {
@@ -366,6 +366,6 @@ int main(void) {
         return 1;
     }
 
-    printf("aarch64 thunk builder test passed\n");
+    printf("aarch64 trampoline builder test passed\n");
     return 0;
 }

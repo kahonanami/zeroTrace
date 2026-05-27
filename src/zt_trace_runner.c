@@ -15,7 +15,7 @@
 #include "../include/zt_filter.h"
 #include "../include/zt_payload.h"
 #include "../include/zt_sigconf.h"
-#include "../include/zt_thunk_manager.h"
+#include "../include/zt_trampoline_manager.h"
 #include "../include/zt_trace_runner.h"
 
 typedef struct {
@@ -26,7 +26,7 @@ typedef struct {
     uint64_t remote_payload_init_addr;
     uint64_t remote_trace_buffer_addr;
     uint64_t remote_payload_config_addr;
-    zt_thunk_pool_t thunk_pool;
+    zt_trampoline_pool_t trampoline_pool;
 } zt_runtime_state_t;
 
 typedef enum {
@@ -59,9 +59,9 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
                                   const zt_probe_filter_t *filter,
                                   zt_probe_info_t **probe_out) {
     zt_probe_info_t *probe;
-    uint8_t thunk_buf[ZT_THUNK_MAX_SIZE];
-    size_t thunk_size;
-    uint64_t remote_thunk_addr;
+    uint8_t trampoline_buf[ZT_TRAMPOLINE_MAX_SIZE];
+    size_t trampoline_size;
+    uint64_t remote_trampoline_addr;
 
     probe = zt_register_probe(session, symbol);
     if (probe == NULL) {
@@ -103,50 +103,50 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
            probe->probe_id,
            probe->orig_len);
 
-    if (zt_thunk_pool_alloc(session, &runtime->thunk_pool, probe, &remote_thunk_addr) != 0) {
-        printf("Failed to allocate remote thunk slot\n");
+    if (zt_trampoline_pool_alloc(session, &runtime->trampoline_pool, probe, &remote_trampoline_addr) != 0) {
+        printf("Failed to allocate remote trampoline slot\n");
         return -1;
     }
-    printf("Remote thunk slot %d addr: 0x%llx\n",
-           probe->thunk_slot,
-           (unsigned long long)remote_thunk_addr);
+    printf("Remote trampoline slot %d addr: 0x%llx\n",
+           probe->trampoline_slot,
+           (unsigned long long)remote_trampoline_addr);
 
-    if (zt_build_thunk(probe,
+    if (zt_build_trampoline(probe,
                        runtime->remote_entry_stub_addr,
-                       remote_thunk_addr,
-                       thunk_buf,
-                       sizeof(thunk_buf),
-                       &thunk_size) != 0) {
-        printf("zt_build_thunk failed for probe %lu\n", probe->probe_id);
+                       remote_trampoline_addr,
+                       trampoline_buf,
+                       sizeof(trampoline_buf),
+                       &trampoline_size) != 0) {
+        printf("zt_build_trampoline failed for probe %lu\n", probe->probe_id);
         if (probe->state != ZT_PROBE_INSTALLED) {
-            zt_thunk_pool_release(session, &runtime->thunk_pool, probe);
+            zt_trampoline_pool_release(session, &runtime->trampoline_pool, probe);
         }
         return -1;
     }
 
     if (zt_write_remote_memory(session->pid,
-                               remote_thunk_addr,
-                               thunk_buf,
-                               thunk_size) != 0) {
-        printf("failed to write thunk to 0x%llx\n",
-               (unsigned long long)remote_thunk_addr);
+                               remote_trampoline_addr,
+                               trampoline_buf,
+                               trampoline_size) != 0) {
+        printf("failed to write trampoline to 0x%llx\n",
+               (unsigned long long)remote_trampoline_addr);
         if (probe->state != ZT_PROBE_INSTALLED) {
-            zt_thunk_pool_release(session, &runtime->thunk_pool, probe);
+            zt_trampoline_pool_release(session, &runtime->trampoline_pool, probe);
         }
         return -1;
     }
 
-    if (zt_install_probe_patch(session, probe->probe_id, remote_thunk_addr) != 0) {
+    if (zt_install_probe_patch(session, probe->probe_id, remote_trampoline_addr) != 0) {
         printf("failed to install probe patch for probe %lu\n", probe->probe_id);
         if (probe->state != ZT_PROBE_INSTALLED) {
-            zt_thunk_pool_release(session, &runtime->thunk_pool, probe);
+            zt_trampoline_pool_release(session, &runtime->trampoline_pool, probe);
         }
         return -1;
     }
 
-    printf("probe patch installed at 0x%llx -> thunk 0x%llx\n",
+    printf("probe patch installed at 0x%llx -> trampoline 0x%llx\n",
            (unsigned long long)probe->target.remote_addr,
-           (unsigned long long)remote_thunk_addr);
+           (unsigned long long)remote_trampoline_addr);
 
     if (probe_out != NULL) {
         *probe_out = probe;
@@ -694,7 +694,7 @@ static int zt_trace_stop(void) {
             ret = -1;
         }
 
-        zt_thunk_pool_release(g_active_trace.session, &g_active_trace.runtime.thunk_pool, probe);
+        zt_trampoline_pool_release(g_active_trace.session, &g_active_trace.runtime.trampoline_pool, probe);
         zt_unregister_probe(g_active_trace.session, probe->probe_id);
     }
 
@@ -818,7 +818,7 @@ int zt_trace_remove_probe(zt_injector_session_t *session, uint64_t probe_id) {
         return -1;
     }
 
-    zt_thunk_pool_release(session, &g_active_trace.runtime.thunk_pool, probe);
+    zt_trampoline_pool_release(session, &g_active_trace.runtime.trampoline_pool, probe);
 
     if (zt_unregister_probe(session, probe_id) != 0) {
         return -1;
