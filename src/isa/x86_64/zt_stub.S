@@ -53,13 +53,28 @@
 .endm
 
 .macro SAVE_FP
-    sub rsp, 512
-    and rsp, 0xFFFFFFFFFFFFFFF0
-    fxsave64 [rsp]
+    /* 128-byte xmm0-xmm7 snapshot plus 15 bytes of alignment slack. */
+    sub rsp, 143
+    and rsp, -16
+    movdqu [rsp + 0x00], xmm0
+    movdqu [rsp + 0x10], xmm1
+    movdqu [rsp + 0x20], xmm2
+    movdqu [rsp + 0x30], xmm3
+    movdqu [rsp + 0x40], xmm4
+    movdqu [rsp + 0x50], xmm5
+    movdqu [rsp + 0x60], xmm6
+    movdqu [rsp + 0x70], xmm7
 .endm
 
 .macro RESTORE_FP
-    fxrstor64 [rsp]
+    movdqu xmm0, [rsp + 0x00]
+    movdqu xmm1, [rsp + 0x10]
+    movdqu xmm2, [rsp + 0x20]
+    movdqu xmm3, [rsp + 0x30]
+    movdqu xmm4, [rsp + 0x40]
+    movdqu xmm5, [rsp + 0x50]
+    movdqu xmm6, [rsp + 0x60]
+    movdqu xmm7, [rsp + 0x70]
 .endm
 
 entry_stub:

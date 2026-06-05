@@ -96,15 +96,14 @@ def wait_for_target_result(proc: subprocess.Popen, timeout: float = 120.0) -> st
     return out
 
 
-def ensure_sudo() -> None:
-    subprocess.run(
-        ["sudo", "-v"],
+def sudo_is_available() -> bool:
+    proc = subprocess.run(
+        ["sudo", "-n", "true"],
         cwd=ROOT_DIR,
-        check=True,
-        stdin=sys.stdin,
-        stdout=sys.stdout,
-        stderr=sys.stderr,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
     )
+    return proc.returncode == 0
 
 
 def read_process_until(proc: subprocess.Popen, marker: str, timeout: float = 30.0) -> str:
@@ -371,32 +370,37 @@ def main() -> int:
         print("run: make all", file=sys.stderr)
         return 1
 
-    if shutil.which("bpftrace") is None:
-        print("bpftrace is required for automated uprobe benchmark", file=sys.stderr)
-        return 1
-
     RESULT_DIR.mkdir(parents=True, exist_ok=True)
     for path in [BASELINE_OUT, UPROBE_OUT, UPROBE_TRACE_OUT, ZTRACE_OUT, ZTRACE_RUNNER_OUT, ZTRACE_LOG_OUT, LATENCY_OUT, REPORT_OUT]:
         if path.exists():
             path.unlink()
 
-    ensure_sudo()
-
     baseline_ns = run_baseline()
 
     uprobe_skip_reason = None
-    uprobe_events_path = find_uprobe_events_path()
-    if uprobe_events_path is None:
+    if shutil.which("bpftrace") is None:
         uprobe_ns = None
-        uprobe_skip_reason = (
-            "kernel uprobe benchmark unsupported: "
-            "no uprobe_events interface under /sys/kernel/tracing or /sys/kernel/debug/tracing"
-        )
+        uprobe_skip_reason = "kernel uprobe benchmark skipped: bpftrace is not installed"
+        print("[2/3] Skipping kernel uprobe benchmark...")
+        print(f"  - {uprobe_skip_reason}")
+    elif not sudo_is_available():
+        uprobe_ns = None
+        uprobe_skip_reason = "kernel uprobe benchmark skipped: sudo is not available non-interactively"
         print("[2/3] Skipping kernel uprobe benchmark...")
         print(f"  - {uprobe_skip_reason}")
     else:
-        print(f"  - detected uprobe_events at {uprobe_events_path}")
-        uprobe_ns = run_uprobe()
+        uprobe_events_path = find_uprobe_events_path()
+        if uprobe_events_path is None:
+            uprobe_ns = None
+            uprobe_skip_reason = (
+                "kernel uprobe benchmark unsupported: "
+                "no uprobe_events interface under /sys/kernel/tracing or /sys/kernel/debug/tracing"
+            )
+            print("[2/3] Skipping kernel uprobe benchmark...")
+            print(f"  - {uprobe_skip_reason}")
+        else:
+            print(f"  - detected uprobe_events at {uprobe_events_path}")
+            uprobe_ns = run_uprobe()
 
     ztrace_ns = run_ztrace()
     install_ns, uninstall_ns = run_latency()

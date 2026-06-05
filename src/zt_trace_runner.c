@@ -7,7 +7,7 @@
 #include <stddef.h>
 #include <unistd.h>
 #include <dlfcn.h>
-#include <errno.h>
+#include <signal.h>
 #include <sys/mman.h>
 
 #include "../include/zt_injector.h"
@@ -43,6 +43,26 @@ typedef struct {
 } zt_active_trace_t;
 
 static zt_active_trace_t g_active_trace;
+
+static void zt_trace_mark_target_exited(void) {
+    if (g_active_trace.log_fp != NULL) {
+        fclose(g_active_trace.log_fp);
+    }
+    memset(&g_active_trace, 0, sizeof(g_active_trace));
+}
+
+static int zt_trace_is_exit_race(pid_t pid) {
+    int attempt;
+
+    for (attempt = 0; attempt < 10; ++attempt) {
+        if (zt_process_is_exited(pid)) {
+            return 1;
+        }
+        usleep(1000);
+    }
+
+    return zt_process_is_exited(pid);
+}
 
 typedef struct {
     uint64_t call_id;
@@ -528,14 +548,15 @@ static int zt_trace_check_exit_event(void) {
     }
 
     if (zt_injector_poll_events(g_active_trace.session, &target_exited) != 0) {
+        if (zt_trace_is_exit_race(g_active_trace.session->pid)) {
+            zt_trace_mark_target_exited();
+            return 1;
+        }
         return -1;
     }
 
     if (target_exited) {
-        if (g_active_trace.log_fp != NULL) {
-            fclose(g_active_trace.log_fp);
-        }
-        memset(&g_active_trace, 0, sizeof(g_active_trace));
+        zt_trace_mark_target_exited();
         return 1;
     }
 
@@ -571,6 +592,10 @@ int zt_trace_poll(void) {
                               g_active_trace.runtime.remote_trace_buffer_addr,
                               &trace_buffer,
                               sizeof(trace_buffer)) != 0) {
+        if (zt_trace_is_exit_race(g_active_trace.session->pid)) {
+            zt_trace_mark_target_exited();
+            return 1;
+        }
         return -1;
     }
 

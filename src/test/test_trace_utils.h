@@ -90,7 +90,7 @@ static __attribute__((unused)) int zt_test_count_substring(const char *text, con
     return count;
 }
 
-static int zt_test_wait_trace_done(unsigned int timeout_ms) {
+static __attribute__((unused)) int zt_test_wait_trace_done(unsigned int timeout_ms) {
     struct timespec start;
     struct timespec now;
 
@@ -120,10 +120,6 @@ static int zt_test_wait_trace_done(unsigned int timeout_ms) {
     return 0;
 }
 
-static int zt_test_process_gone(pid_t pid) {
-    if (kill(pid, 0) == 0) {
-        return 0;
-    }
-
-    return 1;
+static __attribute__((unused)) int zt_test_process_gone(pid_t pid) {
+    return zt_process_is_exited(pid);
 }

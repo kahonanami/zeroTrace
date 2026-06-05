@@ -245,7 +245,7 @@ offset +0x88 : func_id
 1. `call zt_handle_entry`
    - 把当前保存区当成 `ctx_t *` 传给 C handler
    - C handler 直接从保存区里读取参数寄存器值
-   - 调用 C handler 前已经通过 `fxsave64` 保存浮点/SIMD 上下文，并把这块通用 `fp_state_area` 的地址作为第二个参数传入，用于读取前 8 个浮点参数槽
+   - 调用 C handler 前已经把 `xmm0 ... xmm7` 保存到栈上的紧凑快照区，并把这块 `fp_state_area` 的地址作为第二个参数传入，用于读取前 8 个浮点参数槽
 
 2. `call save_probe_frame_c`
    - `rdi = [r12 + 0x90]`，也就是真实返回地址
@@ -257,7 +257,7 @@ offset +0x88 : func_id
 
 然后：
 
-- `fxrstor64`
+- `RESTORE_FP`
 - `POP_ALL`
 - `ret`
 
@@ -274,7 +274,7 @@ jmp continue_addr
 
 真正等到原函数跑完执行 `ret` 时，才会跳进 `exit_stub`。
 
-`SAVE_FP` / `RESTORE_FP` 会在当前栈下方临时开出一块 16 字节对齐的 512 字节区域，执行 `fxsave64 [rsp]` 和 `fxrstor64 [rsp]`。payload 侧把它统一当作 `fp_state_area` 读取，因此不会把 x86 的 `fxsave` 格式泄漏到上层事件接口。需要注意的是，`fxsave64` 不覆盖 AVX YMM 寄存器的高 128 位；如果后续要完整支持 AVX，需要升级为 `xsave/xrstor`。
+`SAVE_FP` / `RESTORE_FP` 会在当前栈下方临时开出一块 16 字节对齐的紧凑快照区，用 `movdqu` 保存 / 恢复 `xmm0 ... xmm7`。每个 XMM 槽位占 16 字节，payload 侧把它统一当作 `fp_state_area` 读取。这样既能保护当前 ABI 下承载前 8 个浮点参数和浮点返回值的寄存器，又避免 `fxsave64/fxrstor64` 每次 probe hit 都保存 / 恢复 512 字节完整 FPU 状态。当前实现不保存 x87/MMX，也不保存 AVX YMM 高 128 位；如果后续要完整覆盖 AVX 上下文，需要升级为按需 XSAVE 或更大的向量快照。
 
 ---
 
@@ -424,7 +424,7 @@ caller
 
 1. `get_ret_addr_c()` 从 TLS shadow stack 弹出真正的返回地址
 2. `mov [r12 + 0x88], rax` 把它写回到上图中的预留槽位
-3. `fxrstor64` 恢复浮点/SIMD 上下文
+3. `RESTORE_FP` 恢复 `xmm0 ... xmm7`
 4. `POP_ALL`
 5. `lea rsp, [rsp + 8]`
 6. `ret`

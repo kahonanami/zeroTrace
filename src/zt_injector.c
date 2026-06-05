@@ -235,6 +235,45 @@ static int zt_injector_refresh_threads(zt_injector_session_t *session) {
     return 0;
 }
 
+int zt_process_is_exited(pid_t pid) {
+    char stat_path[64];
+    char stat_buf[512];
+    FILE *fp;
+    char *rparen;
+    char state;
+
+    if (pid <= 0) {
+        return 1;
+    }
+
+    errno = 0;
+    if (kill(pid, 0) != 0) {
+        return errno == ESRCH;
+    }
+
+    snprintf(stat_path, sizeof(stat_path), "/proc/%d/stat", pid);
+    fp = fopen(stat_path, "r");
+    if (fp == NULL) {
+        return errno == ENOENT || errno == ESRCH;
+    }
+
+    if (fgets(stat_buf, sizeof(stat_buf), fp) == NULL) {
+        int saved_errno = errno;
+
+        fclose(fp);
+        return saved_errno == ENOENT || saved_errno == ESRCH;
+    }
+    fclose(fp);
+
+    rparen = strrchr(stat_buf, ')');
+    if (rparen == NULL || rparen[1] != ' ' || rparen[2] == '\0') {
+        return 0;
+    }
+
+    state = rparen[2];
+    return state == 'Z' || state == 'X' || state == 'x';
+}
+
 static int zt_wait_for_thread_stop(zt_injector_session_t *session, zt_thread_info_t *thread) {
     int status;
 
@@ -393,6 +432,12 @@ int zt_injector_poll_events(zt_injector_session_t *session, int *target_exited_o
     }
 
     if (zt_injector_refresh_threads(session) != 0) {
+        if (zt_process_is_exited(session->pid)) {
+            if (target_exited_out != NULL) {
+                *target_exited_out = 1;
+            }
+            return 0;
+        }
         return -1;
     }
 

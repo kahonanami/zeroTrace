@@ -11,6 +11,9 @@
 - 为目标函数安装和移除 probe
 - 捕获函数入口参数和返回值
 - 支持 `enable` / `disable` 动态启用/禁用 probe
+- 支持参数过滤、filter 热更新和 probe 内 call action 热更新
+- 支持 x86_64 / aarch64 后端
+- 支持线程组级 attach / stop / continue，并自动纳入运行后新创建的线程
 
 ## 依赖
 
@@ -253,10 +256,10 @@ make test
 - trampoline 构造
 - libc/POSIX 动态库函数 trace
 - 16 个并发 probe 的生命周期测试
-- 多线程目标函数并发命中与多 TID 跟踪测试
+- 多线程 stress 测试：运行中新线程追踪、并发 probe 命中、动态 enable/disable、按 TID 校验 entry/return 配平
 - 异步信号下的 signal safety 测试
 - 条件探针参数过滤测试
-- probe filter 热更新测试
+- probe 热更新测试：分阶段验证 filter、probe 内 call action、disable/enable 状态切换，并确认 trampoline slot 不被重建
 - probe 内目标进程函数调用测试
 
 ## Benchmark
@@ -274,6 +277,8 @@ make benchmark
 - zeroTrace：使用 `zeroTrace` 安装用户态 probe
 - probe lifecycle latency：测量安装/卸载延迟
 
+其中 kernel uprobe 依赖 `bpftrace` 和非交互 sudo 权限。若当前环境没有安装 `bpftrace`，或 `sudo -n` 无法直接执行，脚本会自动跳过 uprobe 对比项，并继续生成 baseline、zeroTrace 和 probe lifecycle latency 的报告。
+
 benchmark 目标函数是 `bench_getpid()`，它是测试程序中的一个 `noinline` wrapper，内部调用 `syscall(SYS_getpid)`，这样可以避免 libc/vDSO 细节干扰测量。
 
 运行完成后，结果会写到被忽略的 `benchmark/` 目录中，主要包括：
@@ -287,31 +292,32 @@ benchmark 目标函数是 `bench_getpid()`，它是测试程序中的一个 `noi
 - `benchmark/latency.out`
 - `benchmark/report.txt`
 
-一组最新的 benchmark 结果如下：
+一组最新的 x86_64 benchmark 结果如下。本次运行环境没有非交互 sudo 权限，因此 kernel uprobe 项被脚本自动跳过：
 
 ```text
 iterations            : 1000000
-baseline total ns     : 67149375
-baseline per call     : 67.15 ns
-uprobe total ns       : 2029606250
-uprobe per call       : 2029.61 ns
-uprobe overhead/call  : 1962.46 ns
-ztrace total ns       : 368134041
-ztrace per call       : 368.13 ns
-ztrace overhead/call  : 300.98 ns
-ztrace vs uprobe      : 6.52x lower overhead
+baseline total ns     : 67432368
+baseline per call     : 67.43 ns
+uprobe total ns       : skipped
+uprobe note           : kernel uprobe benchmark skipped: sudo is not available non-interactively
+uprobe per call       : skipped
+uprobe overhead/call  : skipped
+ztrace vs uprobe      : skipped
+ztrace total ns       : 223984890
+ztrace per call       : 223.98 ns
+ztrace overhead/call  : 156.55 ns
 
 Probe lifecycle latency
 -----------------------
-install latency avg   : 252122 ns (0.252 ms) over 1000 rounds
-uninstall latency avg : 20732 ns (0.021 ms) over 1000 rounds
+install latency avg   : 287395 ns (0.287 ms) over 1000 rounds
+uninstall latency avg : 30677 ns (0.031 ms) over 1000 rounds
 ```
 
 从这组数据可以看到：
 
-- `zeroTrace` 单次额外开销约为 `300.98 ns`，明显低于题目要求的 `< 1000 ns`
-- `probe` 安装延迟平均约为 `0.252 ms`，清理延迟平均约为 `0.021 ms`，都低于题目要求的 `< 10 ms`
-- 相比 `uprobe`，额外开销约低 `6.52x`
+- `zeroTrace` 单次额外开销约为 `156.55 ns`，低于题目要求的 `< 1000 ns`，也已经低于项目当前优化目标 `200 ns`
+- `probe` 安装延迟平均约为 `0.287 ms`，清理延迟平均约为 `0.031 ms`，都低于题目要求的 `< 10 ms`
+- 若需要生成 zeroTrace vs uprobe 的完整对比，请在具备 `bpftrace` 和非交互 sudo 权限的环境下重新运行 `make benchmark`
 
 ## TODO List
 
@@ -322,9 +328,12 @@ uninstall latency avg : 20732 ns (0.021 ms) over 1000 rounds
 - [x] 支持线程组级 attach / interrupt / continue / detach，并在运行态刷新新线程
 - [x] 补齐 patch 前 PC 检查，避免线程停在即将被改写的函数入口字节内
 - [x] 实现 A4：probe 命中时在目标进程内主动调用指定无参函数，并在日志中记录调用结果
-- [ ] 完善 A5：把 filter 热更新扩展为 probe 行为参数的完整热更新
+- [x] 完善 A5：支持 filter、probe 内 call action、enable/disable 状态的运行时热更新，并通过分阶段自动化测试验证
+- [x] 修复目标退出窗口下 `zt_trace_poll()` 把正常退出误判为远程读失败的问题
+- [x] 优化 payload 事件写入热路径，当前 x86_64 benchmark 额外开销约 `157 ns/call`
 
 ## 文档
 
 - [docs/architecture.md](./docs/architecture.md)
 - [docs/stub-control-flow.md](./docs/stub-control-flow.md)
+- [docs/verification-matrix.md](./docs/verification-matrix.md)

@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../../include/zt_injector.h"
@@ -11,66 +13,214 @@
 #include "test_trace_utils.h"
 
 #define MAX_SEEN_TIDS 64
+#define MIN_EXPECTED_LOG_TIDS 8
+#define MIN_EXPECTED_TRACKED_THREADS 8
+#define MIN_MIX_EVENTS_PER_KIND 100
+#define MIN_PAIR_EVENTS_PER_KIND 100
+#define REQUIRED_TOGGLE_COUNT 12
 
-static int count_unique_log_tids(const char *log_text) {
-    const char *cursor = log_text;
-    long tids[MAX_SEEN_TIDS];
-    int tid_count = 0;
+typedef struct {
+    long tid;
+    int mix_entry;
+    int mix_return;
+    int pair_entry;
+    int pair_return;
+} tid_log_stats_t;
 
-    while (cursor != NULL && *cursor != '\0') {
-        const char *slash = strchr(cursor, '/');
-        const char *bracket;
-        char *endptr;
+typedef struct {
+    tid_log_stats_t per_tid[MAX_SEEN_TIDS];
+    int tid_count;
+    int mix_entry_total;
+    int mix_return_total;
+    int pair_entry_total;
+    int pair_return_total;
+} thread_log_stats_t;
+
+static long elapsed_ms_since(const struct timespec *start) {
+    struct timespec now;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        return -1;
+    }
+
+    return (now.tv_sec - start->tv_sec) * 1000L +
+           (now.tv_nsec - start->tv_nsec) / 1000000L;
+}
+
+static int line_contains(const char *line, size_t len, const char *needle) {
+    size_t needle_len;
+    size_t i;
+
+    if (line == NULL || needle == NULL) {
+        return 0;
+    }
+
+    needle_len = strlen(needle);
+    if (needle_len == 0 || len < needle_len) {
+        return 0;
+    }
+
+    for (i = 0; i + needle_len <= len; ++i) {
+        if (memcmp(line + i, needle, needle_len) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static long parse_log_tid(const char *line, size_t len) {
+    const char *slash;
+    const char *bracket;
+    char *endptr;
+    long tid;
+
+    slash = memchr(line, '/', len);
+    if (slash == NULL) {
+        return -1;
+    }
+
+    bracket = strstr(slash, " [");
+    if (bracket == NULL || bracket >= line + len) {
+        return -1;
+    }
+
+    tid = strtol(slash + 1, &endptr, 10);
+    if (endptr != bracket || tid <= 0) {
+        return -1;
+    }
+
+    return tid;
+}
+
+static tid_log_stats_t *get_tid_stats(thread_log_stats_t *stats, long tid) {
+    int i;
+
+    if (stats == NULL || tid <= 0) {
+        return NULL;
+    }
+
+    for (i = 0; i < stats->tid_count; ++i) {
+        if (stats->per_tid[i].tid == tid) {
+            return &stats->per_tid[i];
+        }
+    }
+
+    if (stats->tid_count >= MAX_SEEN_TIDS) {
+        return NULL;
+    }
+
+    stats->per_tid[stats->tid_count].tid = tid;
+    return &stats->per_tid[stats->tid_count++];
+}
+
+static void collect_thread_log_stats(const char *log_text, thread_log_stats_t *stats) {
+    const char *line;
+
+    if (log_text == NULL || stats == NULL) {
+        return;
+    }
+
+    memset(stats, 0, sizeof(*stats));
+    line = log_text;
+    while (*line != '\0') {
+        const char *line_end = strchr(line, '\n');
+        size_t line_len;
         long tid;
-        int i;
-        int seen = 0;
+        tid_log_stats_t *tid_stats;
 
-        if (slash == NULL) {
-            break;
+        if (line_end == NULL) {
+            line_end = line + strlen(line);
         }
+        line_len = (size_t)(line_end - line);
 
-        bracket = strstr(slash, " [");
-        if (bracket == NULL) {
-            cursor = slash + 1;
-            continue;
-        }
-
-        tid = strtol(slash + 1, &endptr, 10);
-        if (endptr != bracket || tid <= 0) {
-            cursor = slash + 1;
-            continue;
-        }
-
-        for (i = 0; i < tid_count; ++i) {
-            if (tids[i] == tid) {
-                seen = 1;
-                break;
+        tid = parse_log_tid(line, line_len);
+        tid_stats = get_tid_stats(stats, tid);
+        if (tid_stats != NULL) {
+            if (line_contains(line, line_len, "ztrace:entry: thread_mix")) {
+                ++stats->mix_entry_total;
+                ++tid_stats->mix_entry;
+            } else if (line_contains(line, line_len, "ztrace:return: thread_mix")) {
+                ++stats->mix_return_total;
+                ++tid_stats->mix_return;
+            } else if (line_contains(line, line_len, "ztrace:entry: thread_pair")) {
+                ++stats->pair_entry_total;
+                ++tid_stats->pair_entry;
+            } else if (line_contains(line, line_len, "ztrace:return: thread_pair")) {
+                ++stats->pair_return_total;
+                ++tid_stats->pair_return;
             }
         }
 
-        if (!seen && tid_count < MAX_SEEN_TIDS) {
-            tids[tid_count++] = tid;
-        }
+        line = *line_end == '\0' ? line_end : line_end + 1;
+    }
+}
 
-        cursor = bracket + 2;
+static int verify_pair_probe_by_tid(const thread_log_stats_t *stats) {
+    int i;
+
+    for (i = 0; i < stats->tid_count; ++i) {
+        const tid_log_stats_t *tid = &stats->per_tid[i];
+
+        if (tid->pair_entry != tid->pair_return) {
+            fprintf(stderr,
+                    "unpaired thread_pair events for tid %ld: entry=%d return=%d\n",
+                    tid->tid,
+                    tid->pair_entry,
+                    tid->pair_return);
+            return -1;
+        }
     }
 
-    return tid_count;
+    return 0;
+}
+
+static int collect_child_exit(pid_t child, int *exited_out) {
+    int status;
+    pid_t ret;
+
+    if (exited_out != NULL) {
+        *exited_out = 0;
+    }
+
+    ret = waitpid(child, &status, WNOHANG);
+    if (ret < 0) {
+        if (exited_out != NULL) {
+            *exited_out = 1;
+        }
+        return 0;
+    }
+
+    if (ret == 0) {
+        return 0;
+    }
+
+    if (exited_out != NULL) {
+        *exited_out = 1;
+    }
+
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        fprintf(stderr, "threaded target exited abnormally: status=%d\n", status);
+        return -1;
+    }
+
+    return 0;
 }
 
 int main(void) {
     zt_injector_session_t session;
+    zt_probe_info_t *mix_probe;
+    thread_log_stats_t stats;
     char *log_text = NULL;
     char log_path[256];
     pid_t child;
-    int add_entry_count;
-    int add_return_count;
-    int mix_entry_count;
-    int mix_return_count;
     int max_tracked_threads = 0;
-    int unique_log_tids;
-    int i;
+    int target_exited = 0;
+    int toggle_count = 0;
+    int mix_enabled = 1;
+    long next_toggle_ms = 24;
     int rc = 1;
+    struct timespec start_ts;
 
     if (zt_test_make_log_path(log_path, sizeof(log_path), "zt-thread-safety") != 0) {
         fprintf(stderr, "failed to create temp log path\n");
@@ -98,9 +248,15 @@ int main(void) {
         goto cleanup;
     }
 
-    if (zt_trace_start_in_session(&session, "thread_add", log_path) != 0 ||
-        zt_trace_start_in_session(&session, "thread_mix", log_path) != 0) {
+    if (zt_trace_start_in_session(&session, "thread_mix", log_path) != 0 ||
+        zt_trace_start_in_session(&session, "thread_pair", log_path) != 0) {
         fprintf(stderr, "trace start failed for threaded target\n");
+        goto cleanup_trace;
+    }
+
+    mix_probe = zt_probe_find_by_symbol(&session, "thread_mix");
+    if (mix_probe == NULL || zt_probe_find_by_symbol(&session, "thread_pair") == NULL) {
+        fprintf(stderr, "failed to resolve installed threaded probes\n");
         goto cleanup_trace;
     }
 
@@ -109,26 +265,87 @@ int main(void) {
         goto cleanup_trace;
     }
 
-    for (i = 0; i < 60; ++i) {
-        if (zt_test_process_gone(child)) {
-            break;
+    if (clock_gettime(CLOCK_MONOTONIC, &start_ts) != 0) {
+        perror("clock_gettime");
+        goto cleanup_trace;
+    }
+
+    while (zt_trace_is_active()) {
+        long elapsed_ms = elapsed_ms_since(&start_ts);
+
+        if (elapsed_ms < 0 || elapsed_ms > 10000) {
+            fprintf(stderr, "threaded trace stress timed out\n");
+            goto cleanup_trace;
         }
 
         if (zt_trace_poll() < 0) {
-            fprintf(stderr, "trace polling failed for threaded target\n");
-            goto cleanup_trace;
+            if (collect_child_exit(child, &target_exited) != 0) {
+                goto cleanup_trace;
+            }
+            if (!target_exited) {
+                fprintf(stderr, "trace polling failed for threaded target\n");
+                goto cleanup_trace;
+            }
+            child = -1;
+            break;
         }
 
         if (session.thread_count > max_tracked_threads) {
             max_tracked_threads = session.thread_count;
         }
 
-        usleep(5000);
+        if (!target_exited && collect_child_exit(child, &target_exited) != 0) {
+            goto cleanup_trace;
+        }
+        if (target_exited) {
+            child = -1;
+            break;
+        }
+
+        if (toggle_count < REQUIRED_TOGGLE_COUNT && elapsed_ms >= next_toggle_ms) {
+            int toggle_rc;
+
+            if (mix_enabled) {
+                toggle_rc = zt_trace_disable_probe(&session, mix_probe->probe_id);
+                mix_enabled = 0;
+            } else {
+                toggle_rc = zt_trace_enable_probe(&session, mix_probe->probe_id);
+                mix_enabled = 1;
+            }
+
+            if (toggle_rc != 0) {
+                fprintf(stderr,
+                        "dynamic probe toggle failed at cycle %d\n",
+                        toggle_count);
+                goto cleanup_trace;
+            }
+            ++toggle_count;
+            next_toggle_ms += 8;
+        }
+
+        if (target_exited) {
+            break;
+        }
+
+        usleep(1000);
     }
 
-    if (zt_test_wait_trace_done(20000) != 0) {
-        fprintf(stderr, "trace polling timed out for threaded target\n");
-        goto cleanup_trace;
+    while (!target_exited && zt_trace_is_active()) {
+        if (zt_trace_poll() < 0) {
+            if (collect_child_exit(child, &target_exited) != 0) {
+                goto cleanup_trace;
+            }
+            if (!target_exited) {
+                fprintf(stderr, "final trace drain failed for threaded target\n");
+                goto cleanup_trace;
+            }
+            child = -1;
+            break;
+        }
+        if (session.thread_count > max_tracked_threads) {
+            max_tracked_threads = session.thread_count;
+        }
+        usleep(1000);
     }
 
     log_text = zt_test_read_file(log_path);
@@ -137,46 +354,76 @@ int main(void) {
         goto cleanup_trace;
     }
 
-    add_entry_count = zt_test_count_substring(log_text, "ztrace:entry: thread_add");
-    add_return_count = zt_test_count_substring(log_text, "ztrace:return: thread_add");
-    mix_entry_count = zt_test_count_substring(log_text, "ztrace:entry: thread_mix");
-    mix_return_count = zt_test_count_substring(log_text, "ztrace:return: thread_mix");
-    unique_log_tids = count_unique_log_tids(log_text);
-    if (add_entry_count < 8 || add_return_count < 8 ||
-        mix_entry_count < 8 || mix_return_count < 8) {
+    collect_thread_log_stats(log_text, &stats);
+
+    if (stats.mix_entry_total < MIN_MIX_EVENTS_PER_KIND ||
+        stats.mix_return_total < MIN_MIX_EVENTS_PER_KIND ||
+        stats.pair_entry_total < MIN_PAIR_EVENTS_PER_KIND ||
+        stats.pair_return_total < MIN_PAIR_EVENTS_PER_KIND) {
         fprintf(stderr,
-                "threaded trace log too sparse: add(entry=%d return=%d) mix(entry=%d return=%d)\n",
-                add_entry_count,
-                add_return_count,
-                mix_entry_count,
-                mix_return_count);
+                "threaded trace log too sparse: mix(entry=%d return=%d) pair(entry=%d return=%d)\n",
+                stats.mix_entry_total,
+                stats.mix_return_total,
+                stats.pair_entry_total,
+                stats.pair_return_total);
         goto cleanup_trace;
     }
 
-    if (max_tracked_threads < 2 || unique_log_tids < 2) {
+    if (stats.pair_entry_total != stats.pair_return_total ||
+        verify_pair_probe_by_tid(&stats) != 0) {
+        fprintf(stderr,
+                "thread_pair entry/return pairing invariant failed: entry=%d return=%d\n",
+                stats.pair_entry_total,
+                stats.pair_return_total);
+        goto cleanup_trace;
+    }
+
+    if (max_tracked_threads < MIN_EXPECTED_TRACKED_THREADS ||
+        stats.tid_count < MIN_EXPECTED_LOG_TIDS) {
         fprintf(stderr,
                 "threaded trace did not prove multi-thread tracking: tracked=%d unique_log_tids=%d\n",
                 max_tracked_threads,
-                unique_log_tids);
+                stats.tid_count);
         goto cleanup_trace;
     }
 
-    if (!zt_test_process_gone(child)) {
-        fprintf(stderr, "threaded target still alive\n");
+    if (toggle_count < REQUIRED_TOGGLE_COUNT) {
+        fprintf(stderr,
+                "dynamic enable/disable stress too weak: toggles=%d\n",
+                toggle_count);
         goto cleanup_trace;
     }
 
-    printf("thread safety test passed\n");
+    if (child > 0 && collect_child_exit(child, &target_exited) != 0) {
+        goto cleanup_trace;
+    }
+    if (target_exited) {
+        child = -1;
+    }
+
+    printf("thread safety stress test passed: tids=%d tracked=%d mix=%d/%d pair=%d/%d toggles=%d\n",
+           stats.tid_count,
+           max_tracked_threads,
+           stats.mix_entry_total,
+           stats.mix_return_total,
+           stats.pair_entry_total,
+           stats.pair_return_total,
+           toggle_count);
     rc = 0;
 
 cleanup_trace:
     zt_trace_shutdown();
     zt_injector_detach(&session);
 cleanup:
-    if (rc != 0) {
+    if (rc != 0 && child > 0) {
         kill(child, SIGKILL);
+        (void)waitpid(child, NULL, 0);
     }
-    unlink(log_path);
+    if (rc == 0) {
+        unlink(log_path);
+    } else {
+        fprintf(stderr, "kept failing thread trace log: %s\n", log_path);
+    }
     free(log_text);
     return rc;
 }
