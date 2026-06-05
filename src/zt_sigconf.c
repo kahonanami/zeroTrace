@@ -49,56 +49,12 @@ static void zt_copy_str(char *dst, size_t dst_size, const char *src) {
     snprintf(dst, dst_size, "%s", src);
 }
 
-static void zt_strip_param_name(char *spec) {
-    size_t len;
+static int zt_find_trailing_ident_span(const char *spec, size_t *start_out, size_t *end_out) {
     size_t end;
     size_t start;
 
-    if (spec == NULL) {
-        return;
-    }
-
-    len = strlen(spec);
-    if (len == 0) {
-        return;
-    }
-
-    end = len;
-    while (end > 0 && isspace((unsigned char)spec[end - 1])) {
-        --end;
-    }
-
-    start = end;
-    while (start > 0 &&
-           (isalnum((unsigned char)spec[start - 1]) || spec[start - 1] == '_')) {
-        --start;
-    }
-
-    if (start == end || start == 0) {
-        return;
-    }
-
-    if (spec[start - 1] == '*') {
-        return;
-    }
-
-    while (start > 0 && isspace((unsigned char)spec[start - 1])) {
-        --start;
-    }
-    spec[start] = '\0';
-}
-
-static void zt_extract_param_name(const char *spec, char *name, size_t name_size) {
-    size_t end;
-    size_t start;
-
-    if (name == NULL || name_size == 0) {
-        return;
-    }
-    name[0] = '\0';
-
-    if (spec == NULL || spec[0] == '\0') {
-        return;
+    if (spec == NULL || start_out == NULL) {
+        return 0;
     }
 
     end = strlen(spec);
@@ -113,10 +69,54 @@ static void zt_extract_param_name(const char *spec, char *name, size_t name_size
     }
 
     if (start == end || start == 0) {
+        return 0;
+    }
+
+    *start_out = start;
+    if (end_out != NULL) {
+        *end_out = end;
+    }
+    return 1;
+}
+
+static void zt_strip_param_name(char *spec) {
+    size_t start;
+
+    if (!zt_find_trailing_ident_span(spec, &start, NULL)) {
         return;
     }
 
-    zt_copy_str(name, name_size, spec + start);
+    if (spec[start - 1] == '*') {
+        spec[start] = '\0';
+        return;
+    }
+
+    while (start > 0 && isspace((unsigned char)spec[start - 1])) {
+        --start;
+    }
+    spec[start] = '\0';
+}
+
+static void zt_extract_param_name(const char *spec, char *name, size_t name_size) {
+    size_t end;
+    size_t start;
+    size_t len;
+
+    if (name == NULL || name_size == 0) {
+        return;
+    }
+    name[0] = '\0';
+
+    if (!zt_find_trailing_ident_span(spec, &start, &end)) {
+        return;
+    }
+
+    len = end - start;
+    if (len >= name_size) {
+        len = name_size - 1;
+    }
+    memcpy(name, spec + start, len);
+    name[len] = '\0';
 }
 
 typedef struct {
@@ -324,6 +324,48 @@ static size_t zt_min_size(size_t lhs, size_t rhs) {
     return lhs < rhs ? lhs : rhs;
 }
 
+static int zt_read_remote_chunk_or_byte(const zt_injector_session_t *session,
+                                        uint64_t remote_addr,
+                                        unsigned char *buffer,
+                                        size_t *len_inout) {
+    size_t len;
+
+    if (session == NULL || buffer == NULL || len_inout == NULL || *len_inout == 0) {
+        return -1;
+    }
+
+    len = *len_inout;
+    if (zt_read_remote_memory(session->pid, remote_addr, buffer, len) == 0) {
+        return 0;
+    }
+
+    *len_inout = 1;
+    return zt_read_remote_memory(session->pid, remote_addr, buffer, 1);
+}
+
+static int zt_read_remote_bytes_with_fallback(const zt_injector_session_t *session,
+                                             uint64_t remote_addr,
+                                             unsigned char *buffer,
+                                             size_t len) {
+    size_t i;
+
+    if (session == NULL || buffer == NULL) {
+        return -1;
+    }
+
+    if (len == 0 || zt_read_remote_memory(session->pid, remote_addr, buffer, len) == 0) {
+        return 0;
+    }
+
+    for (i = 0; i < len; ++i) {
+        if (zt_read_remote_memory(session->pid, remote_addr + i, &buffer[i], 1) != 0) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 static int zt_read_remote_cstr(const zt_injector_session_t *session,
                                uint64_t remote_addr,
                                char *buffer,
@@ -345,11 +387,8 @@ static int zt_read_remote_cstr(const zt_injector_session_t *session,
         size_t chunk_len = zt_min_size(sizeof(chunk), buffer_size - 1 - i);
         size_t j;
 
-        if (zt_read_remote_memory(session->pid, remote_addr + i, chunk, chunk_len) != 0) {
-            chunk_len = 1;
-            if (zt_read_remote_memory(session->pid, remote_addr + i, chunk, chunk_len) != 0) {
-                return -1;
-            }
+        if (zt_read_remote_chunk_or_byte(session, remote_addr + i, chunk, &chunk_len) != 0) {
+            return -1;
         }
 
         for (j = 0; j < chunk_len && i + 1 < buffer_size; ++j, ++i) {
@@ -438,13 +477,8 @@ static int zt_read_remote_buf_preview(const zt_injector_session_t *session,
     buffer[offset++] = '"';
 
     len = zt_min_size(len, sizeof(bytes));
-    if (len > 0 &&
-        zt_read_remote_memory(session->pid, remote_addr, bytes, len) != 0) {
-        for (i = 0; i < len; ++i) {
-            if (zt_read_remote_memory(session->pid, remote_addr + i, &bytes[i], 1) != 0) {
-                return -1;
-            }
-        }
+    if (zt_read_remote_bytes_with_fallback(session, remote_addr, bytes, len) != 0) {
+        return -1;
     }
 
     for (i = 0; i < len; ++i) {
@@ -537,7 +571,7 @@ static int zt_find_format_param_index(const zt_func_sig_t *sig) {
     return -1;
 }
 
-static int zt_count_fixed_gp_params(const zt_func_sig_t *sig) {
+static int zt_count_fixed_params(const zt_func_sig_t *sig, int want_fp) {
     int i;
     int count = 0;
 
@@ -546,24 +580,7 @@ static int zt_count_fixed_gp_params(const zt_func_sig_t *sig) {
     }
 
     for (i = 0; i < sig->param_count; ++i) {
-        if (!zt_sig_type_is_fp(sig->params[i].type)) {
-            ++count;
-        }
-    }
-
-    return count;
-}
-
-static int zt_count_fixed_fp_params(const zt_func_sig_t *sig) {
-    int i;
-    int count = 0;
-
-    if (sig == NULL) {
-        return 0;
-    }
-
-    for (i = 0; i < sig->param_count; ++i) {
-        if (zt_sig_type_is_fp(sig->params[i].type)) {
+        if (zt_sig_type_is_fp(sig->params[i].type) == want_fp) {
             ++count;
         }
     }
@@ -684,8 +701,8 @@ static int zt_append_variadic_args(char *out,
         return zt_append_raw(out, out_size, offset, ", ...");
     }
 
-    gp_index = zt_count_fixed_gp_params(sig);
-    fp_index = zt_count_fixed_fp_params(sig);
+    gp_index = zt_count_fixed_params(sig, 0);
+    fp_index = zt_count_fixed_params(sig, 1);
     p = fmt;
     while (*p != '\0') {
         if (*p++ != '%') {
@@ -814,7 +831,7 @@ int zt_format_trace_event_with_sig(const zt_injector_session_t *session,
         }
         offset = (size_t)written;
 
-        for (i = 0; i < sig->param_count && i < ZT_SIGCONF_MAX_PARAMS; ++i) {
+        for (i = 0; i < sig->param_count; ++i) {
             uint64_t raw_value;
 
             if (i > 0) {
@@ -886,7 +903,7 @@ int zt_format_trace_event_with_sig(const zt_injector_session_t *session,
             return -1;
         }
 
-        for (i = 0; i < sig->param_count && i < ZT_SIGCONF_MAX_PARAMS; ++i) {
+        for (i = 0; i < sig->param_count; ++i) {
             if (sig->params[i].type == ZT_SIG_TYPE_BUF) {
                 char preview[192];
                 size_t preview_len = zt_buffer_preview_len(sig, entry_event, event, i, 1);

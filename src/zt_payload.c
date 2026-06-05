@@ -131,7 +131,6 @@ static int zt_copy_call_action_if_match(const zt_probe_call_action_t *action,
                                         zt_probe_call_action_t *action_out) {
     zt_probe_call_action_t snapshot;
     uint64_t enabled;
-    size_t i;
 
     if (action == NULL || action_out == NULL) {
         return 0;
@@ -145,9 +144,7 @@ static int zt_copy_call_action_if_match(const zt_probe_call_action_t *action,
     snapshot.callee_addr = action->callee_addr;
     snapshot.probe_id = action->probe_id;
     snapshot.arg_count = action->arg_count;
-    for (i = 0; i < ZT_CALL_ACTION_ARG_CAP; ++i) {
-        snapshot.args[i] = action->args[i];
-    }
+    memcpy(snapshot.args, action->args, sizeof(snapshot.args));
     snapshot.enabled = __atomic_load_n(&action->enabled, __ATOMIC_ACQUIRE);
 
     if (snapshot.enabled != enabled ||
@@ -269,7 +266,6 @@ static void zt_run_call_action(const ctx_t *context, uint64_t call_id) {
     uint64_t retval;
     zt_trace_event_t *event;
     uint64_t commit_seq;
-    size_t i;
 
     if (context == NULL || in_call_action) {
         return;
@@ -294,9 +290,7 @@ static void zt_run_call_action(const ctx_t *context, uint64_t call_id) {
     event->args[0] = action.callee_addr;
     event->args[1] = retval;
     event->call_arg_count = action.arg_count;
-    for (i = 0; i < ZT_CALL_ACTION_ARG_CAP; ++i) {
-        event->call_args[i] = call_args[i];
-    }
+    memcpy(event->call_args, call_args, sizeof(event->call_args));
 
     zt_commit_event_slot(event, commit_seq);
 }

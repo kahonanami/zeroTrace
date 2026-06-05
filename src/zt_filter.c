@@ -11,7 +11,10 @@ typedef struct {
     const zt_trace_event_t *event;
     size_t pos;
     int ok;
+    int eval_enabled;
 } zt_filter_eval_t;
+
+typedef uint64_t (*zt_filter_parse_fn_t)(zt_filter_eval_t *ctx);
 
 typedef struct {
     const char *text;
@@ -56,9 +59,22 @@ static zt_filter_eval_t zt_filter_eval_init(const zt_probe_filter_t *filter,
         .event = event,
         .pos = 0,
         .ok = 1,
+        .eval_enabled = event != NULL,
     };
 
     return ctx;
+}
+
+static int zt_filter_set_eval_enabled(zt_filter_eval_t *ctx, int enabled) {
+    int previous;
+
+    if (ctx == NULL) {
+        return 0;
+    }
+
+    previous = ctx->eval_enabled;
+    ctx->eval_enabled = enabled;
+    return previous;
 }
 
 static const zt_probe_filter_token_t *zt_filter_peek(zt_filter_eval_t *ctx) {
@@ -96,7 +112,7 @@ static uint64_t zt_filter_parse_primary(zt_filter_eval_t *ctx) {
     }
 
     if (zt_filter_take(ctx, ZT_PROBE_FILTER_TOK_ARG)) {
-        if (ctx->event == NULL) {
+        if (!ctx->eval_enabled || ctx->event == NULL) {
             return 0;
         }
         return zt_filter_event_arg(ctx->event, token->arg_index);
@@ -130,11 +146,14 @@ static uint64_t zt_filter_parse_mul(zt_filter_eval_t *ctx) {
             lhs *= zt_filter_parse_unary(ctx);
         } else if (zt_filter_take(ctx, ZT_PROBE_FILTER_TOK_DIV)) {
             uint64_t rhs = zt_filter_parse_unary(ctx);
-            if (rhs == 0) {
+            if (!ctx->eval_enabled) {
+                lhs = 0;
+            } else if (rhs == 0) {
                 ctx->ok = 0;
                 return 0;
+            } else {
+                lhs /= rhs;
             }
-            lhs /= rhs;
         } else {
             break;
         }
@@ -159,26 +178,30 @@ static uint64_t zt_filter_parse_add(zt_filter_eval_t *ctx) {
     return lhs;
 }
 
-static int zt_filter_take_cmp(zt_filter_eval_t *ctx, uint8_t *type_out) {
-    const zt_probe_filter_token_t *token = zt_filter_peek(ctx);
-
-    if (token == NULL || type_out == NULL) {
-        return 0;
-    }
-
-    switch (token->type) {
+static int zt_filter_token_is_cmp(uint8_t type) {
+    switch (type) {
         case ZT_PROBE_FILTER_TOK_EQ:
         case ZT_PROBE_FILTER_TOK_NE:
         case ZT_PROBE_FILTER_TOK_GT:
         case ZT_PROBE_FILTER_TOK_GE:
         case ZT_PROBE_FILTER_TOK_LT:
         case ZT_PROBE_FILTER_TOK_LE:
-            *type_out = token->type;
-            ++ctx->pos;
             return 1;
         default:
             return 0;
     }
+}
+
+static int zt_filter_take_cmp(zt_filter_eval_t *ctx, uint8_t *type_out) {
+    const zt_probe_filter_token_t *token = zt_filter_peek(ctx);
+
+    if (token == NULL || type_out == NULL || !zt_filter_token_is_cmp(token->type)) {
+        return 0;
+    }
+
+    *type_out = token->type;
+    ++ctx->pos;
+    return 1;
 }
 
 static uint64_t zt_filter_apply_cmp(uint8_t type, uint64_t lhs, uint64_t rhs) {
@@ -209,11 +232,34 @@ static uint64_t zt_filter_parse_cmp(zt_filter_eval_t *ctx) {
     return lhs;
 }
 
+static uint64_t zt_filter_parse_with_eval(zt_filter_eval_t *ctx,
+                                          int eval_enabled,
+                                          zt_filter_parse_fn_t parse) {
+    int previous_eval;
+    uint64_t value;
+
+    previous_eval = zt_filter_set_eval_enabled(ctx, eval_enabled);
+    value = parse(ctx);
+    zt_filter_set_eval_enabled(ctx, previous_eval);
+    return value;
+}
+
+static uint64_t zt_filter_parse_maybe_skipped(zt_filter_eval_t *ctx,
+                                              int skip_eval,
+                                              zt_filter_parse_fn_t parse) {
+    return skip_eval
+        ? zt_filter_parse_with_eval(ctx, 0, parse)
+        : parse(ctx);
+}
+
 static uint64_t zt_filter_parse_and(zt_filter_eval_t *ctx) {
     uint64_t lhs = zt_filter_parse_cmp(ctx);
 
     while (ctx->ok && zt_filter_take(ctx, ZT_PROBE_FILTER_TOK_AND)) {
-        uint64_t rhs = zt_filter_parse_cmp(ctx);
+        uint64_t rhs = zt_filter_parse_maybe_skipped(ctx,
+                                                     ctx->eval_enabled && !lhs,
+                                                     zt_filter_parse_cmp);
+
         lhs = lhs && rhs;
     }
 
@@ -224,7 +270,10 @@ static uint64_t zt_filter_parse_or(zt_filter_eval_t *ctx) {
     uint64_t lhs = zt_filter_parse_and(ctx);
 
     while (ctx->ok && zt_filter_take(ctx, ZT_PROBE_FILTER_TOK_OR)) {
-        uint64_t rhs = zt_filter_parse_and(ctx);
+        uint64_t rhs = zt_filter_parse_maybe_skipped(ctx,
+                                                     ctx->eval_enabled && lhs,
+                                                     zt_filter_parse_and);
+
         lhs = lhs || rhs;
     }
 

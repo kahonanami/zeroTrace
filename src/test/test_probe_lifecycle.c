@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include <errno.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +23,52 @@ static const char *k_symbols[] = {
     "probe_fn09", "probe_fn10", "probe_fn11", "probe_fn12",
     "probe_fn13", "probe_fn14", "probe_fn15", "probe_fn16",
 };
+
+typedef struct {
+    uint64_t payload_path_addr;
+    uint64_t trace_buffer_addr;
+    uint64_t payload_config_addr;
+} runtime_mapping_addrs_t;
+
+static int expect_filter_result(const char *expr, uint64_t arg0, int expected) {
+    zt_probe_filter_t filter;
+    zt_trace_event_t event;
+    int actual;
+
+    memset(&event, 0, sizeof(event));
+    event.args[0] = arg0;
+
+    if (zt_probe_filter_compile(expr, &filter) != 0) {
+        fprintf(stderr, "failed to compile filter expression: %s\n", expr);
+        return -1;
+    }
+
+    actual = zt_probe_filter_eval(&filter, &event);
+    if (actual != expected) {
+        fprintf(stderr,
+                "filter result mismatch: expr=%s arg0=%llu expected=%d actual=%d\n",
+                expr,
+                (unsigned long long)arg0,
+                expected,
+                actual);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int run_filter_short_circuit_semantics(void) {
+    if (expect_filter_result("arg0 == 0 || 10 / arg0 > 1", 0, 1) != 0 ||
+        expect_filter_result("arg0 == 0 || 10 / arg0 > 1", 20, 0) != 0 ||
+        expect_filter_result("arg0 != 0 && 10 / arg0 > 1", 0, 0) != 0 ||
+        expect_filter_result("arg0 != 0 && 10 / arg0 > 1", 5, 1) != 0 ||
+        expect_filter_result("10 / arg0 > 1", 0, 0) != 0) {
+        return 1;
+    }
+
+    printf("filter short-circuit test passed\n");
+    return 0;
+}
 
 static void kill_and_reap_child(pid_t child) {
     int status;
@@ -94,6 +141,111 @@ static int read_mapping_for_addr(pid_t pid,
 
 static int mapping_contains_addr(pid_t pid, uint64_t addr) {
     return read_mapping_for_addr(pid, addr, NULL, NULL, NULL, 0) == 0;
+}
+
+static int scan_runtime_mapping_starts(pid_t pid,
+                                       runtime_mapping_addrs_t *runtime_addrs,
+                                       const char *payload_path,
+                                       int find_config) {
+    char maps_path[64];
+    char line[512];
+    size_t payload_path_len;
+    FILE *fp;
+
+    if (pid <= 0 || runtime_addrs == NULL || payload_path == NULL) {
+        return -1;
+    }
+
+    payload_path_len = strlen(payload_path) + 1;
+    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+    fp = fopen(maps_path, "r");
+    if (fp == NULL) {
+        return -1;
+    }
+
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        unsigned long long start = 0;
+        unsigned long long end = 0;
+        char perms[8] = {0};
+        uint64_t map_size;
+
+        if (sscanf(line, "%llx-%llx %7s", &start, &end, perms) != 3 ||
+            strchr(perms, 'r') == NULL || end <= start) {
+            continue;
+        }
+
+        map_size = (uint64_t)end - (uint64_t)start;
+        if (runtime_addrs->payload_path_addr == 0 &&
+            map_size >= payload_path_len) {
+            char remote_path[PATH_MAX];
+
+            memset(remote_path, 0, sizeof(remote_path));
+            if (payload_path_len <= sizeof(remote_path) &&
+                zt_read_remote_memory(pid,
+                                      (uint64_t)start,
+                                      remote_path,
+                                      payload_path_len) == 0 &&
+                memcmp(remote_path, payload_path, payload_path_len) == 0) {
+                runtime_addrs->payload_path_addr = (uint64_t)start;
+            }
+        }
+
+        if (!find_config &&
+            runtime_addrs->trace_buffer_addr == 0 &&
+            map_size >= sizeof(zt_trace_buffer_t)) {
+            uint64_t magic = 0;
+
+            if (zt_read_remote_memory(pid,
+                                      (uint64_t)start,
+                                      &magic,
+                                      sizeof(magic)) == 0 &&
+                magic == ZT_TRACE_BUFFER_MAGIC) {
+                runtime_addrs->trace_buffer_addr = (uint64_t)start;
+            }
+        }
+
+        if (find_config &&
+            runtime_addrs->payload_config_addr == 0 &&
+            runtime_addrs->trace_buffer_addr != 0 &&
+            map_size >= sizeof(zt_payload_config_t)) {
+            zt_payload_config_t config;
+
+            memset(&config, 0, sizeof(config));
+            if (zt_read_remote_memory(pid,
+                                      (uint64_t)start,
+                                      &config,
+                                      sizeof(config)) == 0 &&
+                config.shared_buffer_addr == runtime_addrs->trace_buffer_addr &&
+                config.shared_buffer_size == sizeof(zt_trace_buffer_t)) {
+                runtime_addrs->payload_config_addr = (uint64_t)start;
+            }
+        }
+    }
+
+    fclose(fp);
+    return 0;
+}
+
+static int find_runtime_mapping_addrs(pid_t pid, runtime_mapping_addrs_t *runtime_addrs) {
+    char payload_path[PATH_MAX];
+
+    if (runtime_addrs == NULL ||
+        realpath("bin/libzt_payload.so", payload_path) == NULL) {
+        return -1;
+    }
+
+    memset(runtime_addrs, 0, sizeof(*runtime_addrs));
+    if (scan_runtime_mapping_starts(pid, runtime_addrs, payload_path, 0) != 0 ||
+        runtime_addrs->trace_buffer_addr == 0) {
+        return -1;
+    }
+
+    if (scan_runtime_mapping_starts(pid, runtime_addrs, payload_path, 1) != 0) {
+        return -1;
+    }
+
+    return runtime_addrs->payload_path_addr != 0 &&
+           runtime_addrs->payload_config_addr != 0 ? 0 : -1;
 }
 
 #if defined(__aarch64__)
@@ -763,6 +915,7 @@ static int run_probe_cleanup_maps_diff(void) {
     uint64_t trampoline_map_start;
     uint64_t trampoline_map_end;
     uint64_t target_addr;
+    runtime_mapping_addrs_t runtime_addrs;
     uint8_t orig_code[ZT_PROBE_ORIG_CODE_MAX];
     uint8_t restored_code[ZT_PROBE_ORIG_CODE_MAX];
     uint8_t orig_len;
@@ -814,6 +967,11 @@ static int run_probe_cleanup_maps_diff(void) {
         goto cleanup_trace;
     }
 
+    if (find_runtime_mapping_addrs(child, &runtime_addrs) != 0) {
+        fprintf(stderr, "cleanup test failed to locate runtime mappings\n");
+        goto cleanup_trace;
+    }
+
     if (zt_trace_remove_probe(&session, probe->probe_id) != 0) {
         fprintf(stderr, "cleanup test failed to remove probe\n");
         goto cleanup_trace;
@@ -826,6 +984,13 @@ static int run_probe_cleanup_maps_diff(void) {
 
     if (mapping_contains_addr(child, trampoline_addr)) {
         fprintf(stderr, "cleanup test trampoline mapping leaked after untrace\n");
+        goto cleanup_detach;
+    }
+
+    if (mapping_contains_addr(child, runtime_addrs.payload_path_addr) ||
+        mapping_contains_addr(child, runtime_addrs.trace_buffer_addr) ||
+        mapping_contains_addr(child, runtime_addrs.payload_config_addr)) {
+        fprintf(stderr, "cleanup test runtime mapping leaked after untrace\n");
         goto cleanup_detach;
     }
 
@@ -853,7 +1018,8 @@ cleanup_trace:
 }
 
 int main(void) {
-    if (run_many_probe_lifecycle() != 0 ||
+    if (run_filter_short_circuit_semantics() != 0 ||
+        run_many_probe_lifecycle() != 0 ||
         run_conditional_probe() != 0 ||
         run_probe_filter_update() != 0 ||
         run_probe_call_action() != 0 ||

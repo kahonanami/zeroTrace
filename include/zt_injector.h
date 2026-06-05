@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 
 #include "zt_payload.h"
 
@@ -76,6 +77,11 @@ int zt_resolve_symbol_target(zt_injector_session_t *session,
                              const char *symbol_name,
                              zt_symbol_target_t *target_out);
 int zt_read_remote_memory(pid_t pid, uint64_t remote_addr, void *buffer, size_t size);
+int zt_read_remote_iov(pid_t pid,
+                       const struct iovec *local_iov,
+                       const struct iovec *remote_iov,
+                       size_t iov_count,
+                       size_t expected_size);
 int zt_write_remote_memory(pid_t pid, uint64_t remote_addr, const void *buffer, size_t size);
 int zt_remote_mmap(pid_t pid,
                    size_t size,

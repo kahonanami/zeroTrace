@@ -44,7 +44,7 @@ static const zt_cli_command_t cmd_table[] = {
     {"stop", "Stop the target process and keep probes unchanged", cmd_stop},
     {"enable", "Enable a probe again: enable <symbol|id>", cmd_enable},
     {"disable", "Disable probe(s): disable <symbol|id|all>", cmd_disable},
-    {"update", "Update probe behavior: update <symbol|id> if <expr> | clear | call <symbol|clear> [arg0|0x...]", cmd_update},
+    {"update", "Update probe behavior: update <symbol|id> if <expr> | clear | call <symbol|clear> [arg0|...|arg5|0x...]", cmd_update},
     {"untrace", "Remove a probe: untrace <symbol|id>", cmd_untrace},
     {"info", "Show info: info target | info probes", cmd_info},
     {"continue", "Continue the stopped target process", cmd_continue},
@@ -52,9 +52,9 @@ static const zt_cli_command_t cmd_table[] = {
 
 static const char kTraceUsage[] = "Usage: trace <symbol> [if <expr>]";
 static const char kUpdateUsage[] =
-    "Usage: update <symbol|id> if <expr> | clear | call <symbol|clear> [arg0|0x...]";
+    "Usage: update <symbol|id> if <expr> | clear | call <symbol|clear> [arg0|...|arg5|0x...]";
 static const char kUpdateCallUsage[] =
-    "Usage: update <symbol|id> call <symbol|clear> [arg0|0x...]";
+    "Usage: update <symbol|id> call <symbol|clear> [arg0|...|arg5|0x...]";
 
 enum {
     ZT_CLI_COMMAND_COUNT = sizeof(cmd_table) / sizeof(cmd_table[0]),
@@ -88,6 +88,40 @@ static int zt_cli_stop_target(void) {
     }
 
     return zt_injector_interrupt_all(&g_cli_session);
+}
+
+static int zt_cli_set_target_running(bool running) {
+    if (zt_trace_is_active()) {
+        return running ?
+               zt_trace_resume(&g_cli_session) :
+               zt_trace_pause(&g_cli_session);
+    }
+
+    return running ?
+           zt_injector_continue_all(&g_cli_session) :
+           zt_cli_stop_target();
+}
+
+static int zt_cli_require_attached(void) {
+    if (!g_cli_attached) {
+        printf("No target attached\n");
+        return 0;
+    }
+
+    return 1;
+}
+
+static int zt_cli_require_active_trace(void) {
+    if (!zt_cli_require_attached()) {
+        return 0;
+    }
+
+    if (!zt_trace_is_active()) {
+        printf("No active trace\n");
+        return 0;
+    }
+
+    return 1;
 }
 
 static zt_probe_info_t *zt_cli_find_probe(const char *target, uint64_t *probe_id_out) {
@@ -391,8 +425,7 @@ static int cmd_attach(char *args) {
 static int cmd_detach(char *args) {
     (void)args;
 
-    if (!g_cli_attached) {
-        printf("No target attached\n");
+    if (!zt_cli_require_attached()) {
         return 0;
     }
 
@@ -407,8 +440,7 @@ static int cmd_trace(char *args) {
     char cwd[PATH_MAX];
     zt_probe_filter_t filter;
 
-    if (!g_cli_attached) {
-        printf("No target attached\n");
+    if (!zt_cli_require_attached()) {
         return 0;
     }
 
@@ -471,14 +503,11 @@ static int cmd_stop(char *args) {
 
     (void)args;
 
-    if (!g_cli_attached) {
-        printf("No target attached\n");
+    if (!zt_cli_require_attached()) {
         return 0;
     }
 
-    ret = zt_trace_is_active() ?
-          zt_trace_pause(&g_cli_session) :
-          zt_cli_stop_target();
+    ret = zt_cli_set_target_running(false);
     if (ret != 0) {
         printf("Failed to stop pid %d\n", g_cli_session.pid);
         return 0;
@@ -492,13 +521,7 @@ static int cmd_enable(char *args) {
     char *target;
     uint64_t probe_id;
 
-    if (!g_cli_attached) {
-        printf("No target attached\n");
-        return 0;
-    }
-
-    if (!zt_trace_is_active()) {
-        printf("No active trace\n");
+    if (!zt_cli_require_active_trace()) {
         return 0;
     }
 
@@ -530,13 +553,7 @@ static int cmd_disable(char *args) {
     int disabled_count;
     int failed_count;
 
-    if (!g_cli_attached) {
-        printf("No target attached\n");
-        return 0;
-    }
-
-    if (!zt_trace_is_active()) {
-        printf("No active trace\n");
+    if (!zt_cli_require_active_trace()) {
         return 0;
     }
 
@@ -600,13 +617,7 @@ static int cmd_update(char *args) {
     zt_probe_filter_t filter;
     uint64_t probe_id;
 
-    if (!g_cli_attached) {
-        printf("No target attached\n");
-        return 0;
-    }
-
-    if (!zt_trace_is_active()) {
-        printf("No active trace\n");
+    if (!zt_cli_require_active_trace()) {
         return 0;
     }
 
@@ -706,8 +717,7 @@ static int cmd_untrace(char *args) {
     char *target;
     uint64_t probe_id;
 
-    if (!g_cli_attached) {
-        printf("No target attached\n");
+    if (!zt_cli_require_attached()) {
         return 0;
     }
 
@@ -738,8 +748,7 @@ static int cmd_info(char *args) {
     char *subcmd;
     int i;
 
-    if (!g_cli_attached) {
-        printf("No target attached\n");
+    if (!zt_cli_require_attached()) {
         return 0;
     }
 
@@ -821,14 +830,11 @@ static int cmd_continue(char *args) {
 
     (void)args;
 
-    if (!g_cli_attached) {
-        printf("No target attached\n");
+    if (!zt_cli_require_attached()) {
         return 0;
     }
 
-    ret = zt_trace_is_active() ?
-          zt_trace_resume(&g_cli_session) :
-          zt_injector_continue_all(&g_cli_session);
+    ret = zt_cli_set_target_running(true);
     if (ret != 0) {
         printf("Failed to continue pid %d\n", g_cli_session.pid);
         return 0;

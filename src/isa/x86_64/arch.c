@@ -132,7 +132,7 @@ int zt_arch_calc_patch_span(const uint8_t *code,
     size_t total_len;
     size_t i;
 
-    if (code == NULL || patch_len_out == NULL) {
+    if (code == NULL || patch_len_out == NULL || code_size < min_len) {
         return -1;
     }
 

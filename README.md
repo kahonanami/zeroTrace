@@ -172,7 +172,7 @@ update add_loop clear
 - `arg0` 到 `arg5`，对应当前 ABI 的前 6 个整型 / 指针参数；`x86_64` 为 `rdi/rsi/rdx/rcx/r8/r9`，`aarch64` 为 `x0 ... x5`
 - 十进制和 `0x` 十六进制数字
 - 比较运算：`==`、`!=`、`>`、`>=`、`<`、`<=`
-- 布尔运算：`&&`、`||`、`!`
+- 布尔运算：`&&`、`||`、`!`，其中 `&&` / `||` 按短路语义求值
 - 算术运算：`+`、`-`、`*`、`/`
 - 括号
 
@@ -252,7 +252,7 @@ make test
 - trampoline 构造
 - libc/POSIX 动态库函数 trace
 - 16 个并发 probe 的生命周期测试，并逐个读回函数入口 patch，验证入口被改写为架构跳转模板而不是 trap 指令
-- probe 清理 maps-diff 测试：验证最后一个 probe 删除后远程 trampoline pool 被 `munmap`，且函数入口原始字节恢复
+- probe 清理 maps-diff 测试：验证最后一个 probe 删除后远程 trampoline pool/runtime mmap 被释放，且函数入口原始字节恢复
 - 多线程 stress 测试：运行中新线程追踪、并发 probe 命中、动态 enable/disable，并用始终启用的 `thread_stable` 按 TID 校验 entry/return 严格配平
 - 线程组控制测试：目标持续创建/退出线程，反复 `interrupt_all/continue_all`，验证停止期间无心跳、恢复后继续运行
 - 异步信号下的 signal safety 测试
@@ -261,7 +261,7 @@ make test
 - 条件探针参数过滤测试
 - probe 热更新测试：分阶段验证 filter、probe 内 call action、disable/enable 状态切换，并确认 trampoline slot 不被重建；live 模式验证运行中 call action A/B 切换不会丢失 callee symbol 或错配返回值
 - probe 内目标进程函数调用测试：覆盖无参 call、带参 call 和 call action 表槽位碰撞回归
-- x86_64 / aarch64 架构后端选择 self-test：验证 Makefile 会按 `ARCH` 选择正确 ISA 后端、stub 和 trampoline 测试集合
+- x86_64 / aarch64 架构后端选择 self-test：验证 Makefile 会按 `ARCH` 选择正确 ISA 后端、stub 和 trampoline 测试集合；该项是配置自检，aarch64 runtime 仍以目标 aarch64 机器上的 `make ARCH=aarch64 test` 为准
 - perf/ftrace 风格事件合流脚本 self-test
 
 ## Benchmark
@@ -300,41 +300,41 @@ benchmark 目标函数是 `bench_getpid()`，它是测试程序中的一个 `noi
 - `benchmark/latency.out`
 - `benchmark/report.txt`
 
-下面是一组已记录的 x86_64 benchmark 参考结果。该次运行环境没有非交互 sudo 权限，因此 kernel uprobe 项被脚本自动跳过：
+`benchmark/report.txt` 反映最近一次本地运行结果，可能会因为环境变量或机器负载不同而变化。下面是一组使用标准参数记录的 x86_64 benchmark 参考结果；该次运行环境没有非交互 sudo 权限，因此 kernel uprobe 项被脚本自动跳过：
 
 ```text
 iterations            : 1000000
 repeats               : 5
-baseline total ns     mean : 63723125 ns
-baseline per call     mean : 63.72 ns
+baseline total ns     mean : 60826780 ns
+baseline per call     mean : 60.83 ns
 uprobe total ns       : skipped
 uprobe note           : kernel uprobe benchmark skipped: sudo is not available non-interactively
 uprobe per call       : skipped
 uprobe overhead/call  : skipped
 ztrace vs uprobe      : skipped
-ztrace total ns       mean : 226531102 ns
-ztrace per call       mean : 226.53 ns
-ztrace overhead/call  mean : 162.81 ns
-ztrace overhead/call  min  : 160.89 ns
-ztrace overhead/call  max  : 165.36 ns
+ztrace total ns       mean : 228268087 ns
+ztrace per call       mean : 228.27 ns
+ztrace overhead/call  mean : 167.44 ns
+ztrace overhead/call  min  : 165.37 ns
+ztrace overhead/call  max  : 172.19 ns
 
 Probe lifecycle latency
 -----------------------
-install latency avg   : 427759 ns (0.428 ms) over 1000 rounds
-uninstall latency avg : 39889 ns (0.040 ms) over 1000 rounds
+install latency avg   : 339814 ns (0.340 ms) over 1000 rounds
+uninstall latency avg : 76822 ns (0.077 ms) over 1000 rounds
 ```
 
 从这组数据可以看到：
 
-- `zeroTrace` 单次额外开销均值约为 `162.81 ns`，低于题目要求的 `< 1000 ns`，也已经低于项目当前优化目标 `200 ns`
-- `probe` 安装延迟平均约为 `0.428 ms`，清理延迟平均约为 `0.040 ms`，都低于题目要求的 `< 10 ms`
+- `zeroTrace` 单次额外开销均值约为 `167.44 ns`，低于题目要求的 `< 1000 ns`，也已经低于项目当前优化目标 `200 ns`
+- `probe` 安装延迟平均约为 `0.340 ms`，完整清理延迟平均约为 `0.077 ms`，都低于题目要求的 `< 10 ms`
 - 若需要生成 zeroTrace vs uprobe 的完整对比，请在具备 `bpftrace` 和非交互 sudo 权限的环境下重新运行 `make benchmark`
 
 ## 当前完成情况
 
 - 基础功能 F1-F7 已实现，并通过自动化测试覆盖 probe 生命周期、参数/返回值、多 probe、多线程、信号安全和资源清理。
-- 进阶功能 A1-A5 已实现，包括 x86_64/aarch64 后端、条件探针、perf/ftrace 风格日志、probe 内 call action 和行为热更新；aarch64 runtime 验证以目标 aarch64 机器上的 `make ARCH=aarch64 test` 为准。
-- 已记录 x86_64 benchmark 额外开销约 `163 ns/call`，install/uninstall 延迟低于题目指标。
+- 进阶功能 A1-A5 已按当前设计实现，包括 x86_64/aarch64 后端、条件探针、perf/ftrace 风格日志、probe 内 call action 和行为热更新；本机自动化证据覆盖 x86_64 runtime 和 aarch64 配置选择，aarch64 runtime 验证以目标 aarch64 机器上的 `make ARCH=aarch64 test` 为准。
+- 已记录 x86_64 benchmark 额外开销约 `167 ns/call`，install/uninstall 延迟低于题目指标。
 - 详细覆盖矩阵、实验步骤和剩余验证建议见 [docs/evaluation.md](./docs/evaluation.md)。
 
 ## 文档
@@ -346,3 +346,9 @@ uninstall latency avg : 39889 ns (0.040 ms) over 1000 rounds
 | [docs/stub-control-flow.md](./docs/stub-control-flow.md) | 专门说明 trampoline / stub 控制流、栈布局和返回地址劫持细节 |
 | [docs/evaluation.md](./docs/evaluation.md) | 记录 F1-F7 / A1-A5 覆盖矩阵、实验方法、benchmark 结果和验证证据 |
 | [docs/ai-usage-report.md](./docs/ai-usage-report.md) | 总结 AI 辅助开发的使用范围、人工校验方式和风险控制 |
+
+`docs/` 下保留的官方技术方案和章程 PDF 是原始需求来源；上述 Markdown 文档只做项目内归纳、实现说明和验证记录。
+
+## 授权与引用
+
+本项目自写源代码和项目文档按根目录 [LICENSE](./LICENSE) 中的 GPLv3 发布。`docs/` 下保留的比赛技术方案和章程 PDF 是官方赛题材料，仅作为需求依据和引用来源；其授权和解释权归原发布方所有。

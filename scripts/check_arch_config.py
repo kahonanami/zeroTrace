@@ -15,42 +15,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-ARCH_CHECKS = {
+ARCH_EXPECTED = {
     "x86_64": {
-        "present": {
-            "ARCH_SRC_C": [
-                "src/isa/x86_64/arch.c",
-                "src/isa/x86_64/trampoline_manager.c",
-            ],
-            "ARCH_SRC_S": ["src/isa/x86_64/stub.S"],
-            "TEST_C": ["src/test/test_trampoline_builder.c"],
-        },
-        "absent": {
-            "ARCH_SRC_C": [
-                "src/isa/aarch64/arch.c",
-                "src/isa/aarch64/trampoline_manager.c",
-            ],
-            "ARCH_SRC_S": ["src/isa/aarch64/stub.S"],
-            "TEST_C": ["src/test/test_trampoline_builder_aarch64.c"],
-        },
+        "ARCH_SRC_C": [
+            "src/isa/x86_64/arch.c",
+            "src/isa/x86_64/trampoline_manager.c",
+        ],
+        "ARCH_SRC_S": ["src/isa/x86_64/stub.S"],
+        "TEST_C": ["src/test/test_trampoline_builder.c"],
     },
     "aarch64": {
-        "present": {
-            "ARCH_SRC_C": [
-                "src/isa/aarch64/arch.c",
-                "src/isa/aarch64/trampoline_manager.c",
-            ],
-            "ARCH_SRC_S": ["src/isa/aarch64/stub.S"],
-            "TEST_C": ["src/test/test_trampoline_builder_aarch64.c"],
-        },
-        "absent": {
-            "ARCH_SRC_C": [
-                "src/isa/x86_64/arch.c",
-                "src/isa/x86_64/trampoline_manager.c",
-            ],
-            "ARCH_SRC_S": ["src/isa/x86_64/stub.S"],
-            "TEST_C": ["src/test/test_trampoline_builder.c"],
-        },
+        "ARCH_SRC_C": [
+            "src/isa/aarch64/arch.c",
+            "src/isa/aarch64/trampoline_manager.c",
+        ],
+        "ARCH_SRC_S": ["src/isa/aarch64/stub.S"],
+        "TEST_C": ["src/test/test_trampoline_builder_aarch64.c"],
     },
 }
 
@@ -86,21 +66,32 @@ def require_absent(config: dict[str, list[str]], key: str, value: str) -> None:
         raise RuntimeError(f"{key} for ARCH={config.get('ARCH', ['?'])[0]} unexpectedly contains {value}")
 
 
+def require_selected_arch(config: dict[str, list[str]], arch: str) -> None:
+    selected = config.get("ARCH", [])
+    if selected != [arch]:
+        raise RuntimeError(f"requested ARCH={arch}, but Makefile reported ARCH={selected!r}")
+
+
 def check_arch(arch: str) -> None:
     config = read_arch_config(arch)
-    checks = ARCH_CHECKS[arch]
 
-    for key, values in checks["present"].items():
+    require_selected_arch(config, arch)
+
+    for key, values in ARCH_EXPECTED[arch].items():
         for value in values:
             require_contains(config, key, value)
 
-    for key, values in checks["absent"].items():
-        for value in values:
-            require_absent(config, key, value)
+    for other_arch, expected in ARCH_EXPECTED.items():
+        if other_arch == arch:
+            continue
+
+        for key, values in expected.items():
+            for value in values:
+                require_absent(config, key, value)
 
 
 def main() -> int:
-    for arch in ARCH_CHECKS:
+    for arch in ARCH_EXPECTED:
         check_arch(arch)
     print("arch config self-test passed")
     return 0

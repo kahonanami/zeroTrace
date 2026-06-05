@@ -87,6 +87,8 @@ aarch64 指令固定 4 字节，因此实际覆盖长度会按完整指令累计
 - `untrace` / `shutdown` 时，将 slot 对应标志位逻辑置空
 - 当 pool 全空时再远程 `munmap`
 
+trace runner 还会集中管理本轮 trace 创建的远程 runtime 区域，包括 payload path、trace buffer 和 payload config。最后一个 probe 删除或 `shutdown` 时，先恢复函数入口并释放 trampoline slot，再释放这些 runtime mmap 区域，避免目标进程存活时留下 tracer 自己分配的匿名映射。
+
 各 ISA 的 `trampoline_manager.c` 再根据 probe 信息构造 trampoline 机器码：写入 probe id、跳入 `entry_stub`、补执行被覆盖的前导指令，最后跳回 `原函数地址 + orig_len`。`x86_64` 使用栈上传递 probe id，`aarch64` 使用 `x17` 传递 probe id 并通过 `x15/x30` 闭合返回链。完整控制流、栈布局和 LR 链路见 [docs/stub-control-flow.md](./stub-control-flow.md)。
 
 ### 1.4 前导指令重定位
@@ -289,20 +291,7 @@ attach <pid>
 
 安装或卸载 patch 前，`zt_injector` 还会读取每个 stopped TID 的当前 PC。如果 PC 落在任一 probe 的入口 patch 区间内，就对该线程执行 `PTRACE_SINGLESTEP`，直到它离开这段即将被改写或恢复的字节范围。single-step 过程中会保留该线程原本需要继续透传的 signal，避免为了避让 patch 区间而吞掉目标进程信号。
 
-对应的自动化测试不再只是“多线程程序能跑完”。`test_thread_safety` 会启动一个两批创建工作线程的目标进程，覆盖以下压力场景：
-
-- 目标运行后继续创建新线程，验证运行态 `/proc/<pid>/task` refresh 能把新 TID 纳入控制
-- 多个线程并发命中 probe，日志中必须出现多个不同 TID
-- 目标运行中反复 `disable / enable` `thread_mix`，压测线程组 interrupt、PC 检查、patch 恢复和重新安装
-- 使用始终启用的 `thread_stable` probe 做强不变量校验，要求每个 TID 内 entry / return 数量严格配平；低频 `thread_pair` 用于额外多 probe 并发覆盖
-- 目标退出窗口中，如果 `/proc/<pid>/task` 已消失、共享 trace buffer 映射已消失，或退出后调用方多 poll 一次，会归类为目标退出，而不是误判为运行中 trace 错误
-
-`test_thread_group_control` 则单独验证线程组控制 API 本身。目标进程保留一组 persistent worker，同时持续创建短生命周期线程；测试端反复执行 `interrupt_all / continue_all`：
-
-- 停止后比较 `/proc/<pid>/task` 与 injector 跟踪表，要求当前 task 数不超过 tracked TID 数
-- 停止期间 drain 目标 reporter pipe，并在等待窗口内要求没有任何新心跳
-- 恢复后要求 reporter 心跳重新出现
-- 已记录回归输出为 `rounds=80 task_max=31 tracked_max=31 resume_rounds=80`
+线程安全和线程组控制的自动化证据统一记录在 [evaluation.md](./evaluation.md)，本文档只描述控制流机制。
 
 ### 2.2 trace
 
@@ -324,11 +313,11 @@ trace probe_fn01 if arg0 >= 10
 - `arg0` 到 `arg5`，对应当前 ABI 的前 6 个整型 / 指针参数；`x86_64` 为 `rdi/rsi/rdx/rcx/r8/r9`，`aarch64` 为 `x0 ... x5`
 - 十进制和 `0x` 十六进制数字
 - `==`、`!=`、`>`、`>=`、`<`、`<=`
-- `&&`、`||`、`!`
+- `&&`、`||`、`!`，其中 `&&` / `||` 按短路语义求值
 - `+`、`-`、`*`、`/`
 - 括号
 
-解析方式参考了 [NEMU](https://github.com/NJU-ProjectN/nemu) 的表达式求值思路：先把字符串 token 化，再按优先级递归求值。token 会保存在 `zt_probe_filter_t` 中，后续每次消费 entry 事件时直接用当前事件的 `value0 ... value5` 作为 `arg0 ... arg5` 求值。
+解析方式参考了 [NEMU](https://github.com/NJU-ProjectN/nemu) 的表达式求值思路：先把字符串 token 化，再按优先级递归求值。token 会保存在 `zt_probe_filter_t` 中，后续每次消费 entry 事件时直接用当前事件的 `value0 ... value5` 作为 `arg0 ... arg5` 求值。编译期只做语法检查；运行期遇到短路表达式时仍会解析右侧 token 以保持语法完整，但不会读取参数或触发除零等运行时错误。
 
 第一条 probe 的完整流程如下：
 
@@ -347,6 +336,8 @@ trace probe_fn01 if arg0 >= 10
 13. 写入 trampoline 到目标进程
 14. 把目标函数入口 patch 到 trampoline
 15. `PTRACE_CONT` 恢复目标进程运行
+
+trace 结束时按相反方向清理：恢复函数入口、释放 trampoline slot；如果没有剩余 probe，则释放 trampoline pool、payload path、trace buffer 和 payload config。
 
 ### 2.3 架构后端边界
 
@@ -510,23 +501,7 @@ payload 读取 action 时会先 acquire 读取一次 token，拷贝本地 snapsh
 
 `disable <symbol|id>` / `enable <symbol|id>` 属于 probe state 热更新。它需要短暂停住线程组来恢复或重新安装入口 patch，但 probe 元数据和 trampoline slot 会保留；重新 enable 时会复用原 slot，而不是分配新的 trampoline pool slot。
 
-对应的自动化测试是 `test_probe_hot_update`。它启动一个受控目标进程 `test_hot_update_target`，用管道把目标执行划分成 5 个阶段：
-
-1. 初始 false filter：`arg0 < 0`，验证早期 `0 ... 9` 调用不会进入日志
-2. 热更新 filter + call action A：`arg0 >= 10 && arg0 < 40`，验证 30 次 entry/return 和 30 次 `hot_call_a` call 事件
-3. 热更新 filter + call action B：`arg0 >= 40 && arg0 < 80`，验证 40 次 entry/return 和 40 次 `hot_call_b` call 事件
-4. `disable`：目标继续执行 `80 ... 94`，验证 disabled 阶段没有任何日志泄漏
-5. `enable` + 清除 call action + final filter：`arg0 >= 95`，验证 25 次 entry/return，且没有 call action 事件
-
-测试还会记录最初的 `trampoline_addr` 和 `trampoline_slot`，每次热更新后都检查它们没有变化。这样可以证明 A5 的行为更新没有退化成“先 untrace 再 trace”的重建流程。
-
-此外，`test_probe_hot_update` 还包含 live call action 热更新子测试。目标进程在运行中连续命中 `hot_probe`，tracer 不暂停目标进程，依次执行 `call hot_call_a`、`call hot_call_b`、`call clear`、`call hot_call_a`。测试要求日志中同时出现足够数量的 A/B call 事件，并逐行确认：
-
-- `hot_call_a()` 的返回值必须落在 `0xa5xx` 命名空间
-- `hot_call_b()` 的返回值必须落在 `0xb5xx` 命名空间
-- 不允许出现 `ztrace:call: ... => <unknown>()`
-
-这个子测试覆盖的是运行态热切换窗口，防止旧事件被当前 probe 的 `call_symbol` 错误解释。trace runner 会把每个 call 事件记录的 `callee_addr` 映射到历史 symbol cache，因此事件输出和当时真正调用的 callee 地址绑定，而不是和 probe 当前配置绑定。
+热更新的 staged / live 测试设计、事件数量和不变量统一放在 [evaluation.md](./evaluation.md)。这里需要强调的机制点是：filter 更新只影响 tracer 侧消费，call action 更新通过 commit token 同步远程 action 表，probe state 更新才需要短暂停住线程组改入口 patch。
 
 ### 2.7 probe 内 call action
 
@@ -550,8 +525,6 @@ retval = callee(resolved_arg0, resolved_arg1, ...);
 ztrace:call: probe_fn01 => call_marker() -> 0x5a01 callee=0x7f...
 ztrace:call: probe_fn01 => call_marker_args(0x5, 0x10, 0x5) -> 0x6b0515 callee=0x7f...
 ```
-
-对应的 `test_probe_lifecycle` 会覆盖无参 call、带参 call，以及 `probe_fn01(id=1)` 与 `probe_fn02(id=33)` 同时存在的 action slot 碰撞场景。带参子测试把 call action 配置为 `call_marker_args(arg0, 0x10, arg0)`，要求日志和返回值同时反映 entry 参数已经真实传入 callee；slot 碰撞子测试要求两个 probe 的 call action 都能输出日志，证明长期运行中反复 `trace/untrace` 不会让新 probe 覆盖旧 probe 的 call action。
 
 这个动作发生在目标进程内部，而不是 tracer 事后模拟输出。当前版本支持无参和最多 6 个整型 / 指针参数的函数调用，返回值按整数 / 指针返回值记录。
 
@@ -634,7 +607,7 @@ payload 和 tracer 之间通过共享内存中的 ring buffer 传递事件。
 
 payload 写事件时会先通过原子 `write_seq` 预留 ring-buffer slot，然后直接在该 slot 上填充字段，最后用 release 语义写入 `committed_seq`。这样避免了“栈上构造完整 event 再复制到 ring buffer”的二次写入，是当前低开销热路径的一部分。
 
-tracer 消费事件时不会再复制整块 trace buffer 后盲目推进 `last_seq`。它采用 header-first + range snapshot 策略：先读取 `write_seq`，只对本轮新增序列范围读取 `committed_seq` before、event 本体和 `committed_seq` after，再按 slot 校验三者是否都等于目标序列号。如果遇到未提交 slot，`last_seq` 保持不变；如果落后超过容量，会输出 `ztrace:lost` 记录丢失范围。这样高频 probe 下即使发生 buffer wrap，也能把丢失显式暴露出来，而不是把缺口伪装成正常日志。
+tracer 消费事件时不会再复制整块 trace buffer 后盲目推进 `last_seq`。它采用 header-first + range snapshot 策略：先读取 `write_seq`，只把本轮新增序列范围拷到 reader 本地快照数组，再基于本地副本格式化日志。每个 slot 会读取 `committed_seq` before、event 本体和 `committed_seq` after，并校验三者是否都等于目标序列号。如果遇到未提交 slot，`last_seq` 保持不变；如果落后超过容量，会输出 `ztrace:lost` 记录丢失范围。这样高频 probe 下即使发生 buffer wrap，也能把丢失显式暴露出来，而不是把缺口伪装成正常日志。
 
 trace buffer 还包含一张 `call_actions` 表，用于让 tracer 在不中断目标进程的情况下更新 payload 侧 action 配置。payload 读取这张表来决定某个 probe entry 命中后是否需要主动调用目标进程内的函数。
 

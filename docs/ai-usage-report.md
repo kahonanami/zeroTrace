@@ -1,84 +1,92 @@
 # AI Usage Report
 
-本文档说明 zeroTrace 开发过程中 AI 工具的使用范围、使用方式和人工校验流程。
+本文档用于说明 zeroTrace 开发过程中 AI 工具的使用范围、产出类型、人工校验方式和风险控制。它是参赛材料中的 AI 使用声明，不替代代码、测试和 benchmark 证据。
 
-## 1. 工具、模型与声明摘要
-
-项目开发过程中使用的 AI 辅助工具声明如下：
+## 1. 基本声明
 
 | 字段 | 内容 |
 | --- | --- |
 | 工具名称 | OpenAI ChatGPT / Codex 类代码助手 |
 | 模型名称 | OpenAI GPT-5 |
-| 使用方式 | 交互式问答、结对编程、代码审查和文档整理 |
-| 主要产出 | 实现方案比较、bug 定位思路、测试设计建议、benchmark 解释、文档草案 |
-| 人工确认 | 开发者逐项审阅 diff，并通过构建、自动化测试、benchmark 或文档链接检查确认 |
+| 使用方式 | 交互式问答、结对编程、代码审查、测试设计和文档整理 |
+| 主要产出 | 方案比较、bug 定位思路、测试用例建议、benchmark 解释、文档草案 |
+| 使用记录 | 以开发对话、阶段性 commit、测试输出和本文档摘要共同说明 |
+| 最终责任 | 开发者负责方案取舍、代码审阅、测试验证和最终提交 |
 
-AI 工具主要以交互式问答和结对编程形式参与开发。相关交互记录体现为：
+AI 工具参与的是辅助分析和草案生成，不作为项目正确性的直接证明。功能完成度、性能指标和稳定性结论均以当前仓库代码、自动化测试、benchmark 报告和人工复核为准。
 
-- 开发过程中围绕功能实现、bug 定位、benchmark 设计和文档整理的对话记录
-- git commit 记录中保留的阶段性修改说明
-- 本文档对 AI 参与范围、成果和人工校验方式的汇总说明
+## 2. 使用阶段
 
-## 2. 使用目的
-
-AI 主要用于辅助完成以下工作：
-
-- 梳理赛题 F1-F7 / A1-A5 要求，并把要求转化为实现检查表和自动化测试点
-- 协助阅读和重构 C / 汇编代码，发现潜在冗余逻辑、竞态窗口和文档不一致
-- 辅助设计 benchmark 流程，包括 baseline、kernel uprobe、zeroTrace 和 install/uninstall latency 对比
-- 辅助整理 README、架构文档、实验评估文档和 AI 使用报告
-- 辅助生成测试用例思路，例如多 probe、线程组 stop/continue、signal safety、trace buffer wrap、hot update 等场景
-
-| 使用场景 | AI 辅助产出 | 人工校验方式 |
+| 阶段 | AI 辅助内容 | 人工确认方式 |
 | --- | --- | --- |
-| 赛题要求拆解 | F1-F7 / A1-A5 覆盖清单、测试矩阵草案 | 对照 `docs/project-requirements.md` 和 `docs/evaluation.md` 逐项确认 |
-| 代码审查与重构 | 冗余逻辑定位、命名统一、模块职责建议 | 通过 `git diff` 检查范围，并运行相关定向测试 |
-| bug 定位 | benchmark 卡住、trace buffer 退出窗口、线程组控制等问题的排查路径 | 使用可复现测试和日志输出验证修复结果 |
-| 性能实验 | benchmark 脚本结构、重复实验统计和结果解释 | 以 `make benchmark` 和 `benchmark/report.txt` 为准 |
-| 文档整理 | README、architecture、evaluation、AI report 的结构建议 | 检查链接、术语一致性和代码/测试证据是否匹配 |
+| 题面拆解 | 将 F1-F7 / A1-A5 转化为实现清单、测试矩阵和文档目录 | 对照 [project-requirements.md](./project-requirements.md) 与 [evaluation.md](./evaluation.md) 逐项检查 |
+| 方案设计 | 比较用户态 trampoline、payload stub、远程 mmap、trace buffer 和线程组控制方案 | 由开发者确认架构边界，并落实到 C / 汇编实现 |
+| bug 定位 | 辅助分析 benchmark 卡住、trace buffer 退出窗口、线程组 stop/continue、资源释放等问题 | 使用可复现测试、日志和 maps-diff 结果验证 |
+| 性能优化 | 辅助解释热路径开销，建议减少拷贝、优化 reader snapshot 和重复实验统计 | 以 `make benchmark` 与 `benchmark/report.txt` 作为最终依据 |
+| 文档整理 | 协助整理 README、architecture、evaluation 和 AI usage report 的结构 | 检查术语、链接、benchmark 数字和测试证据是否一致 |
 
-## 3. 人工主导部分
+## 3. AI 参与产出
 
-项目的核心设计决策和最终取舍由开发者完成，包括：
+AI 在本项目中主要贡献了以下辅助内容：
 
-- 用户态 trampoline + payload stub 的总体方案
-- 远程 `dlopen` 注入、远程 `mmap`、函数入口 patch 和恢复策略
-- x86_64 / aarch64 后端接口边界
-- probe state、trampoline pool、filter、call action 和 trace buffer 的数据结构设计
-- benchmark 指标选择和最终结果解释
+- 帮助把赛题功能要求整理为 F1-F7 / A1-A5 覆盖矩阵。
+- 辅助设计多 probe、多线程、signal safety、trace buffer wrap、hot update、runtime mmap cleanup 等测试场景。
+- 辅助排查 benchmark 自动化卡住、目标退出窗口误判、线程组控制和日志读取鲁棒性问题。
+- 辅助将 trace buffer reader 从全量读取思路整理为 header-first + range snapshot，并保留 `committed_seq` 一致性校验。
+- 辅助解释 benchmark 指标，包括 `overhead/call`、install/uninstall latency 和 uprobe 跳过条件。
+- 辅助统一 trampoline 相关术语，整理文档职责边界。
 
-AI 给出的建议不会直接作为结论使用，所有代码改动都需要经过本地构建、自动化测试或 benchmark 验证。
+上述内容均经过人工审阅和本地验证后才进入提交历史。
 
-## 4. 校验方式
+## 4. 人工主导部分
 
-每轮 AI 辅助修改后，会根据改动范围选择以下方式确认结果：
+以下关键决策由开发者主导完成，AI 只提供候选思路或审查建议：
 
-- 通过 `git diff` 检查改动范围，避免无关文件被混入提交
-- 对功能路径改动运行 `make test` 或相关定向测试，验证基础功能、正确性和稳定性
-- 对性能路径改动运行 `make benchmark`，验证性能指标
-- 对文档中的 benchmark 数字使用 `benchmark/report.txt` 作为来源，避免手写数据不一致
-- 对涉及题目要求的描述，交叉检查 `docs/project-requirements.md`、`docs/evaluation.md` 和当前自动化测试
+- 用户态 trampoline + payload stub 的总体架构。
+- x86_64 / aarch64 后端拆分方式和 ABI 参数槽位映射。
+- 函数入口 patch、原始指令保存、trampoline 重定位和返回链劫持策略。
+- 远程 `dlopen`、远程 `mmap`、trace buffer、payload config 和 runtime cleanup 的生命周期。
+- probe state、filter、call action、TLS shadow stack 和线程组控制的数据结构设计。
+- benchmark 目标函数、重复实验次数、输出指标和最终结果解释。
 
-## 5. 典型贡献
+项目没有把 AI 输出直接作为最终实现使用；每次改动都需要经过 diff 审阅，并根据影响范围运行构建、测试或 benchmark。
 
-AI 在本项目中比较有效的辅助点包括：
+## 5. 可追溯材料
 
-- 把 `stop/continue` 从单线程语义扩展到线程组控制语义的检查清单
-- 将 trace buffer 消费从全量读取优化为 header-first + range snapshot，并保留 `committed_seq` 一致性校验
-- 将 benchmark 脚本改为多轮重复实验，输出 mean / min / max / stdev
-- 帮助把分散的实验说明整理为面向 F1-F7 / A1-A5 的覆盖矩阵
-- 帮助发现文档中旧 benchmark 数字、旧术语和实现不一致的问题
+| 材料 | 用途 |
+| --- | --- |
+| [project-requirements.md](./project-requirements.md) | 记录赛题功能、性能、正确性和通用交付要求 |
+| [architecture.md](./architecture.md) | 记录最终采用的架构、模块职责和关键控制流 |
+| [evaluation.md](./evaluation.md) | 记录 F1-F7 / A1-A5 覆盖矩阵、实验方法和 benchmark 结果 |
+| `benchmark/report.txt` | 保存最近一次本地 benchmark 输出；该目录被 `.gitignore` 忽略，README 和 evaluation 只摘录已确认的参考结果 |
+| `git log --oneline` | 展示功能实现、bug 修复、测试补强、性能优化和文档整理的持续迭代过程 |
 
-## 6. 风险控制
+AI 使用声明只解释辅助过程；项目是否满足赛题要求，以这些可追溯材料和当前源码为准。
 
-AI 生成内容可能存在遗漏或不符合当前代码状态的问题，因此本项目采用以下约束降低风险：
+## 6. 校验链路
 
-- 不以 AI 描述作为完成证明，必须回到代码、测试输出和 benchmark 报告验证
-- 不让 AI 单独决定是否删除已有实现，删除前必须确认对应功能和测试仍被覆盖
-- 对性能数据只引用实际运行结果，不使用估算值替代 benchmark 输出
-- 对 aarch64 相关结论保留平台限制说明，避免把 x86_64 本机结果误写成跨架构完整证明
+AI 辅助修改后的常用校验流程如下：
 
-## 7. 结论
+| 改动类型 | 最低校验 | 典型命令 |
+| --- | --- | --- |
+| C / 汇编功能路径 | 构建 + 相关定向测试 + 必要时全量测试 | `make`, `make test` |
+| 性能路径 | benchmark + 报告同步 | `make benchmark` |
+| 架构选择 / Makefile | 架构配置 self-test | `python3 scripts/check_arch_config.py` |
+| 文档更新 | 链接检查 + 旧数字残留扫描 | markdown link check, `rg` |
+| 清理 / 资源释放 | maps-diff 或目标进程状态验证 | `bin/tests/test_probe_lifecycle` |
 
-AI 在 zeroTrace 中主要承担辅助审查、方案比较、测试设计和文档整理角色。项目最终实现、测试结果和性能数据仍以本地代码仓库、自动化测试和 benchmark 输出为准。
+最终提交前会检查 `git diff --check` 和 `git status --short`，确保没有格式问题、生成物或无关文件混入提交。
+
+## 7. 风险控制
+
+AI 辅助开发可能带来不准确建议、过度重构或文档与代码不一致的风险。本项目采用以下约束：
+
+- 不以 AI 口头结论作为完成证明，必须回到代码、测试输出和 benchmark 结果。
+- 不让 AI 单独决定删除已有实现；删除或重构前必须确认对应功能仍有测试覆盖。
+- 对性能数据只引用实际运行结果，不使用估算值替代 benchmark 输出。
+- 对 aarch64 相关结论保留平台限制说明，避免把 x86_64 本机结果写成跨架构 runtime 证明。
+- 对外部资料和赛题要求使用独立文档记录，不把 AI 总结当作原始题面。
+
+## 8. 结论
+
+AI 在 zeroTrace 中承担的是“辅助审查、方案比较、测试设计和文档整理”的角色。项目最终实现、功能覆盖、性能数据和交付质量仍由开发者负责，并以仓库源码、自动化测试、benchmark 报告和提交历史作为可追溯证据。

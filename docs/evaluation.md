@@ -30,13 +30,13 @@ scan-build --status-bugs make clean all
 
 当前已记录的 x86_64 完整回归结论：
 
-- `make test`：通过
+- `make test`：当前 refactor 基线通过
 - `scan-build --status-bugs make clean all`：No bugs found
 - A5 热更新压力：`test_probe_hot_update` 100 轮通过，单次回归包含 staged 更新和 live call action 更新
 - 目标退出窗口压力：`ZT_EXIT_RACE_ROUNDS=1000 ./bin/tests/test_poll_exit_race` 通过
-- `make benchmark`：5 轮重复实验中 zeroTrace 额外开销均值 `162.81 ns/call`
-- install latency：`0.428 ms`
-- uninstall latency：`0.040 ms`
+- `make benchmark`：5 轮重复实验中 zeroTrace 额外开销均值 `167.44 ns/call`
+- install latency：`0.340 ms`
+- uninstall latency：`0.077 ms`
 
 说明：
 
@@ -148,21 +148,23 @@ bin/tests/test_benchmark_latency
 验证方法：
 
 - `test_probe_lifecycle` 在同一目标进程上安装 16 个 probe，并在 trace 结束时调用 shutdown/untrace 路径恢复原始指令。
-- `test_probe_lifecycle` 的 cleanup 子测试会在目标仍存活时记录 trampoline 地址和函数入口原始字节，执行 `zt_trace_remove_probe()` 后读取 `/proc/<pid>/maps` 和目标入口内存做差分验证。
+- `test_probe_lifecycle` 的 cleanup 子测试会在目标仍存活时记录 trampoline 地址、函数入口原始字节，并通过 payload path 字符串、`ZT_TRACE_BUFFER_MAGIC` 和 payload config 内容识别 runtime mmap 地址；执行 `zt_trace_remove_probe()` 后读取 `/proc/<pid>/maps` 和目标入口内存做差分验证。
 - `test_benchmark_latency` 对 `bench_getpid` 做 1000 轮 install/uninstall，统计平均延迟。
 - trampoline pool 以 slot 管理远程 executable memory；slot 释放后若 pool 全空则远程 `munmap`。
+- trace runner 还会释放本轮 trace 创建的 payload path、trace buffer 和 payload config 等远程 runtime mmap 区域。
 
 关键断言：
 
 - 安装 probe 后，trampoline 地址必须落在一个带 `x` 权限的远程映射中。
 - 删除最后一个 probe 后，原 trampoline 地址不能再出现在 `/proc/<pid>/maps` 中。
+- 删除最后一个 probe 后，payload path、trace buffer 和 payload config 对应的远程地址也不能再出现在 `/proc/<pid>/maps` 中。
 - 删除 probe 后，目标函数入口 `orig_len` 字节必须与安装前保存的原始字节完全一致。
 
 已记录数据：
 
 ```text
-install latency avg   : 427759 ns (0.428 ms) over 1000 rounds
-uninstall latency avg : 39889 ns (0.040 ms) over 1000 rounds
+install latency avg   : 339814 ns (0.340 ms) over 1000 rounds
+uninstall latency avg : 76822 ns (0.077 ms) over 1000 rounds
 ```
 
 结论：
@@ -344,7 +346,8 @@ bin/tests/test_trace_buffer_reader
 
 ```bash
 make ARCH=x86_64
-make ARCH=aarch64
+make ARCH=aarch64                  # 在 aarch64 主机上
+make ARCH=aarch64 CC=aarch64-linux-gnu-gcc
 python3 scripts/check_arch_config.py
 ```
 
@@ -352,14 +355,14 @@ python3 scripts/check_arch_config.py
 
 - Makefile 根据 `ARCH` 选择 x86_64 或 aarch64 后端。
 - 两个后端均有独立 patch/trampoline/stub 代码。
-- `scripts/check_arch_config.py` 在 x86_64 本机上同时检查 `ARCH=x86_64` 和 `ARCH=aarch64` 的 Makefile 展开结果，确认后端 C 文件、stub 汇编和架构专用 trampoline 测试集合没有选错。
+- `scripts/check_arch_config.py` 在 x86_64 本机上同时检查 `ARCH=x86_64` 和 `ARCH=aarch64` 的 Makefile 展开结果，确认 Makefile 回报的 `ARCH` 与请求值一致，并确认后端 C 文件、stub 汇编和架构专用 trampoline 测试集合没有选错。
 - x86_64 本机已通过完整 `make test`。
 - aarch64 runtime 回归需要在 aarch64 机器上运行 `make ARCH=aarch64 test`；本机脚本只证明配置选择正确，不伪造跨架构运行结果。
 
 当前结论：
 
 - A1 已实现架构抽象和 aarch64 后端。
-- 当前本机自动化证据覆盖 x86_64 完整运行和 aarch64 构建配置选择。
+- 当前本机自动化证据覆盖 x86_64 完整运行和 aarch64 构建配置选择；配置自检不等价于 aarch64 runtime 测试。
 - aarch64 运行验证使用同一套 `make test` / `make benchmark` 入口；性能数据与具体硬件强相关，最终提交时应按目标 aarch64 机器重新记录。
 
 ### 3.2 A2 条件探针
@@ -374,6 +377,7 @@ bin/tests/test_probe_lifecycle
 
 - 子测试 `run_conditional_probe` 使用 `arg0 >= 10 && arg0 < 20`。
 - 子测试 `run_probe_filter_update` 使用 `arg0 >= 15 && (arg0 < 20 || arg0 == 99)`。
+- 子测试 `run_filter_short_circuit_semantics` 使用 synthetic event 验证 `&&` / `||` 短路语义，特别覆盖 `arg0 == 0 || 10 / arg0 > 1` 这类右侧除零应被短路保护的表达式。
 
 关键断言：
 
@@ -384,6 +388,7 @@ bin/tests/test_probe_lifecycle
 结论：
 
 - filter 表达式支持布尔组合和括号。
+- `&&` / `||` 按短路语义求值，编译期不把缺少真实 event 的 `arg0` 当成运行时除零错误。
 - filter 更新是替换语义，不和旧条件叠加。
 
 ### 3.3 A3 perf/ftrace 风格事件输出
@@ -507,29 +512,29 @@ make benchmark
 - uprobe：在具备 `bpftrace` 和非交互 sudo 权限时，用 kernel uprobe 采集同一函数。
 - lifecycle latency：对同一 probe 执行 `1,000` 轮 install/uninstall。
 
-已记录的 x86_64 参考结果：
+`benchmark/report.txt` 位于被忽略的 `benchmark/` 目录中，代表最近一次本地运行结果；下面保留的是标准参数下已记录的 x86_64 参考结果：
 
 ```text
 iterations            : 1000000
 repeats               : 5
-baseline total ns     mean : 63723125 ns
-baseline per call     mean : 63.72 ns
+baseline total ns     mean : 60826780 ns
+baseline per call     mean : 60.83 ns
 uprobe total ns       : skipped
 uprobe note           : kernel uprobe benchmark skipped: sudo is not available non-interactively
-ztrace total ns       mean : 226531102 ns
-ztrace per call       mean : 226.53 ns
-ztrace overhead/call  mean : 162.81 ns
-ztrace overhead/call  min  : 160.89 ns
-ztrace overhead/call  max  : 165.36 ns
+ztrace total ns       mean : 228268087 ns
+ztrace per call       mean : 228.27 ns
+ztrace overhead/call  mean : 167.44 ns
+ztrace overhead/call  min  : 165.37 ns
+ztrace overhead/call  max  : 172.19 ns
 
-install latency avg   : 427759 ns (0.428 ms) over 1000 rounds
-uninstall latency avg : 39889 ns (0.040 ms) over 1000 rounds
+install latency avg   : 339814 ns (0.340 ms) over 1000 rounds
+uninstall latency avg : 76822 ns (0.077 ms) over 1000 rounds
 ```
 
 结果解释：
 
 - `ztrace overhead/call = (ztrace total ns - baseline total ns) / iterations`
-- 当前额外开销均值 `162.81 ns/call`，低于赛题 `< 1000 ns` 指标，也低于项目优化目标 `200 ns`
+- 当前额外开销均值 `167.44 ns/call`，低于赛题 `< 1000 ns` 指标，也低于项目优化目标 `200 ns`
 - install/uninstall 延迟均低于 `< 10 ms`
 - 因当前环境跳过 uprobe，完整 zeroTrace vs uprobe 对比需要在有 `bpftrace` 和 `sudo -n` 的机器上复跑
 
@@ -540,7 +545,7 @@ uninstall latency avg : 39889 ns (0.040 ms) over 1000 rounds
 | F1 | 动态库函数探针插入，用户态跳转且不产生 trap | 遍历目标已加载模块解析符号，入口 patch 到远程 trampoline，再跳入 payload stub | `test_libc_trace` trace `write/read/printf`；`test_probe_lifecycle` 读回 patch，确认 x86_64 不是 `int3`、aarch64 不是 `brk` |
 | F2 | 获取至少前 6 个参数，遵循 ABI | entry event 保存 `args[0..5]`；x86_64 对应 `rdi/rsi/rdx/rcx/r8/r9`，aarch64 对应 `x0..x5` | `test_libc_trace`、`test_probe_lifecycle`、`test_thread_safety` |
 | F3 | 捕获函数返回值 | entry stub 伪造返回链，return 进入 exit stub；return event 记录整数 / 指针和浮点返回值 | `test_context_integrity`、`test_libc_trace`、`test_probe_hot_update` |
-| F4 | 探针清理，恢复原始指令，无内存泄漏 | `untrace` 恢复入口字节；trampoline slot 释放，pool 全空时远程 `munmap` | `test_probe_lifecycle` 的 maps-diff 清理子测试；`test_benchmark_latency` 1000 轮 install/uninstall |
+| F4 | 探针清理，恢复原始指令，无内存泄漏 | `untrace` 恢复入口字节；trampoline slot 释放，pool 全空时远程 `munmap`；trace runner 释放 payload path、trace buffer 和 payload config | `test_probe_lifecycle` 的 maps-diff 清理子测试；`test_benchmark_latency` 1000 轮 install/uninstall |
 | F5 | 探针动态开关 | `disable` 恢复入口 patch 但保留 probe 元数据和 trampoline slot；`enable` 复用 slot 重装 patch | `test_thread_safety` 运行中 12 轮 enable/disable；`test_probe_hot_update` disabled 阶段零泄漏 |
 | F6 | 同一进程至少 16 个并发探针 | probe 表容量 32，trampoline pool 按 slot 管理 | `test_probe_lifecycle` 同进程安装 `probe_fn01..probe_fn16` 并校验日志 |
 | F7 | 多线程安全，不崩溃不死锁 | 线程组级 seize/interrupt/continue/detach；运行态刷新新线程；TLS shadow stack 按线程配对 return | `test_thread_safety`、`test_thread_group_control` |

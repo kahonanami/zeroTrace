@@ -31,6 +31,7 @@
 
 enum {
     ZT_PATCH_REGION_MAX_SINGLE_STEPS = 8,
+    ZT_PTRACE_SEIZE_OPTIONS = PTRACE_O_TRACESYSGOOD,
 };
 
 static int zt_read_elf_header(const char *exe_path, Elf64_Ehdr *header) {
@@ -212,6 +213,18 @@ static int zt_session_report_if_target_exited(zt_injector_session_t *session,
     return 0;
 }
 
+static int zt_wait_status_is_thread_exit(int status) {
+    return WIFEXITED(status) || WIFSIGNALED(status);
+}
+
+static void zt_session_note_thread_exit(zt_injector_session_t *session,
+                                        pid_t tid,
+                                        int *target_exited_out) {
+    if (session != NULL && tid == session->pid) {
+        zt_session_mark_target_exited(session, target_exited_out);
+    }
+}
+
 static int zt_resume_signal_from_status(int status) {
     int stop_sig;
     int event;
@@ -242,13 +255,11 @@ static void zt_thread_mark_stopped(zt_thread_info_t *thread, int status) {
 }
 
 static int zt_injector_seize_thread(zt_injector_session_t *session, pid_t tid) {
-    long options = PTRACE_O_TRACESYSGOOD;
-
     if (zt_session_find_thread(session, tid) != NULL) {
         return 0;
     }
 
-    if (ptrace(PTRACE_SEIZE, tid, NULL, (void *)(uintptr_t)options) != 0) {
+    if (ptrace(PTRACE_SEIZE, tid, NULL, (void *)(uintptr_t)ZT_PTRACE_SEIZE_OPTIONS) != 0) {
         if (errno == ESRCH) {
             return 0;
         }
@@ -362,10 +373,10 @@ int zt_remote_addr_is_mapped(pid_t pid, uint64_t addr) {
     return 0;
 }
 
-static int zt_wait_for_thread_stop(zt_injector_session_t *session, zt_thread_info_t *thread) {
+static int zt_wait_for_thread_stop(zt_thread_info_t *thread) {
     int status;
 
-    if (session == NULL || thread == NULL || thread->tid <= 0) {
+    if (thread == NULL || thread->tid <= 0) {
         return -1;
     }
 
@@ -376,7 +387,7 @@ static int zt_wait_for_thread_stop(zt_injector_session_t *session, zt_thread_inf
                 return 0;
             }
 
-            if (WIFEXITED(status) || WIFSIGNALED(status)) {
+            if (zt_wait_status_is_thread_exit(status)) {
                 zt_thread_clear(thread);
                 return 0;
             }
@@ -473,7 +484,7 @@ int zt_injector_interrupt_all(zt_injector_session_t *session) {
                 continue;
             }
 
-            if (zt_wait_for_thread_stop(session, thread) != 0) {
+            if (zt_wait_for_thread_stop(thread) != 0) {
                 return -1;
             }
         }
@@ -578,16 +589,14 @@ int zt_injector_poll_events(zt_injector_session_t *session, int *target_exited_o
 
         thread = zt_session_find_thread(session, tid);
         if (thread == NULL) {
-            if ((WIFEXITED(status) || WIFSIGNALED(status)) && tid == session->pid) {
-                zt_session_mark_target_exited(session, target_exited_out);
+            if (zt_wait_status_is_thread_exit(status)) {
+                zt_session_note_thread_exit(session, tid, target_exited_out);
             }
             continue;
         }
 
-        if (WIFEXITED(status) || WIFSIGNALED(status)) {
-            if (tid == session->pid) {
-                zt_session_mark_target_exited(session, target_exited_out);
-            }
+        if (zt_wait_status_is_thread_exit(status)) {
+            zt_session_note_thread_exit(session, tid, target_exited_out);
             zt_thread_clear(thread);
             zt_compact_threads(session);
             if (session->thread_count == 0) {
@@ -665,7 +674,7 @@ static int zt_single_step_thread(zt_injector_session_t *session, zt_thread_info_
     }
 
     zt_thread_mark_running(thread);
-    return zt_wait_for_thread_stop(session, thread);
+    return zt_wait_for_thread_stop(thread);
 }
 
 static int zt_ensure_patch_regions_are_safe(zt_injector_session_t *session) {
@@ -763,6 +772,44 @@ int zt_read_remote_memory(pid_t pid, uint64_t remote_addr, void *buffer, size_t 
 
         memcpy((uint8_t *)buffer + copied, &word, chunk_size);
         copied += chunk_size;
+    }
+
+    return 0;
+}
+
+int zt_read_remote_iov(pid_t pid,
+                       const struct iovec *local_iov,
+                       const struct iovec *remote_iov,
+                       size_t iov_count,
+                       size_t expected_size) {
+    ssize_t nread;
+    size_t i;
+
+    if (local_iov == NULL || remote_iov == NULL || iov_count == 0) {
+        return -1;
+    }
+
+    if (expected_size == 0) {
+        return 0;
+    }
+
+    nread = process_vm_readv(pid,
+                             local_iov,
+                             iov_count,
+                             remote_iov,
+                             iov_count,
+                             0);
+    if (nread == (ssize_t)expected_size) {
+        return 0;
+    }
+
+    for (i = 0; i < iov_count; ++i) {
+        if (zt_read_remote_memory(pid,
+                                  (uint64_t)(uintptr_t)remote_iov[i].iov_base,
+                                  local_iov[i].iov_base,
+                                  local_iov[i].iov_len) != 0) {
+            return -1;
+        }
     }
 
     return 0;

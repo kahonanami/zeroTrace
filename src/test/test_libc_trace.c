@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include "zt_injector.h"
+#include "zt_sigconf.h"
 #include "zt_trace_runner.h"
 #include "test_trace_utils.h"
 
@@ -15,6 +16,52 @@ static const char *k_symbols[] = {
     "read",
     "printf",
 };
+
+static int check_sigconf_parser(void) {
+    const zt_func_sig_t *printf_sig;
+    const zt_func_sig_t *read_sig;
+    const zt_func_sig_t *write_sig;
+
+    if (zt_sigconf_load_default() != 0) {
+        fprintf(stderr, "failed to load signature config\n");
+        return -1;
+    }
+
+    printf_sig = zt_sigconf_find("printf");
+    read_sig = zt_sigconf_find("read");
+    write_sig = zt_sigconf_find("write");
+    if (printf_sig == NULL || read_sig == NULL || write_sig == NULL) {
+        fprintf(stderr, "missing expected libc signatures\n");
+        return -1;
+    }
+
+    if (!printf_sig->variadic ||
+        printf_sig->param_count < 1 ||
+        strcmp(printf_sig->params[0].name, "fmt") != 0 ||
+        strcmp(printf_sig->params[0].decl, "const char *") != 0 ||
+        printf_sig->params[0].type != ZT_SIG_TYPE_CSTR) {
+        fprintf(stderr, "printf signature parser mismatch\n");
+        return -1;
+    }
+
+    if (read_sig->param_count < 2 ||
+        strcmp(read_sig->params[1].name, "buf") != 0 ||
+        strcmp(read_sig->params[1].decl, "buffer") != 0 ||
+        read_sig->params[1].type != ZT_SIG_TYPE_BUF) {
+        fprintf(stderr, "read signature parser mismatch\n");
+        return -1;
+    }
+
+    if (write_sig->param_count < 2 ||
+        strcmp(write_sig->params[1].name, "buf") != 0 ||
+        strcmp(write_sig->params[1].decl, "const buffer") != 0 ||
+        write_sig->params[1].type != ZT_SIG_TYPE_CONST_BUF) {
+        fprintf(stderr, "write signature parser mismatch\n");
+        return -1;
+    }
+
+    return 0;
+}
 
 int main(void) {
     zt_injector_session_t session;
@@ -26,6 +73,10 @@ int main(void) {
 
     if (zt_test_make_log_path(log_path, sizeof(log_path), "zt-libc-trace") != 0) {
         fprintf(stderr, "failed to create temp log path\n");
+        return 1;
+    }
+
+    if (check_sigconf_parser() != 0) {
         return 1;
     }
 

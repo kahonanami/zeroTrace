@@ -17,6 +17,9 @@
 #include "zt_trampoline_manager.h"
 #include "zt_trace_runner.h"
 
+_Static_assert(ZT_PAYLOAD_PROBE_ACTION_CAP == ZT_PROBES_CAPACITY,
+               "call action table must cover every probe slot");
+
 typedef struct {
     char payload_so_path[PATH_MAX];
     uint64_t remote_dlopen_addr;
@@ -75,6 +78,9 @@ typedef enum {
 static zt_active_trace_t g_active_trace;
 static int g_trace_exit_observed;
 static zt_entry_cache_slot_t g_entry_cache[ZT_TRACE_EVENT_CAPACITY];
+
+/* Local reader snapshots for one poll range; formatting never reads a slot
+ * directly from the remote ring while the payload may still be writing it. */
 static zt_trace_event_t g_event_snapshot[ZT_TRACE_EVENT_CAPACITY];
 static uint64_t g_commit_before[ZT_TRACE_EVENT_CAPACITY];
 static uint64_t g_commit_after[ZT_TRACE_EVENT_CAPACITY];
@@ -90,6 +96,52 @@ static void zt_trace_reset_active(int exit_observed) {
 
 static void zt_trace_mark_target_exited(void) {
     zt_trace_reset_active(1);
+}
+
+static int zt_trace_munmap_region(zt_injector_session_t *session,
+                                  uint64_t *remote_addr,
+                                  size_t size) {
+    if (session == NULL || remote_addr == NULL || *remote_addr == 0) {
+        return 0;
+    }
+
+    if (zt_remote_munmap(session->pid, *remote_addr, size) != 0) {
+        return -1;
+    }
+
+    *remote_addr = 0;
+    return 0;
+}
+
+static int zt_trace_cleanup_runtime(zt_injector_session_t *session,
+                                    zt_runtime_state_t *runtime) {
+    int ret = 0;
+    size_t payload_path_size;
+
+    if (session == NULL || runtime == NULL) {
+        return 0;
+    }
+
+    payload_path_size = strlen(runtime->payload_so_path) + 1;
+    if (zt_trace_munmap_region(session,
+                               &runtime->remote_payload_path_addr,
+                               payload_path_size) != 0) {
+        ret = -1;
+    }
+
+    if (zt_trace_munmap_region(session,
+                               &runtime->remote_payload_config_addr,
+                               sizeof(zt_payload_config_t)) != 0) {
+        ret = -1;
+    }
+
+    if (zt_trace_munmap_region(session,
+                               &runtime->remote_trace_buffer_addr,
+                               sizeof(zt_trace_buffer_t)) != 0) {
+        ret = -1;
+    }
+
+    return ret;
 }
 
 static int zt_trace_is_exit_window(pid_t pid, uint64_t remote_addr) {
@@ -120,6 +172,10 @@ static int zt_trace_mark_exit_window_if_needed(pid_t pid, uint64_t trace_buffer_
     return 0;
 }
 
+static int zt_trace_call_action_slot_valid(int slot) {
+    return slot >= 0 && slot < ZT_PAYLOAD_PROBE_ACTION_CAP;
+}
+
 static int zt_trace_write_call_action(zt_injector_session_t *session,
                                       zt_runtime_state_t *runtime,
                                       const zt_probe_info_t *probe) {
@@ -131,8 +187,7 @@ static int zt_trace_write_call_action(zt_injector_session_t *session,
 
     if (session == NULL || runtime == NULL || probe == NULL ||
         runtime->remote_trace_buffer_addr == 0 || probe->probe_id == 0 ||
-        probe->call_action_slot < 0 ||
-        probe->call_action_slot >= ZT_PAYLOAD_PROBE_ACTION_CAP) {
+        !zt_trace_call_action_slot_valid(probe->call_action_slot)) {
         return -1;
     }
 
@@ -297,8 +352,7 @@ static int zt_trace_assign_call_action_slot(const zt_injector_session_t *session
         return -1;
     }
 
-    if (probe->call_action_slot >= 0 &&
-        probe->call_action_slot < ZT_PAYLOAD_PROBE_ACTION_CAP) {
+    if (zt_trace_call_action_slot_valid(probe->call_action_slot)) {
         if (!zt_trace_probe_uses_call_slot(session, probe, probe->call_action_slot)) {
             return 0;
         }
@@ -332,21 +386,84 @@ static void zt_trace_set_probe_filter(zt_probe_info_t *probe,
     probe->filter.probe_id = probe->probe_id;
 }
 
+typedef struct {
+    int existed;
+    zt_probe_state_t state;
+    uint64_t trampoline_addr;
+    int trampoline_slot;
+    uint8_t orig_code[ZT_PROBE_ORIG_CODE_MAX];
+    uint8_t orig_len;
+    zt_probe_filter_t filter;
+} zt_probe_install_snapshot_t;
+
+static void zt_trace_capture_probe_install_snapshot(
+    const zt_probe_info_t *probe,
+    int existed,
+    zt_probe_install_snapshot_t *snapshot) {
+    if (probe == NULL || snapshot == NULL) {
+        return;
+    }
+
+    memset(snapshot, 0, sizeof(*snapshot));
+    snapshot->existed = existed;
+    snapshot->state = probe->state;
+    snapshot->trampoline_addr = probe->trampoline_addr;
+    snapshot->trampoline_slot = probe->trampoline_slot;
+    memcpy(snapshot->orig_code, probe->orig_code, sizeof(snapshot->orig_code));
+    snapshot->orig_len = probe->orig_len;
+    snapshot->filter = probe->filter;
+}
+
+static void zt_trace_rollback_probe_install(zt_injector_session_t *session,
+                                            zt_runtime_state_t *runtime,
+                                            zt_probe_info_t *probe,
+                                            const zt_probe_install_snapshot_t *snapshot) {
+    uint64_t allocated_addr;
+    uint64_t probe_id;
+
+    if (session == NULL || runtime == NULL || probe == NULL || snapshot == NULL) {
+        return;
+    }
+
+    allocated_addr = probe->trampoline_addr;
+    probe_id = probe->probe_id;
+
+    if (allocated_addr != 0 && allocated_addr != snapshot->trampoline_addr) {
+        zt_trampoline_pool_release(session, &runtime->trampoline_pool, probe);
+    }
+
+    if (!snapshot->existed) {
+        zt_unregister_probe(session, probe_id);
+        return;
+    }
+
+    probe->state = snapshot->state;
+    probe->trampoline_addr = snapshot->trampoline_addr;
+    probe->trampoline_slot = snapshot->trampoline_slot;
+    memcpy(probe->orig_code, snapshot->orig_code, sizeof(probe->orig_code));
+    probe->orig_len = snapshot->orig_len;
+    probe->filter = snapshot->filter;
+}
+
 static int zt_trace_install_probe(zt_injector_session_t *session,
                                   zt_runtime_state_t *runtime,
                                   const char *symbol,
                                   const zt_probe_filter_t *filter,
                                   zt_probe_info_t **probe_out) {
+    zt_probe_install_snapshot_t snapshot;
+    zt_probe_info_t *existing_probe;
     zt_probe_info_t *probe;
     uint8_t trampoline_buf[ZT_TRAMPOLINE_MAX_SIZE];
     size_t trampoline_size;
     uint64_t remote_trampoline_addr;
 
+    existing_probe = zt_probe_find_by_symbol(session, symbol);
     probe = zt_register_probe(session, symbol);
     if (probe == NULL) {
         fprintf(stderr, "Failed to register probe for symbol %s\n", symbol);
         return -1;
     }
+    zt_trace_capture_probe_install_snapshot(probe, existing_probe != NULL, &snapshot);
 
     if (probe->state == ZT_PROBE_INSTALLED) {
         if (filter != NULL) {
@@ -359,7 +476,8 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
         return 0;
     }
 
-    printf("Registered probe: id=%lu, symbol=%s, addr=0x%lX\n",
+    printf("%s probe: id=%lu, symbol=%s, addr=0x%lX\n",
+           snapshot.existed ? "Reusing" : "Registered",
            probe->probe_id,
            probe->target.symbol,
            probe->target.remote_addr);
@@ -368,6 +486,7 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
 
     if (zt_enable_probe(session, probe->probe_id) != 0) {
         printf("zt_enable_probe failed for probe %lu\n", probe->probe_id);
+        zt_trace_rollback_probe_install(session, runtime, probe, &snapshot);
         return -1;
     }
 
@@ -377,6 +496,7 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
 
     if (zt_trampoline_pool_alloc(session, &runtime->trampoline_pool, probe, &remote_trampoline_addr) != 0) {
         printf("Failed to allocate remote trampoline slot\n");
+        zt_trace_rollback_probe_install(session, runtime, probe, &snapshot);
         return -1;
     }
     printf("Remote trampoline slot %d addr: 0x%llx\n",
@@ -384,15 +504,13 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
            (unsigned long long)remote_trampoline_addr);
 
     if (zt_build_trampoline(probe,
-                       runtime->remote_entry_stub_addr,
-                       remote_trampoline_addr,
-                       trampoline_buf,
-                       sizeof(trampoline_buf),
-                       &trampoline_size) != 0) {
+                            runtime->remote_entry_stub_addr,
+                            remote_trampoline_addr,
+                            trampoline_buf,
+                            sizeof(trampoline_buf),
+                            &trampoline_size) != 0) {
         printf("zt_build_trampoline failed for probe %lu\n", probe->probe_id);
-        if (probe->state != ZT_PROBE_INSTALLED) {
-            zt_trampoline_pool_release(session, &runtime->trampoline_pool, probe);
-        }
+        zt_trace_rollback_probe_install(session, runtime, probe, &snapshot);
         return -1;
     }
 
@@ -402,17 +520,13 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
                                trampoline_size) != 0) {
         printf("failed to write trampoline to 0x%llx\n",
                (unsigned long long)remote_trampoline_addr);
-        if (probe->state != ZT_PROBE_INSTALLED) {
-            zt_trampoline_pool_release(session, &runtime->trampoline_pool, probe);
-        }
+        zt_trace_rollback_probe_install(session, runtime, probe, &snapshot);
         return -1;
     }
 
     if (zt_install_probe_patch(session, probe->probe_id, remote_trampoline_addr) != 0) {
         printf("failed to install probe patch for probe %lu\n", probe->probe_id);
-        if (probe->state != ZT_PROBE_INSTALLED) {
-            zt_trampoline_pool_release(session, &runtime->trampoline_pool, probe);
-        }
+        zt_trace_rollback_probe_install(session, runtime, probe, &snapshot);
         return -1;
     }
 
@@ -688,7 +802,7 @@ static int zt_trace_read_commit_snapshot(zt_injector_session_t *session,
         struct iovec remote_iov[256];
         size_t batch_count = (size_t)(count - offset);
         size_t i;
-        ssize_t nread;
+        size_t batch_bytes;
 
         if (batch_count > (size_t)max_iov) {
             batch_count = (size_t)max_iov;
@@ -706,21 +820,13 @@ static int zt_trace_read_commit_snapshot(zt_injector_session_t *session,
             remote_iov[i].iov_len = sizeof(commits[slot]);
         }
 
-        nread = process_vm_readv(session->pid,
-                                 local_iov,
-                                 batch_count,
-                                 remote_iov,
-                                 batch_count,
-                                 0);
-        if (nread != (ssize_t)(batch_count * sizeof(uint64_t))) {
-            for (i = 0; i < batch_count; ++i) {
-                if (zt_read_remote_memory(session->pid,
-                                          (uint64_t)(uintptr_t)remote_iov[i].iov_base,
-                                          local_iov[i].iov_base,
-                                          local_iov[i].iov_len) != 0) {
-                    return -1;
-                }
-            }
+        batch_bytes = batch_count * sizeof(uint64_t);
+        if (zt_read_remote_iov(session->pid,
+                               local_iov,
+                               remote_iov,
+                               batch_count,
+                               batch_bytes) != 0) {
+            return -1;
         }
     }
 
@@ -1094,6 +1200,24 @@ static int zt_trace_ensure_running(zt_injector_session_t *session) {
     return 0;
 }
 
+static int zt_trace_install_active_probe(zt_injector_session_t *session,
+                                         const char *symbol,
+                                         const zt_probe_filter_t *filter) {
+    if (zt_trace_ensure_stopped(session) != 0) {
+        return -1;
+    }
+
+    if (zt_trace_install_probe(session,
+                               &g_active_trace.runtime,
+                               symbol,
+                               filter,
+                               NULL) != 0) {
+        return -1;
+    }
+
+    return zt_trace_ensure_running(session);
+}
+
 static int zt_trace_check_exit_event(void) {
     int target_exited;
 
@@ -1344,15 +1468,7 @@ int zt_trace_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
         return 0;
     }
 
-    if (zt_trace_ensure_stopped(session) != 0) {
-        return -1;
-    }
-
-    if (zt_trace_install_probe(session, &g_active_trace.runtime, probe->target.symbol, &probe->filter, NULL) != 0) {
-        return -1;
-    }
-
-    return zt_trace_ensure_running(session);
+    return zt_trace_install_active_probe(session, probe->target.symbol, &probe->filter);
 }
 
 int zt_trace_pause(zt_injector_session_t *session) {
@@ -1390,6 +1506,10 @@ static int zt_trace_stop(void) {
 
         zt_trampoline_pool_release(g_active_trace.session, &g_active_trace.runtime.trampoline_pool, probe);
         zt_unregister_probe(g_active_trace.session, probe->probe_id);
+    }
+
+    if (zt_trace_cleanup_runtime(g_active_trace.session, &g_active_trace.runtime) != 0) {
+        ret = -1;
     }
 
     zt_trace_reset_active(0);
@@ -1430,15 +1550,7 @@ int zt_trace_start_filtered_in_session(zt_injector_session_t *session,
             return -1;
         }
 
-        if (zt_trace_ensure_stopped(session) != 0) {
-            return -1;
-        }
-
-        if (zt_trace_install_probe(session, &g_active_trace.runtime, symbol, filter, NULL) != 0) {
-            return -1;
-        }
-
-        return zt_trace_ensure_running(session);
+        return zt_trace_install_active_probe(session, symbol, filter);
     }
 
     log_fp = fopen(log_path, "w");
@@ -1456,11 +1568,13 @@ int zt_trace_start_filtered_in_session(zt_injector_session_t *session,
            session->image_base);
 
     if (zt_setup_remote_payload(session, &g_active_trace.runtime) != 0) {
+        zt_trace_cleanup_runtime(session, &g_active_trace.runtime);
         fclose(log_fp);
         return -1;
     }
 
     if (zt_trace_install_probe(session, &g_active_trace.runtime, symbol, filter, NULL) != 0) {
+        zt_trace_cleanup_runtime(session, &g_active_trace.runtime);
         fclose(log_fp);
         return -1;
     }
@@ -1517,8 +1631,9 @@ int zt_trace_remove_probe(zt_injector_session_t *session, uint64_t probe_id) {
     }
 
     if (session->probe_count == 0) {
+        int cleanup_ret = zt_trace_cleanup_runtime(session, &g_active_trace.runtime);
         zt_trace_reset_active(0);
-        return 0;
+        return cleanup_ret;
     }
 
     return zt_trace_ensure_running(session);

@@ -310,7 +310,8 @@ int zt_build_trampoline(const zt_probe_info_t *probe,
     int32_t call_disp;
     int32_t jmp_disp;
 
-    if (probe == NULL || trampoline_buf == NULL || trampoline_size_out == NULL || trampoline_addr == 0) {
+    if (probe == NULL || trampoline_buf == NULL || trampoline_size_out == NULL ||
+        trampoline_addr == 0 || entry_stub_addr == 0) {
         return -1;
     }
 
