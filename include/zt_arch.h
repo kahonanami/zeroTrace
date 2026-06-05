@@ -22,6 +22,7 @@ int zt_arch_calc_patch_span(const uint8_t *code,
 int zt_arch_install_jump(pid_t pid,
                          uint64_t patch_addr,
                          uint64_t target_addr);
+int zt_arch_get_pc(pid_t pid, uint64_t *pc_out);
 
 int zt_arch_remote_syscall6(pid_t pid,
                             long syscall_no,

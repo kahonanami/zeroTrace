@@ -9,6 +9,7 @@
 #define ZT_PROBE_FILTER_TOKEN_CAP 64
 #define ZT_TRACE_GP_ARG_COUNT 6
 #define ZT_TRACE_FP_ARG_COUNT 8
+#define ZT_PAYLOAD_PROBE_ACTION_CAP 32
 
 typedef enum {
     ZT_PROBE_FILTER_TOK_END = 0,
@@ -70,6 +71,7 @@ typedef struct {
 typedef enum {
     ZT_TRACE_EVENT_ENTRY = 0,
     ZT_TRACE_EVENT_RETURN = 1,
+    ZT_TRACE_EVENT_CALL = 2,
 } zt_trace_event_type_t;
 
 typedef struct {
@@ -107,8 +109,15 @@ typedef struct {
 } zt_trace_event_t;
 
 typedef struct {
+    uint64_t enabled;
+    uint64_t probe_id;
+    uint64_t callee_addr;
+} zt_probe_call_action_t;
+
+typedef struct {
     uint64_t magic;
     uint64_t write_seq;
+    zt_probe_call_action_t call_actions[ZT_PAYLOAD_PROBE_ACTION_CAP];
     zt_trace_event_t events[ZT_TRACE_EVENT_CAPACITY];
 } zt_trace_buffer_t;
 

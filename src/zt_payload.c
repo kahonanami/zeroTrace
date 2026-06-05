@@ -25,6 +25,7 @@ static __thread zt_saved_probe_frame_t saved_frames[MAX_SAVED_RET_ADDR];
 static __thread int call_stack_idx;
 static __thread uint64_t last_call_id;
 static __thread uint64_t cached_tid;
+static __thread int in_call_action;
 
 static zt_payload_config_t g_payload_config;
 static uint64_t g_call_id_seq;
@@ -120,6 +121,58 @@ static void zt_publish_event(const zt_trace_event_t *event) {
     __atomic_store_n(&slot->committed_seq, seq + 1, __ATOMIC_RELEASE);
 }
 
+static const zt_probe_call_action_t *zt_find_call_action(uint64_t probe_id) {
+    zt_trace_buffer_t *buffer;
+    const zt_probe_call_action_t *action;
+
+    buffer = zt_get_trace_buffer();
+    if (buffer == NULL || buffer->magic != ZT_TRACE_BUFFER_MAGIC || probe_id == 0) {
+        return NULL;
+    }
+
+    action = &buffer->call_actions[probe_id % ZT_PAYLOAD_PROBE_ACTION_CAP];
+    if (!action->enabled ||
+        action->probe_id != probe_id ||
+        action->callee_addr == 0) {
+        return NULL;
+    }
+
+    return action;
+}
+
+static void zt_run_call_action(uint64_t probe_id, uint64_t call_id) {
+    const zt_probe_call_action_t *action;
+    uint64_t (*callee)(void);
+    uint64_t retval;
+    zt_trace_event_t event;
+
+    if (in_call_action) {
+        return;
+    }
+
+    action = zt_find_call_action(probe_id);
+    if (action == NULL) {
+        return;
+    }
+
+    in_call_action = 1;
+    callee = (uint64_t (*)(void))(uintptr_t)action->callee_addr;
+    retval = callee();
+    in_call_action = 0;
+
+    memset(&event, 0, sizeof(event));
+    event.probe_id = probe_id;
+    event.event_type = ZT_TRACE_EVENT_CALL;
+    event.call_id = call_id;
+    event.timestamp_ns = zt_clock_monotonic_ns();
+    event.tid = zt_gettid_u64();
+    event.cpu_id = zt_getcpu_u64();
+    event.args[0] = action->callee_addr;
+    event.args[1] = retval;
+
+    zt_publish_event(&event);
+}
+
 int zt_payload_init(const zt_payload_config_t *config) {
     if (config != NULL) {
         g_payload_config = *config;
@@ -178,6 +231,7 @@ void zt_handle_entry(ctx_t *context, const void *fp_state_area) {
     event.fp_args[7] = zt_fp_state_vec_low64(fp_state_area, 7);
 
     zt_publish_event(&event);
+    zt_run_call_action(context->func_id, call_id);
 }
 
 void zt_handle_return(ctx_t *context, const void *fp_state_area) {

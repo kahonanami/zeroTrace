@@ -168,6 +168,21 @@ int zt_arch_is_supported(void) {
     return 1;
 }
 
+int zt_arch_get_pc(pid_t pid, uint64_t *pc_out) {
+    struct user_pt_regs regs;
+
+    if (pc_out == NULL) {
+        return -1;
+    }
+
+    if (zt_get_regs(pid, &regs) != 0) {
+        return -1;
+    }
+
+    *pc_out = zt_get_pc(&regs);
+    return 0;
+}
+
 size_t zt_arch_probe_patch_len(void) {
     return ZT_AARCH64_PATCH_LEN;
 }

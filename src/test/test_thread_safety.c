@@ -10,6 +10,54 @@
 #include "../../include/zt_trace_runner.h"
 #include "test_trace_utils.h"
 
+#define MAX_SEEN_TIDS 64
+
+static int count_unique_log_tids(const char *log_text) {
+    const char *cursor = log_text;
+    long tids[MAX_SEEN_TIDS];
+    int tid_count = 0;
+
+    while (cursor != NULL && *cursor != '\0') {
+        const char *slash = strchr(cursor, '/');
+        const char *bracket;
+        char *endptr;
+        long tid;
+        int i;
+        int seen = 0;
+
+        if (slash == NULL) {
+            break;
+        }
+
+        bracket = strstr(slash, " [");
+        if (bracket == NULL) {
+            cursor = slash + 1;
+            continue;
+        }
+
+        tid = strtol(slash + 1, &endptr, 10);
+        if (endptr != bracket || tid <= 0) {
+            cursor = slash + 1;
+            continue;
+        }
+
+        for (i = 0; i < tid_count; ++i) {
+            if (tids[i] == tid) {
+                seen = 1;
+                break;
+            }
+        }
+
+        if (!seen && tid_count < MAX_SEEN_TIDS) {
+            tids[tid_count++] = tid;
+        }
+
+        cursor = bracket + 2;
+    }
+
+    return tid_count;
+}
+
 int main(void) {
     zt_injector_session_t session;
     char *log_text = NULL;
@@ -19,6 +67,8 @@ int main(void) {
     int add_return_count;
     int mix_entry_count;
     int mix_return_count;
+    int max_tracked_threads = 0;
+    int unique_log_tids;
     int i;
     int rc = 1;
 
@@ -69,6 +119,10 @@ int main(void) {
             goto cleanup_trace;
         }
 
+        if (session.thread_count > max_tracked_threads) {
+            max_tracked_threads = session.thread_count;
+        }
+
         usleep(5000);
     }
 
@@ -87,6 +141,7 @@ int main(void) {
     add_return_count = zt_test_count_substring(log_text, "ztrace:return: thread_add");
     mix_entry_count = zt_test_count_substring(log_text, "ztrace:entry: thread_mix");
     mix_return_count = zt_test_count_substring(log_text, "ztrace:return: thread_mix");
+    unique_log_tids = count_unique_log_tids(log_text);
     if (add_entry_count < 8 || add_return_count < 8 ||
         mix_entry_count < 8 || mix_return_count < 8) {
         fprintf(stderr,
@@ -95,6 +150,14 @@ int main(void) {
                 add_return_count,
                 mix_entry_count,
                 mix_return_count);
+        goto cleanup_trace;
+    }
+
+    if (max_tracked_threads < 2 || unique_log_tids < 2) {
+        fprintf(stderr,
+                "threaded trace did not prove multi-thread tracking: tracked=%d unique_log_tids=%d\n",
+                max_tracked_threads,
+                unique_log_tids);
         goto cleanup_trace;
     }
 

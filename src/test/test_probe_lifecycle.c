@@ -311,10 +311,87 @@ cleanup_trace:
     return rc;
 }
 
+static int run_probe_call_action(void) {
+    zt_injector_session_t session;
+    zt_probe_info_t *probe;
+    char *log_text = NULL;
+    char log_path[256];
+    pid_t child;
+    int call_count;
+    int rc = 1;
+
+    if (start_many_probe_trace(&session,
+                               &child,
+                               log_path,
+                               sizeof(log_path),
+                               "zt-probe-call-action") != 0) {
+        return 1;
+    }
+
+    if (zt_trace_start_in_session(&session, "probe_fn01", log_path) != 0) {
+        fprintf(stderr, "trace start failed for call action test\n");
+        goto cleanup_trace;
+    }
+
+    probe = zt_probe_find_by_symbol(&session, "probe_fn01");
+    if (probe == NULL ||
+        zt_trace_update_probe_call_action(&session, probe->probe_id, "call_marker") != 0) {
+        fprintf(stderr, "failed to configure probe call action\n");
+        goto cleanup_trace;
+    }
+
+    if (kill(child, SIGUSR1) != 0) {
+        perror("kill");
+        goto cleanup_trace;
+    }
+
+    if (zt_test_wait_trace_done(15000) != 0) {
+        fprintf(stderr, "trace polling timed out for call action test\n");
+        goto cleanup_trace;
+    }
+
+    log_text = zt_test_read_file(log_path);
+    if (log_text == NULL) {
+        fprintf(stderr, "failed to read call action trace log\n");
+        goto cleanup_trace;
+    }
+
+    call_count = zt_test_count_substring(log_text,
+                                         "ztrace:call: probe_fn01 => call_marker() ->");
+    if (call_count < 10) {
+        fprintf(stderr, "expected at least 10 call action events, got %d\n", call_count);
+        goto cleanup_trace;
+    }
+
+    if (strstr(log_text, "-> 0x5a01") == NULL) {
+        fprintf(stderr, "call action return value was not logged\n");
+        goto cleanup_trace;
+    }
+
+    if (!zt_test_process_gone(child)) {
+        fprintf(stderr, "call action target still alive\n");
+        goto cleanup_trace;
+    }
+
+    printf("probe call action test passed\n");
+    rc = 0;
+
+cleanup_trace:
+    zt_trace_shutdown();
+    zt_injector_detach(&session);
+    if (rc != 0) {
+        kill(child, SIGKILL);
+    }
+    unlink(log_path);
+    free(log_text);
+    return rc;
+}
+
 int main(void) {
     if (run_many_probe_lifecycle() != 0 ||
         run_conditional_probe() != 0 ||
-        run_probe_filter_update() != 0) {
+        run_probe_filter_update() != 0 ||
+        run_probe_call_action() != 0) {
         return 1;
     }
 

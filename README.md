@@ -10,7 +10,7 @@
 - 使用远程 `dlopen` 注入 `libzt_payload.so`
 - 为目标函数安装和移除 probe
 - 捕获函数入口参数和返回值
-- 支持 `enable` / `disable` 热启动/关闭 probe
+- 支持 `enable` / `disable` 动态启用/禁用 probe
 
 ## 依赖
 
@@ -106,6 +106,10 @@ CLI 常用命令：
   热更新已安装 probe 的过滤条件
 - `update <symbol|id> clear`
   清除已安装 probe 的过滤条件
+- `update <symbol|id> call <callee>`
+  probe entry 命中时，在目标进程内主动调用无参函数 `<callee>`
+- `update <symbol|id> call clear`
+  清除 probe 的目标进程内 call action
 - `stop`
   暂停目标进程
 - `continue`
@@ -249,10 +253,11 @@ make test
 - trampoline 构造
 - libc/POSIX 动态库函数 trace
 - 16 个并发 probe 的生命周期测试
-- 多线程目标函数追踪稳定性测试
+- 多线程目标函数并发命中与多 TID 跟踪测试
 - 异步信号下的 signal safety 测试
 - 条件探针参数过滤测试
 - probe filter 热更新测试
+- probe 内目标进程函数调用测试
 
 ## Benchmark
 
@@ -314,6 +319,10 @@ uninstall latency avg : 20732 ns (0.021 ms) over 1000 rounds
 - [x] 补充浮点寄存器 / SIMD 上下文保存与恢复验证
 - [x] 优化 `zt_trace_poll()` 的轮询策略，使用 `process_vm_readv` 非暂停读取 trace buffer
 - [x] 支持 ARM 架构
+- [x] 支持线程组级 attach / interrupt / continue / detach，并在运行态刷新新线程
+- [x] 补齐 patch 前 PC 检查，避免线程停在即将被改写的函数入口字节内
+- [x] 实现 A4：probe 命中时在目标进程内主动调用指定无参函数，并在日志中记录调用结果
+- [ ] 完善 A5：把 filter 热更新扩展为 probe 行为参数的完整热更新
 
 ## 文档
 

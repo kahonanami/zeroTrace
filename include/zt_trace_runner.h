@@ -16,6 +16,11 @@ int zt_trace_poll(void);
 int zt_trace_update_probe_filter(zt_injector_session_t *session,
                                  uint64_t probe_id,
                                  const zt_probe_filter_t *filter);
+int zt_trace_update_probe_call_action(zt_injector_session_t *session,
+                                      uint64_t probe_id,
+                                      const char *callee_symbol);
+int zt_trace_clear_probe_call_action(zt_injector_session_t *session,
+                                     uint64_t probe_id);
 int zt_trace_enable_probe(zt_injector_session_t *session, uint64_t probe_id);
 int zt_trace_disable_probe(zt_injector_session_t *session, uint64_t probe_id);
 int zt_trace_remove_probe(zt_injector_session_t *session, uint64_t probe_id);

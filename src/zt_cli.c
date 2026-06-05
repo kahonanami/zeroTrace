@@ -7,8 +7,6 @@
 #include <limits.h>
 #include <time.h>
 #include <unistd.h>
-#include <sys/ptrace.h>
-#include <sys/wait.h>
 
 #include <readline/readline.h>
 #include <readline/history.h>
@@ -45,7 +43,7 @@ static struct {
     {"stop", "Stop the target process and keep probes unchanged", cmd_stop},
     {"enable", "Enable a probe again: enable <symbol|id>", cmd_enable},
     {"disable", "Disable probe(s): disable <symbol|id|all>", cmd_disable},
-    {"update", "Update probe filter: update <symbol|id> if <expr> | clear", cmd_update},
+    {"update", "Update probe behavior: update <symbol|id> if <expr> | clear | call <symbol|clear>", cmd_update},
     {"untrace", "Remove a probe: untrace <symbol|id>", cmd_untrace},
     {"info", "Show info: info target | info probes", cmd_info},
     {"continue", "Continue the stopped target process", cmd_continue},
@@ -57,35 +55,12 @@ static char g_cli_log_path[PATH_MAX];
 static long g_cli_log_offset;
 static time_t g_cli_last_poll;
 
-static int zt_cli_wait_for_stop(pid_t pid) {
-    int status;
-
-    for (;;) {
-        if (waitpid(pid, &status, 0) > 0) {
-            if (WIFSTOPPED(status)) {
-                return 0;
-            }
-            return -1;
-        }
-
-        if (errno == EINTR) {
-            continue;
-        }
-
-        return -1;
-    }
-}
-
 static int zt_cli_stop_target(void) {
     if (!g_cli_attached) {
         return -1;
     }
 
-    if (kill(g_cli_session.pid, SIGSTOP) != 0) {
-        return -1;
-    }
-
-    return zt_cli_wait_for_stop(g_cli_session.pid);
+    return zt_injector_interrupt_all(&g_cli_session);
 }
 
 static zt_probe_info_t *zt_cli_find_probe(char *target, uint64_t *probe_id_out) {
@@ -296,7 +271,7 @@ static int cmd_attach(char *args) {
         return 0;
     }
 
-    if (ptrace(PTRACE_CONT, g_cli_session.pid, NULL, NULL) != 0) {
+    if (zt_injector_continue_all(&g_cli_session) != 0) {
         printf("Attached to pid %d but failed to continue it\n", g_cli_session.pid);
         zt_injector_detach(&g_cli_session);
         g_cli_attached = false;
@@ -540,7 +515,7 @@ static int cmd_update(char *args) {
     target = zt_next_arg(args);
     mode = zt_next_arg(NULL);
     if (target == NULL || mode == NULL) {
-        printf("Usage: update <symbol|id> if <expr> | clear\n");
+        printf("Usage: update <symbol|id> if <expr> | clear | call <symbol|clear>\n");
         return 0;
     }
 
@@ -565,9 +540,36 @@ static int cmd_update(char *args) {
         return 0;
     }
 
+    if (strcmp(mode, "call") == 0) {
+        char *callee = zt_next_arg(NULL);
+
+        if (callee == NULL || zt_next_arg(NULL) != NULL) {
+            printf("Usage: update <symbol|id> call <symbol|clear>\n");
+            return 0;
+        }
+
+        if (strcmp(callee, "clear") == 0) {
+            if (zt_trace_clear_probe_call_action(&g_cli_session, probe_id) != 0) {
+                printf("Failed to clear call action for probe %s\n", target);
+                return 0;
+            }
+
+            printf("Cleared call action for probe %s\n", target);
+            return 0;
+        }
+
+        if (zt_trace_update_probe_call_action(&g_cli_session, probe_id, callee) != 0) {
+            printf("Failed to update probe %s call action to %s\n", target, callee);
+            return 0;
+        }
+
+        printf("Updated probe %s call action to %s\n", target, callee);
+        return 0;
+    }
+
     if (strcmp(mode, "if") != 0 ||
         zt_probe_filter_compile(strtok(NULL, "\n"), &filter) != 0) {
-        printf("Usage: update <symbol|id> if <expr> | clear\n");
+        printf("Usage: update <symbol|id> if <expr> | clear | call <symbol|clear>\n");
         return 0;
     }
 
@@ -663,6 +665,7 @@ static int cmd_info(char *args) {
         for (i = 0; i < ZT_PROBES_CAPACITY; ++i) {
             zt_probe_info_t *probe = &g_cli_session.probes[i];
             const char *filter_desc = NULL;
+            const char *call_desc = NULL;
 
             if (probe->probe_id == 0) {
                 continue;
@@ -670,6 +673,9 @@ static int cmd_info(char *args) {
 
             if (probe->filter.enabled && probe->filter.expr[0] != '\0') {
                 filter_desc = probe->filter.expr;
+            }
+            if (probe->call_action.enabled && probe->call_symbol[0] != '\0') {
+                call_desc = probe->call_symbol;
             }
 
             printf("%-4lu %-20.20s %-10s %-5u 0x%016lx %s\n",
@@ -681,6 +687,9 @@ static int cmd_info(char *args) {
                    probe->target.module_path);
             if (filter_desc != NULL) {
                 printf("     filter: %s\n", filter_desc);
+            }
+            if (call_desc != NULL) {
+                printf("       call: %s()\n", call_desc);
             }
         }
         return 0;
@@ -704,7 +713,7 @@ static int cmd_continue(char *args) {
             return 0;
         }
     } else {
-        if (ptrace(PTRACE_CONT, g_cli_session.pid, NULL, NULL) != 0) {
+        if (zt_injector_continue_all(&g_cli_session) != 0) {
             printf("Failed to continue pid %d\n", g_cli_session.pid);
             return 0;
         }

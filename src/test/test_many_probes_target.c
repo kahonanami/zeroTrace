@@ -16,6 +16,14 @@ static void wait_for_start(void) {
     sigwait(&set, &sig);
 }
 
+static volatile int g_call_marker_count;
+
+__attribute__((noinline))
+int call_marker(void) {
+    ++g_call_marker_count;
+    return 0x5a00 + g_call_marker_count;
+}
+
 #define DEFINE_PROBE_FUNC(N, OFFSET) \
     __attribute__((noinline)) int probe_fn##N(int x) { \
         return x + (OFFSET); \

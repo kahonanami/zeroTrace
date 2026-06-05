@@ -2,7 +2,9 @@
 
 #include <stdio.h>
 #include <stdbool.h>
+#include <dirent.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <unistd.h>
 #include <elf.h>
 #include <stdint.h>
@@ -18,6 +20,14 @@
 
 #include "../include/zt_arch.h"
 #include "../include/zt_injector.h"
+
+#ifndef PTRACE_O_TRACESYSGOOD
+#define PTRACE_O_TRACESYSGOOD 0x00000001
+#endif
+
+#ifndef PTRACE_EVENT_STOP
+#define PTRACE_EVENT_STOP 128
+#endif
 
 static int zt_read_elf_header(const char *exe_path, Elf64_Ehdr *header) {
     int fd;
@@ -114,6 +124,447 @@ static int zt_read_image_base(pid_t pid, const char *image_path, uint64_t *base_
     return -ENOENT;
 }
 
+static zt_thread_info_t *zt_session_find_thread(zt_injector_session_t *session, pid_t tid) {
+    int i;
+
+    if (session == NULL || tid <= 0) {
+        return NULL;
+    }
+
+    for (i = 0; i < session->thread_count; ++i) {
+        if (session->threads[i].tid == tid) {
+            return &session->threads[i];
+        }
+    }
+
+    return NULL;
+}
+
+static int zt_session_add_thread(zt_injector_session_t *session, pid_t tid) {
+    zt_thread_info_t *thread;
+
+    if (session == NULL || tid <= 0) {
+        return -1;
+    }
+
+    thread = zt_session_find_thread(session, tid);
+    if (thread != NULL) {
+        return 0;
+    }
+
+    if (session->thread_count >= ZT_THREADS_CAPACITY) {
+        return -1;
+    }
+
+    session->threads[session->thread_count].tid = tid;
+    session->threads[session->thread_count].stopped = 0;
+    session->threads[session->thread_count].resume_signal = 0;
+    ++session->thread_count;
+    return 0;
+}
+
+static int zt_resume_signal_from_status(int status) {
+    int stop_sig;
+    int event;
+
+    if (!WIFSTOPPED(status)) {
+        return 0;
+    }
+
+    stop_sig = WSTOPSIG(status);
+    event = (unsigned int)status >> 16;
+
+    if (event == PTRACE_EVENT_STOP ||
+        stop_sig == SIGTRAP ||
+        stop_sig == (SIGTRAP | 0x80)) {
+        return 0;
+    }
+
+    return stop_sig;
+}
+
+static int zt_injector_seize_thread(zt_injector_session_t *session, pid_t tid) {
+    long options = PTRACE_O_TRACESYSGOOD;
+
+    if (zt_session_find_thread(session, tid) != NULL) {
+        return 0;
+    }
+
+    if (ptrace(PTRACE_SEIZE, tid, NULL, (void *)(uintptr_t)options) != 0) {
+        if (errno == ESRCH) {
+            return 0;
+        }
+        return -1;
+    }
+
+    return zt_session_add_thread(session, tid);
+}
+
+static int zt_injector_refresh_threads(zt_injector_session_t *session) {
+    char task_path[64];
+    DIR *dir;
+    struct dirent *entry;
+
+    if (session == NULL || session->pid <= 0) {
+        return -1;
+    }
+
+    snprintf(task_path, sizeof(task_path), "/proc/%d/task", session->pid);
+    dir = opendir(task_path);
+    if (dir == NULL) {
+        return -1;
+    }
+
+    while ((entry = readdir(dir)) != NULL) {
+        char *endptr;
+        long tid;
+
+        errno = 0;
+        tid = strtol(entry->d_name, &endptr, 10);
+        if (errno != 0 || entry->d_name == endptr || *endptr != '\0' || tid <= 0) {
+            continue;
+        }
+
+        if (zt_injector_seize_thread(session, (pid_t)tid) != 0) {
+            closedir(dir);
+            return -1;
+        }
+    }
+
+    closedir(dir);
+    return 0;
+}
+
+static int zt_wait_for_thread_stop(zt_injector_session_t *session, zt_thread_info_t *thread) {
+    int status;
+
+    if (session == NULL || thread == NULL || thread->tid <= 0) {
+        return -1;
+    }
+
+    for (;;) {
+        if (waitpid(thread->tid, &status, __WALL) > 0) {
+            if (WIFSTOPPED(status)) {
+                thread->stopped = 1;
+                thread->resume_signal = zt_resume_signal_from_status(status);
+                return 0;
+            }
+
+            if (WIFEXITED(status) || WIFSIGNALED(status)) {
+                thread->tid = 0;
+                thread->stopped = 0;
+                thread->resume_signal = 0;
+                return 0;
+            }
+
+            return -1;
+        }
+
+        if (errno == EINTR) {
+            continue;
+        }
+
+        if (errno == ECHILD || errno == ESRCH) {
+            thread->tid = 0;
+            thread->stopped = 0;
+            return 0;
+        }
+
+        return -1;
+    }
+}
+
+static void zt_compact_threads(zt_injector_session_t *session) {
+    int read_idx;
+    int write_idx;
+
+    if (session == NULL) {
+        return;
+    }
+
+    write_idx = 0;
+    for (read_idx = 0; read_idx < session->thread_count; ++read_idx) {
+        if (session->threads[read_idx].tid <= 0) {
+            continue;
+        }
+
+        if (write_idx != read_idx) {
+            session->threads[write_idx] = session->threads[read_idx];
+        }
+        ++write_idx;
+    }
+
+    session->thread_count = write_idx;
+}
+
+int zt_injector_interrupt_all(zt_injector_session_t *session) {
+    int i;
+
+    if (session == NULL || session->pid <= 0) {
+        return -1;
+    }
+
+    if (zt_injector_refresh_threads(session) != 0) {
+        return -1;
+    }
+
+    for (i = 0; i < session->thread_count; ++i) {
+        zt_thread_info_t *thread = &session->threads[i];
+
+        if (thread->tid <= 0 || thread->stopped) {
+            continue;
+        }
+
+        if (ptrace(PTRACE_INTERRUPT, thread->tid, NULL, NULL) != 0) {
+            if (errno == ESRCH) {
+                thread->tid = 0;
+                thread->stopped = 0;
+                thread->resume_signal = 0;
+                continue;
+            }
+            return -1;
+        }
+    }
+
+    for (i = 0; i < session->thread_count; ++i) {
+        zt_thread_info_t *thread = &session->threads[i];
+
+        if (thread->tid <= 0 || thread->stopped) {
+            continue;
+        }
+
+        if (zt_wait_for_thread_stop(session, thread) != 0) {
+            return -1;
+        }
+    }
+
+    zt_compact_threads(session);
+    session->threads_stopped = 1;
+    return 0;
+}
+
+int zt_injector_continue_all(zt_injector_session_t *session) {
+    int i;
+
+    if (session == NULL || session->pid <= 0) {
+        return -1;
+    }
+
+    for (i = 0; i < session->thread_count; ++i) {
+        zt_thread_info_t *thread = &session->threads[i];
+        int resume_signal;
+
+        if (thread->tid <= 0 || !thread->stopped) {
+            continue;
+        }
+
+        resume_signal = thread->resume_signal;
+        if (ptrace(PTRACE_CONT,
+                   thread->tid,
+                   NULL,
+                   (void *)(uintptr_t)resume_signal) != 0) {
+            if (errno == ESRCH) {
+                thread->tid = 0;
+                thread->stopped = 0;
+                thread->resume_signal = 0;
+                continue;
+            }
+            return -1;
+        }
+
+        thread->stopped = 0;
+        thread->resume_signal = 0;
+    }
+
+    zt_compact_threads(session);
+    session->threads_stopped = 0;
+    return 0;
+}
+
+int zt_injector_poll_events(zt_injector_session_t *session, int *target_exited_out) {
+    int status;
+
+    if (target_exited_out != NULL) {
+        *target_exited_out = 0;
+    }
+
+    if (session == NULL || session->pid <= 0) {
+        return -1;
+    }
+
+    if (zt_injector_refresh_threads(session) != 0) {
+        return -1;
+    }
+
+    for (;;) {
+        pid_t tid;
+        zt_thread_info_t *thread;
+
+        errno = 0;
+        tid = waitpid(-1, &status, __WALL | WNOHANG);
+        if (tid == 0) {
+            return 0;
+        }
+
+        if (tid < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == ECHILD) {
+                return 0;
+            }
+            return -1;
+        }
+
+        thread = zt_session_find_thread(session, tid);
+        if (thread == NULL) {
+            continue;
+        }
+
+        if (WIFEXITED(status) || WIFSIGNALED(status)) {
+            if (tid == session->pid && target_exited_out != NULL) {
+                *target_exited_out = 1;
+            }
+            thread->tid = 0;
+            thread->stopped = 0;
+            thread->resume_signal = 0;
+            zt_compact_threads(session);
+            continue;
+        }
+
+        if (WIFSTOPPED(status)) {
+            int deliver_sig;
+
+            thread->stopped = 1;
+            thread->resume_signal = zt_resume_signal_from_status(status);
+            deliver_sig = thread->resume_signal;
+
+            if (ptrace(PTRACE_CONT,
+                       tid,
+                       NULL,
+                       (void *)(uintptr_t)deliver_sig) != 0) {
+                if (errno == ESRCH) {
+                    thread->tid = 0;
+                    thread->stopped = 0;
+                    thread->resume_signal = 0;
+                    zt_compact_threads(session);
+                    continue;
+                }
+                return -1;
+            }
+
+            thread->stopped = 0;
+            thread->resume_signal = 0;
+        }
+    }
+}
+
+static int zt_pc_is_inside_patch_region(zt_injector_session_t *session, uint64_t pc) {
+    int i;
+
+    if (session == NULL || pc == 0) {
+        return 0;
+    }
+
+    for (i = 0; i < ZT_PROBES_CAPACITY; ++i) {
+        zt_probe_info_t *probe = &session->probes[i];
+        uint64_t start;
+        uint64_t end;
+
+        if (probe->probe_id == 0 || probe->orig_len == 0) {
+            continue;
+        }
+
+        start = probe->target.remote_addr;
+        end = start + probe->orig_len;
+        if (pc >= start && pc < end) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int zt_single_step_thread(zt_injector_session_t *session, zt_thread_info_t *thread) {
+    int resume_signal;
+
+    if (session == NULL || thread == NULL || thread->tid <= 0 || !thread->stopped) {
+        return -1;
+    }
+
+    resume_signal = thread->resume_signal;
+    if (ptrace(PTRACE_SINGLESTEP,
+               thread->tid,
+               NULL,
+               (void *)(uintptr_t)resume_signal) != 0) {
+        if (errno == ESRCH) {
+            thread->tid = 0;
+            thread->stopped = 0;
+            thread->resume_signal = 0;
+            return 0;
+        }
+        return -1;
+    }
+
+    thread->stopped = 0;
+    thread->resume_signal = 0;
+    return zt_wait_for_thread_stop(session, thread);
+}
+
+static int zt_ensure_patch_regions_are_safe(zt_injector_session_t *session) {
+    int i;
+
+    if (session == NULL || !session->threads_stopped) {
+        return -1;
+    }
+
+    for (i = 0; i < session->thread_count; ++i) {
+        zt_thread_info_t *thread = &session->threads[i];
+        int step_count;
+
+        if (thread->tid <= 0 || !thread->stopped) {
+            continue;
+        }
+
+        for (step_count = 0; step_count < 8; ++step_count) {
+            uint64_t pc;
+
+            if (zt_arch_get_pc(thread->tid, &pc) != 0) {
+                if (errno == ESRCH) {
+                    thread->tid = 0;
+                    thread->stopped = 0;
+                    thread->resume_signal = 0;
+                    break;
+                }
+                return -1;
+            }
+
+            if (!zt_pc_is_inside_patch_region(session, pc)) {
+                break;
+            }
+
+            if (zt_single_step_thread(session, thread) != 0) {
+                return -1;
+            }
+        }
+
+        if (thread->tid > 0 && thread->stopped) {
+            uint64_t pc;
+
+            if (zt_arch_get_pc(thread->tid, &pc) != 0) {
+                return -1;
+            }
+
+            if (zt_pc_is_inside_patch_region(session, pc)) {
+                return -1;
+            }
+        }
+    }
+
+    zt_compact_threads(session);
+    return 0;
+}
+
 int zt_read_remote_memory(pid_t pid, uint64_t remote_addr, void *buffer, size_t size) {
     struct iovec local_iov;
     struct iovec remote_iov;
@@ -163,6 +614,9 @@ int zt_read_remote_memory(pid_t pid, uint64_t remote_addr, void *buffer, size_t 
 }
 
 int zt_write_remote_memory(pid_t pid, uint64_t remote_addr, const void *buffer, size_t size) {
+    struct iovec local_iov;
+    struct iovec remote_iov;
+    ssize_t nwritten;
     size_t copied;
     size_t word_size;
     long word;
@@ -170,6 +624,16 @@ int zt_write_remote_memory(pid_t pid, uint64_t remote_addr, const void *buffer, 
 
     if (buffer == NULL || size == 0) {
         return -1;
+    }
+
+    local_iov.iov_base = (void *)buffer;
+    local_iov.iov_len = size;
+    remote_iov.iov_base = (void *)(uintptr_t)remote_addr;
+    remote_iov.iov_len = size;
+
+    nwritten = process_vm_writev(pid, &local_iov, 1, &remote_iov, 1, 0);
+    if (nwritten == (ssize_t)size) {
+        return 0;
     }
 
     copied = 0;
@@ -664,6 +1128,10 @@ int zt_install_probe_patch(zt_injector_session_t *session,
         return -1;
     }
 
+    if (zt_ensure_patch_regions_are_safe(session) != 0) {
+        return -1;
+    }
+
     if (zt_arch_install_jump(session->pid, probe->target.remote_addr, trampoline_addr) != 0) {
         return -1;
     }
@@ -689,6 +1157,10 @@ int zt_uninstall_probe_patch(zt_injector_session_t *session, uint64_t probe_id) 
         return -1;
     }
 
+    if (zt_ensure_patch_regions_are_safe(session) != 0) {
+        return -1;
+    }
+
     if (zt_write_remote_memory(session->pid,
                                probe->target.remote_addr,
                                probe->orig_code,
@@ -702,7 +1174,6 @@ int zt_uninstall_probe_patch(zt_injector_session_t *session, uint64_t probe_id) 
 
 int zt_injector_attach(zt_injector_session_t *session, pid_t pid) {
     int ret;
-    int status;
     size_t path_len;
     char link_path[512];
 
@@ -718,37 +1189,29 @@ int zt_injector_attach(zt_injector_session_t *session, pid_t pid) {
         return -1;
     }
 
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) != 0) {
-        return -1;
-    }
-
-    if (waitpid(pid, &status, 0) < 0) {
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
-        return -1;
-    }
-
-    if (!WIFSTOPPED(status)) {
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+    if (zt_injector_refresh_threads(session) != 0 ||
+        zt_injector_interrupt_all(session) != 0) {
+        zt_injector_detach(session);
         return -1;
     }
 
     snprintf(link_path, sizeof(link_path), "/proc/%d/exe", pid);
     path_len = readlink(link_path, session->exe_path, sizeof(session->exe_path) - 1);
     if (path_len <= 0) {
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        zt_injector_detach(session);
         return -1;
     }
     session->exe_path[path_len] = '\0';
 
     ret = zt_check_is_pie(session->exe_path, &session->is_pie);
     if(ret != 0){
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        zt_injector_detach(session);
         return -1;
     }
 
     ret = zt_read_image_base(pid, session->exe_path, &session->image_base);
     if (ret != 0) {
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        zt_injector_detach(session);
         return ret;
     }
 
@@ -756,12 +1219,20 @@ int zt_injector_attach(zt_injector_session_t *session, pid_t pid) {
 }
 
 void zt_injector_detach(zt_injector_session_t *session) {
+    int i;
+
     if (session == NULL) {
         return;
     }
 
-    if (session->pid > 0) {
-        ptrace(PTRACE_DETACH, session->pid, NULL, NULL);
+    if (session->pid > 0 && !session->threads_stopped) {
+        (void)zt_injector_interrupt_all(session);
+    }
+
+    for (i = 0; i < session->thread_count; ++i) {
+        if (session->threads[i].tid > 0) {
+            ptrace(PTRACE_DETACH, session->threads[i].tid, NULL, NULL);
+        }
     }
 
     memset(session, 0, sizeof(zt_injector_session_t));
