@@ -302,6 +302,16 @@ attach <pid>
 6. 读取目标程序映像基址
 7. `zt_injector_continue_all()` 让线程组继续运行
 
+`zt_injector_interrupt_all()` 不是只做一次“枚举 -> interrupt”。目标进程可能在线程枚举后、所有线程真正停住前继续创建新线程，因此它会多轮收敛：
+
+1. 刷新 `/proc/<pid>/task` 并 seize 新 TID
+2. interrupt 当前所有未停止 TID
+3. wait 每个 TID 进入 ptrace stop
+4. 再次刷新线程表
+5. 如果发现新 TID 或仍有未停止线程，则进入下一轮
+
+只有当线程表稳定且所有 tracked TID 都处于 stopped 状态时，`threads_stopped` 才会被置位。这样可以覆盖运行中 clone/churn 线程带来的停止窗口。
+
 后续 trace 运行期间，`zt_trace_poll()` 会调用 `zt_injector_poll_events()`：
 
 - 定期刷新 `/proc/<pid>/task`，把新创建的线程也 `PTRACE_SEIZE`
@@ -318,8 +328,15 @@ attach <pid>
 - 目标运行后继续创建新线程，验证运行态 `/proc/<pid>/task` refresh 能把新 TID 纳入控制
 - 多个线程并发命中 probe，日志中必须出现多个不同 TID
 - 目标运行中反复 `disable / enable` `thread_mix`，压测线程组 interrupt、PC 检查、patch 恢复和重新安装
-- 使用低频 `thread_pair` probe 做强不变量校验，要求每个 TID 内 entry / return 数量严格配平
-- 目标退出窗口中，如果 `/proc/<pid>/task` 或共享 trace buffer 已不可读，会归类为目标退出，而不是误判为运行中 trace 错误
+- 使用始终启用的 `thread_stable` probe 做强不变量校验，要求每个 TID 内 entry / return 数量严格配平；低频 `thread_pair` 用于额外多 probe 并发覆盖
+- 目标退出窗口中，如果 `/proc/<pid>/task` 已消失、共享 trace buffer 映射已消失，或退出后调用方多 poll 一次，会归类为目标退出，而不是误判为运行中 trace 错误
+
+`test_thread_group_control` 则单独验证线程组控制 API 本身。目标进程保留一组 persistent worker，同时持续创建短生命周期线程；测试端反复执行 `interrupt_all / continue_all`：
+
+- 停止后比较 `/proc/<pid>/task` 与 injector 跟踪表，要求当前 task 数不超过 tracked TID 数
+- 停止期间 drain 目标 reporter pipe，并在等待窗口内要求没有任何新心跳
+- 恢复后要求 reporter 心跳重新出现
+- 最近一次回归输出为 `rounds=80 task_max=31 tracked_max=31 resume_rounds=80`
 
 ### 2.2 trace
 
@@ -402,6 +419,8 @@ trace probe_fn01 if arg0 >= 10
   - `src/isa/aarch64/trampoline_manager.c`
   - `src/isa/aarch64/stub.S`
 
+`scripts/check_arch_config.py` 会在不交叉编译的情况下展开 `make print-arch-config ARCH=x86_64/aarch64`，检查 ISA 后端、stub 汇编和架构专用 trampoline 测试是否选对。这个 self-test 已接入 `make test`，用于防止后续改 Makefile 时意外把两个后端混在一起。
+
 与 ISA 无关的 trampoline slot 分配 / 回收逻辑放在：
 
 - `src/zt_trampoline_pool.c`
@@ -440,7 +459,8 @@ zt_trace_poll()
 2. 从上次 `last_seq` 之后开始消费新事件
 3. 把格式化后的输出追加写入 `ztrace.<pid>.log`，并在 CLI 中重绘显示
 4. 如果目标因为信号进入 ptrace stop，则转发该信号并继续目标进程
-5. 如果远程读在目标退出窗口失败，则通过 `kill(pid, 0)`、`/proc/<pid>/stat` 中的 zombie/dead 状态和一个短暂确认窗口判断是否属于正常退出；确认退出后关闭 active trace，而不是把它当作 trace 错误
+5. 如果远程读在目标退出窗口失败，则通过 `kill(pid, 0)`、`/proc/<pid>/stat` 中的 zombie/dead 状态、共享 trace buffer 是否仍出现在 `/proc/<pid>/maps` 中，以及一个短暂确认窗口判断是否属于正常退出；确认退出后关闭 active trace，而不是把它当作 trace 错误
+6. 如果刚刚已经观测到目标退出，后续重复调用 `zt_trace_poll()` 返回完成态，避免调用方在边界上多 poll 一次时把正常退出误报为失败
 
 当前日志格式采用接近 `perf script` / `ftrace` 的事件流风格，包含：
 
@@ -455,6 +475,14 @@ zt_trace_poll()
 test_threaded_target-22520/22521 [003] 156853.039080371: ztrace:entry: thread_add(arg0=0x1, arg1=0x0, arg2=0x1, arg3=0x7fa855d4785e, arg4=0x0, arg5=0x7fa855c8e6c0)
 test_threaded_target-22520/22521 [003] 156853.039081151: ztrace:return: thread_add -> 0x1
 ```
+
+`scripts/merge_trace_events.py` 可以把 zeroTrace 日志与 perf/ftrace 风格日志按时间戳合流排序：
+
+```bash
+scripts/merge_trace_events.py --show-source ztrace.<pid>.log perf.script ftrace.log
+```
+
+该脚本只做事件流排序，不做跨 clock domain 校准。因此 perf/ftrace 侧需要选择与 zeroTrace `CLOCK_MONOTONIC` 对齐的 trace clock，或者在外部先完成时间轴校准。
 
 如果函数签名能在 `conf/zttrace.conf` 中找到，则会优先输出更接近 `ltrace` 风格的结果，例如：
 
@@ -499,6 +527,16 @@ test_libc_io_loop-1705732/1705732 [001] 157114.775572037: ztrace:return: read ->
 
 `update <symbol|id> call <callee>` 和 `update <symbol|id> call clear` 属于 payload 侧行为热更新。tracer 会把新的 call action 写入远程 trace buffer 的 `call_actions` 表，payload 后续 entry 命中时直接读取该表决定是否主动调用目标函数。这个更新同样不会重新 patch 函数入口，也不会重新分配 trampoline。
 
+为了避免目标进程正在读取 action 表时 tracer 覆盖字段，call action 更新使用 `enabled` 作为 commit bit：
+
+1. 先把远程 slot 的 `enabled` 写成 `0`
+2. 再写入新的 `probe_id` / `callee_addr` 等字段，写入阶段保持 `enabled == 0`
+3. 如果是启用 action，最后单独把 `enabled` 写成 `1`
+
+payload 读取 action 时会拷贝一份本地 snapshot，并用 acquire load 检查 `enabled`。这样即使 tracer 在运行中清除或切换 call action，payload 也只会看到“旧 action 的完整快照”“新 action 的完整快照”或“disabled”，不会把旧 probe id 和新 callee 地址拼成半条状态。
+
+`call_actions` 表不是简单使用 `probe_id % 32` 覆盖写入。probe id 会随着反复 `trace/untrace` 单调递增，因此长期运行中可能出现 `id=1` 和 `id=33` 同时存在的槽位碰撞。当前实现为每个启用 call action 的 probe 分配独立 action slot；payload 先检查 home slot，必要时再扫描表中匹配 `probe_id` 的 action。没有任何 call action 时，`call_action_count == 0` 会让 payload 直接跳过这条路径，避免影响普通 probe 热路径。
+
 `disable <symbol|id>` / `enable <symbol|id>` 属于 probe state 热更新。它需要短暂停住线程组来恢复或重新安装入口 patch，但 probe 元数据和 trampoline slot 会保留；重新 enable 时会复用原 slot，而不是分配新的 trampoline pool slot。
 
 对应的自动化测试是 `test_probe_hot_update`。它启动一个受控目标进程 `test_hot_update_target`，用管道把目标执行划分成 5 个阶段：
@@ -510,6 +548,14 @@ test_libc_io_loop-1705732/1705732 [001] 157114.775572037: ztrace:return: read ->
 5. `enable` + 清除 call action + final filter：`arg0 >= 95`，验证 25 次 entry/return，且没有 call action 事件
 
 测试还会记录最初的 `trampoline_addr` 和 `trampoline_slot`，每次热更新后都检查它们没有变化。这样可以证明 A5 的行为更新没有退化成“先 untrace 再 trace”的重建流程。
+
+此外，`test_probe_hot_update` 还包含 live call action 热更新子测试。目标进程在运行中连续命中 `hot_probe`，tracer 不暂停目标进程，依次执行 `call hot_call_a`、`call hot_call_b`、`call clear`、`call hot_call_a`。测试要求日志中同时出现足够数量的 A/B call 事件，并逐行确认：
+
+- `hot_call_a()` 的返回值必须落在 `0xa5xx` 命名空间
+- `hot_call_b()` 的返回值必须落在 `0xb5xx` 命名空间
+- 不允许出现 `ztrace:call: ... => <unknown>()`
+
+这个子测试覆盖的是运行态热切换窗口，防止旧事件被当前 probe 的 `call_symbol` 错误解释。trace runner 会把每个 call 事件记录的 `callee_addr` 映射到历史 symbol cache，因此事件输出和当时真正调用的 callee 地址绑定，而不是和 probe 当前配置绑定。
 
 ### 2.7 probe 内 call action
 
@@ -529,8 +575,10 @@ retval = callee();
 调用完成后，payload 会写入一条 `ZT_TRACE_EVENT_CALL` 事件。tracer 消费事件时输出：
 
 ```text
-ztrace:call: probe_fn01 => call_marker() -> 0x5a01
+ztrace:call: probe_fn01 => call_marker() -> 0x5a01 callee=0x7f...
 ```
+
+对应的 `test_probe_lifecycle` 还会制造 `probe_fn01(id=1)` 与 `probe_fn02(id=33)` 同时存在的 action slot 碰撞场景，要求两个 probe 的 call action 都能输出日志，证明长期运行中反复 `trace/untrace` 不会让新 probe 覆盖旧 probe 的 call action。
 
 这个动作发生在目标进程内部，而不是 tracer 事后模拟输出。当前版本支持无参函数调用，返回值按整数 / 指针返回值记录；后续如果要支持带参数 call action，可以继续复用 entry 事件中的 `arg0 ... arg5` 或常量参数配置。
 

@@ -38,6 +38,7 @@ typedef struct{
     zt_probe_state_t state;
     zt_probe_filter_t filter;
     zt_probe_call_action_t call_action;
+    int call_action_slot;
     char call_symbol[ZT_PROBE_SYMBOL_MAX];
 } zt_probe_info_t;
 
@@ -56,6 +57,7 @@ typedef struct {
     int probe_count;
     int thread_count;
     int threads_stopped;
+    int target_exited;
     zt_thread_info_t threads[ZT_THREADS_CAPACITY];
     zt_probe_info_t probes[ZT_PROBES_CAPACITY];
 } zt_injector_session_t;

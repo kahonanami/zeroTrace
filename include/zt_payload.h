@@ -117,6 +117,7 @@ typedef struct {
 typedef struct {
     uint64_t magic;
     uint64_t write_seq;
+    uint64_t call_action_count;
     zt_probe_call_action_t call_actions[ZT_PAYLOAD_PROBE_ACTION_CAP];
     zt_trace_event_t events[ZT_TRACE_EVENT_CAPACITY];
 } zt_trace_buffer_t;

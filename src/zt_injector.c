@@ -163,6 +163,34 @@ static int zt_session_add_thread(zt_injector_session_t *session, pid_t tid) {
     return 0;
 }
 
+static int zt_session_mark_target_exited(zt_injector_session_t *session,
+                                         int *target_exited_out) {
+    if (session != NULL) {
+        session->target_exited = 1;
+        session->threads_stopped = 0;
+    }
+
+    if (target_exited_out != NULL) {
+        *target_exited_out = 1;
+    }
+
+    return 0;
+}
+
+static int zt_session_report_if_target_exited(zt_injector_session_t *session,
+                                              int *target_exited_out) {
+    if (session == NULL) {
+        return 0;
+    }
+
+    if (session->target_exited || session->thread_count == 0 ||
+        zt_process_is_exited(session->pid)) {
+        return zt_session_mark_target_exited(session, target_exited_out);
+    }
+
+    return 0;
+}
+
 static int zt_resume_signal_from_status(int status) {
     int stop_sig;
     int event;
@@ -336,7 +364,25 @@ static void zt_compact_threads(zt_injector_session_t *session) {
     session->thread_count = write_idx;
 }
 
+static int zt_session_has_unstopped_thread(zt_injector_session_t *session) {
+    int i;
+
+    if (session == NULL) {
+        return 0;
+    }
+
+    for (i = 0; i < session->thread_count; ++i) {
+        if (session->threads[i].tid > 0 && !session->threads[i].stopped) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 int zt_injector_interrupt_all(zt_injector_session_t *session) {
+    const int max_stop_passes = 16;
+    int pass;
     int i;
 
     if (session == NULL || session->pid <= 0) {
@@ -347,39 +393,50 @@ int zt_injector_interrupt_all(zt_injector_session_t *session) {
         return -1;
     }
 
-    for (i = 0; i < session->thread_count; ++i) {
-        zt_thread_info_t *thread = &session->threads[i];
+    for (pass = 0; pass < max_stop_passes; ++pass) {
+        for (i = 0; i < session->thread_count; ++i) {
+            zt_thread_info_t *thread = &session->threads[i];
 
-        if (thread->tid <= 0 || thread->stopped) {
-            continue;
-        }
-
-        if (ptrace(PTRACE_INTERRUPT, thread->tid, NULL, NULL) != 0) {
-            if (errno == ESRCH) {
-                thread->tid = 0;
-                thread->stopped = 0;
-                thread->resume_signal = 0;
+            if (thread->tid <= 0 || thread->stopped) {
                 continue;
             }
+
+            if (ptrace(PTRACE_INTERRUPT, thread->tid, NULL, NULL) != 0) {
+                if (errno == ESRCH) {
+                    thread->tid = 0;
+                    thread->stopped = 0;
+                    thread->resume_signal = 0;
+                    continue;
+                }
+                return -1;
+            }
+        }
+
+        for (i = 0; i < session->thread_count; ++i) {
+            zt_thread_info_t *thread = &session->threads[i];
+
+            if (thread->tid <= 0 || thread->stopped) {
+                continue;
+            }
+
+            if (zt_wait_for_thread_stop(session, thread) != 0) {
+                return -1;
+            }
+        }
+
+        zt_compact_threads(session);
+
+        if (zt_injector_refresh_threads(session) != 0) {
             return -1;
+        }
+
+        if (!zt_session_has_unstopped_thread(session)) {
+            session->threads_stopped = 1;
+            return 0;
         }
     }
 
-    for (i = 0; i < session->thread_count; ++i) {
-        zt_thread_info_t *thread = &session->threads[i];
-
-        if (thread->tid <= 0 || thread->stopped) {
-            continue;
-        }
-
-        if (zt_wait_for_thread_stop(session, thread) != 0) {
-            return -1;
-        }
-    }
-
-    zt_compact_threads(session);
-    session->threads_stopped = 1;
-    return 0;
+    return -1;
 }
 
 int zt_injector_continue_all(zt_injector_session_t *session) {
@@ -431,12 +488,13 @@ int zt_injector_poll_events(zt_injector_session_t *session, int *target_exited_o
         return -1;
     }
 
+    if (session->target_exited) {
+        return zt_session_mark_target_exited(session, target_exited_out);
+    }
+
     if (zt_injector_refresh_threads(session) != 0) {
         if (zt_process_is_exited(session->pid)) {
-            if (target_exited_out != NULL) {
-                *target_exited_out = 1;
-            }
-            return 0;
+            return zt_session_mark_target_exited(session, target_exited_out);
         }
         return -1;
     }
@@ -448,6 +506,9 @@ int zt_injector_poll_events(zt_injector_session_t *session, int *target_exited_o
         errno = 0;
         tid = waitpid(-1, &status, __WALL | WNOHANG);
         if (tid == 0) {
+            if (zt_session_report_if_target_exited(session, target_exited_out) != 0) {
+                return -1;
+            }
             return 0;
         }
 
@@ -456,6 +517,9 @@ int zt_injector_poll_events(zt_injector_session_t *session, int *target_exited_o
                 continue;
             }
             if (errno == ECHILD) {
+                if (zt_session_report_if_target_exited(session, target_exited_out) != 0) {
+                    return -1;
+                }
                 return 0;
             }
             return -1;
@@ -463,17 +527,23 @@ int zt_injector_poll_events(zt_injector_session_t *session, int *target_exited_o
 
         thread = zt_session_find_thread(session, tid);
         if (thread == NULL) {
+            if ((WIFEXITED(status) || WIFSIGNALED(status)) && tid == session->pid) {
+                zt_session_mark_target_exited(session, target_exited_out);
+            }
             continue;
         }
 
         if (WIFEXITED(status) || WIFSIGNALED(status)) {
-            if (tid == session->pid && target_exited_out != NULL) {
-                *target_exited_out = 1;
+            if (tid == session->pid) {
+                zt_session_mark_target_exited(session, target_exited_out);
             }
             thread->tid = 0;
             thread->stopped = 0;
             thread->resume_signal = 0;
             zt_compact_threads(session);
+            if (session->thread_count == 0) {
+                zt_session_mark_target_exited(session, target_exited_out);
+            }
             continue;
         }
 
@@ -1066,6 +1136,7 @@ zt_probe_info_t *zt_probe_alloc(zt_injector_session_t *session, const zt_symbol_
         session->probes[i].target = *target;
         session->probes[i].trampoline_addr = 0;
         session->probes[i].trampoline_slot = -1;
+        session->probes[i].call_action_slot = -1;
         session->probes[i].orig_len = 0;
         session->probes[i].state = ZT_PROBE_RESOLVED;
         ++session->probe_count;

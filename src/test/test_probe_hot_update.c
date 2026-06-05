@@ -143,7 +143,7 @@ static int wait_for_child_exit(pid_t child, long timeout_ms) {
     return -1;
 }
 
-static pid_t start_hot_update_target(int *status_fd_out) {
+static pid_t start_hot_update_target(int *status_fd_out, const char *mode) {
     int pipefd[2];
     pid_t child;
 
@@ -170,10 +170,18 @@ static pid_t start_hot_update_target(int *status_fd_out) {
     char fd_arg[32];
 
     snprintf(fd_arg, sizeof(fd_arg), "%d", pipefd[1]);
-    execl("./bin/tests/test_hot_update_target",
-          "./bin/tests/test_hot_update_target",
-          fd_arg,
-          (char *)NULL);
+    if (mode != NULL) {
+        execl("./bin/tests/test_hot_update_target",
+              "./bin/tests/test_hot_update_target",
+              fd_arg,
+              mode,
+              (char *)NULL);
+    } else {
+        execl("./bin/tests/test_hot_update_target",
+              "./bin/tests/test_hot_update_target",
+              fd_arg,
+              (char *)NULL);
+    }
     perror("execl");
     _exit(1);
 }
@@ -198,7 +206,81 @@ static int count_logged_args_in_range(const char *log_text, int first, int last)
     return count;
 }
 
-int main(void) {
+static int line_contains_text(const char *line, size_t len, const char *needle) {
+    size_t needle_len;
+    size_t i;
+
+    if (line == NULL || needle == NULL) {
+        return 0;
+    }
+
+    needle_len = strlen(needle);
+    if (needle_len == 0 || len < needle_len) {
+        return 0;
+    }
+
+    for (i = 0; i + needle_len <= len; ++i) {
+        if (memcmp(line + i, needle, needle_len) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int verify_live_call_action_log(const char *log_text,
+                                       int *call_a_out,
+                                       int *call_b_out) {
+    const char *line;
+    int call_a = 0;
+    int call_b = 0;
+
+    if (log_text == NULL || call_a_out == NULL || call_b_out == NULL) {
+        return -1;
+    }
+
+    line = log_text;
+    while (*line != '\0') {
+        const char *line_end = strchr(line, '\n');
+        size_t line_len;
+
+        if (line_end == NULL) {
+            line_end = line + strlen(line);
+        }
+        line_len = (size_t)(line_end - line);
+
+        if (line_contains_text(line, line_len, "ztrace:call: hot_probe => hot_call_a()")) {
+            ++call_a;
+            if (!line_contains_text(line, line_len, "-> 0xa5")) {
+                fprintf(stderr, "hot_call_a log line has wrong return namespace: %.*s\n",
+                        (int)line_len,
+                        line);
+                return -1;
+            }
+        } else if (line_contains_text(line, line_len, "ztrace:call: hot_probe => hot_call_b()")) {
+            ++call_b;
+            if (!line_contains_text(line, line_len, "-> 0xb5")) {
+                fprintf(stderr, "hot_call_b log line has wrong return namespace: %.*s\n",
+                        (int)line_len,
+                        line);
+                return -1;
+            }
+        } else if (line_contains_text(line, line_len, "ztrace:call: hot_probe => <unknown>()")) {
+            fprintf(stderr, "live call action log lost callee symbol: %.*s\n",
+                    (int)line_len,
+                    line);
+            return -1;
+        }
+
+        line = *line_end == '\0' ? line_end : line_end + 1;
+    }
+
+    *call_a_out = call_a;
+    *call_b_out = call_b;
+    return 0;
+}
+
+static int run_staged_hot_update_test(void) {
     zt_injector_session_t session;
     zt_probe_filter_t false_filter;
     zt_probe_filter_t range_a_filter;
@@ -226,7 +308,7 @@ int main(void) {
         return 1;
     }
 
-    child = start_hot_update_target(&status_fd);
+    child = start_hot_update_target(&status_fd, NULL);
     if (child < 0) {
         return 1;
     }
@@ -383,7 +465,7 @@ int main(void) {
         goto cleanup_trace;
     }
 
-    printf("probe hot update test passed\n");
+    printf("probe hot update staged test passed\n");
     rc = 0;
 
 cleanup_trace:
@@ -402,4 +484,126 @@ cleanup:
     free(log_text);
     (void)waitpid(child, NULL, rc == 0 ? 0 : WNOHANG);
     return rc;
+}
+
+static int run_live_call_action_hot_update_test(void) {
+    zt_injector_session_t session;
+    zt_probe_info_t *probe;
+    char *log_text = NULL;
+    char log_path[256];
+    pid_t child;
+    int status_fd = -1;
+    int call_a_count = 0;
+    int call_b_count = 0;
+    int rc = 1;
+
+    if (zt_test_make_log_path(log_path, sizeof(log_path), "zt-live-call-update") != 0) {
+        fprintf(stderr, "failed to create live hot-update log path\n");
+        return 1;
+    }
+
+    child = start_hot_update_target(&status_fd, "live");
+    if (child < 0) {
+        return 1;
+    }
+
+    if (wait_for_status(child, status_fd, "READY", 5000) != 0) {
+        fprintf(stderr, "hot-update target did not become ready\n");
+        goto cleanup;
+    }
+
+    if (zt_injector_attach(&session, child) != 0) {
+        fprintf(stderr, "attach failed for hot-update target\n");
+        goto cleanup;
+    }
+
+    if (zt_trace_start_filtered_in_session(&session,
+                                           "hot_probe",
+                                           log_path,
+                                           NULL) != 0) {
+        fprintf(stderr, "trace start failed for live hot-update target\n");
+        goto cleanup_trace;
+    }
+
+    probe = zt_probe_find_by_symbol(&session, "hot_probe");
+    if (probe == NULL || probe->state != ZT_PROBE_INSTALLED) {
+        fprintf(stderr, "live hot-update probe was not installed\n");
+        goto cleanup_trace;
+    }
+
+    if (zt_trace_update_probe_call_action(&session, probe->probe_id, "hot_call_a") != 0) {
+        fprintf(stderr, "failed to install initial live call action\n");
+        goto cleanup_trace;
+    }
+
+    if (kill(child, SIGUSR1) != 0) {
+        perror("kill");
+        goto cleanup_trace;
+    }
+
+    if (drain_trace_for_ms(child, 25) < 0 ||
+        zt_trace_update_probe_call_action(&session, probe->probe_id, "hot_call_b") != 0 ||
+        drain_trace_for_ms(child, 25) < 0 ||
+        zt_trace_clear_probe_call_action(&session, probe->probe_id) != 0 ||
+        drain_trace_for_ms(child, 25) < 0 ||
+        zt_trace_update_probe_call_action(&session, probe->probe_id, "hot_call_a") != 0) {
+        fprintf(stderr, "live call action hot-update sequence failed\n");
+        goto cleanup_trace;
+    }
+
+    if (wait_for_status(child, status_fd, "DONE", 5000) != 0 ||
+        wait_for_child_exit(child, 5000) != 0) {
+        fprintf(stderr, "live hot-update trace did not finish\n");
+        goto cleanup_trace;
+    }
+
+    log_text = zt_test_read_file(log_path);
+    if (log_text == NULL) {
+        fprintf(stderr, "failed to read live hot-update log\n");
+        goto cleanup_trace;
+    }
+
+    if (verify_live_call_action_log(log_text, &call_a_count, &call_b_count) != 0) {
+        goto cleanup_trace;
+    }
+
+    if (call_a_count < 10 || call_b_count < 10) {
+        fprintf(stderr,
+                "live call action hot-update log too sparse: a=%d b=%d\n",
+                call_a_count,
+                call_b_count);
+        goto cleanup_trace;
+    }
+
+    printf("probe live call action hot update test passed: a=%d b=%d\n",
+           call_a_count,
+           call_b_count);
+    rc = 0;
+
+cleanup_trace:
+    zt_trace_shutdown();
+    zt_injector_detach(&session);
+cleanup:
+    if (rc != 0) {
+        kill(child, SIGKILL);
+        fprintf(stderr, "kept failing hot-update log: %s\n", log_path);
+    } else {
+        unlink(log_path);
+    }
+    if (status_fd >= 0) {
+        close(status_fd);
+    }
+    free(log_text);
+    (void)waitpid(child, NULL, rc == 0 ? 0 : WNOHANG);
+    return rc;
+}
+
+int main(void) {
+    if (run_staged_hot_update_test() != 0 ||
+        run_live_call_action_hot_update_test() != 0) {
+        return 1;
+    }
+
+    printf("probe hot update test passed\n");
+    return 0;
 }

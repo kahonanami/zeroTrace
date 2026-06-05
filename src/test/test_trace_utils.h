@@ -35,7 +35,7 @@ static int zt_test_make_log_path(char *path, size_t size, const char *name) {
     return 0;
 }
 
-static char *zt_test_read_file(const char *path) {
+static __attribute__((unused)) char *zt_test_read_file(const char *path) {
     FILE *fp;
     long size;
     char *buffer;

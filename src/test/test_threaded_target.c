@@ -36,6 +36,11 @@ int thread_pair(int a, int b) {
     return (a * 31) + b;
 }
 
+__attribute__((noinline))
+int thread_stable(int a, int b) {
+    return (a + 17) * (b + 3);
+}
+
 static void *worker(void *arg) {
     intptr_t base = (intptr_t)arg;
     int i;
@@ -43,6 +48,9 @@ static void *worker(void *arg) {
     for (i = 0; i < k_thread_iters; ++i) {
         __sync_fetch_and_add(&g_sink, thread_add((int)base, i));
         __sync_fetch_and_xor(&g_sink, thread_mix(i, (int)base));
+        if ((i % 10) == 0) {
+            __sync_fetch_and_add(&g_sink, thread_stable((int)base, i));
+        }
         if ((i % 50) == 0) {
             __sync_fetch_and_add(&g_sink, thread_pair((int)base, i));
         }
@@ -79,7 +87,9 @@ int main(void) {
         pthread_join(threads[i], NULL);
     }
 
-    usleep(100000);
+    for (;;) {
+        pause();
+    }
 
     return g_sink == 0xdead ? 1 : 0;
 }

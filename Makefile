@@ -62,11 +62,13 @@ TEST_TARGET_BINS := \
 	$(TEST_BIN_DIR)/test_context_target \
 	$(TEST_BIN_DIR)/test_benchmark_target \
 	$(TEST_BIN_DIR)/test_many_probes_target \
-	$(TEST_BIN_DIR)/test_hot_update_target
+	$(TEST_BIN_DIR)/test_hot_update_target \
+	$(TEST_BIN_DIR)/test_exit_race_target
 MANUAL_TEST_BINS := \
 	$(TEST_BIN_DIR)/test_loop
 THREAD_TEST_TARGET_BINS := \
 	$(TEST_BIN_DIR)/test_threaded_target \
+	$(TEST_BIN_DIR)/test_thread_control_target \
 	$(TEST_BIN_DIR)/test_signal_target
 BENCHMARK_BINS := \
 	$(TEST_BIN_DIR)/test_benchmark_target \
@@ -77,7 +79,7 @@ CORE_TEST_BINS := $(filter-out $(NON_AUTO_TEST_BINS), $(TEST_BINS))
 AUTO_TEST_BINS := $(filter-out $(BENCHMARK_BINS), $(CORE_TEST_BINS))
 APP_TARGET := $(BIN_DIR)/ztrace
 
-.PHONY: all clean directories test run-tests benchmark
+.PHONY: all clean directories test run-tests benchmark print-arch-config
 
 all: directories $(APP_TARGET) $(PAYLOAD_SO) $(TEST_BINS)
 
@@ -94,6 +96,16 @@ run-tests:
 		echo "\n▶ Executing: $$t"; \
 		./$$t || exit 1; \
 	done
+	@echo "\n▶ Executing: scripts/check_arch_config.py"
+	@python3 scripts/check_arch_config.py
+	@echo "\n▶ Executing: scripts/merge_trace_events.py --self-test"
+	@python3 scripts/merge_trace_events.py --self-test
+
+print-arch-config:
+	@printf 'ARCH=%s\n' '$(ARCH)'
+	@printf 'ARCH_SRC_C=%s\n' '$(ARCH_SRC_C)'
+	@printf 'ARCH_SRC_S=%s\n' '$(ARCH_SRC_S)'
+	@printf 'TEST_C=%s\n' '$(TEST_C)'
 
 directories:
 	@mkdir -p $(BUILD_DIR)

@@ -112,27 +112,64 @@ static void zt_commit_event_slot(zt_trace_event_t *slot, uint64_t commit_seq) {
     __atomic_store_n(&slot->committed_seq, commit_seq, __ATOMIC_RELEASE);
 }
 
-static const zt_probe_call_action_t *zt_find_call_action(uint64_t probe_id) {
+static int zt_copy_call_action_if_match(const zt_probe_call_action_t *action,
+                                        uint64_t probe_id,
+                                        zt_probe_call_action_t *action_out) {
+    zt_probe_call_action_t snapshot;
+
+    if (action == NULL || action_out == NULL) {
+        return 0;
+    }
+
+    snapshot.callee_addr = action->callee_addr;
+    snapshot.probe_id = action->probe_id;
+    snapshot.enabled = __atomic_load_n(&action->enabled, __ATOMIC_ACQUIRE);
+
+    if (!snapshot.enabled ||
+        snapshot.probe_id != probe_id ||
+        snapshot.callee_addr == 0) {
+        return 0;
+    }
+
+    *action_out = snapshot;
+    return 1;
+}
+
+static int zt_find_call_action(uint64_t probe_id, zt_probe_call_action_t *action_out) {
     zt_trace_buffer_t *buffer;
     const zt_probe_call_action_t *action;
+    size_t home_slot;
+    size_t i;
 
     buffer = zt_get_trace_buffer();
-    if (buffer == NULL || buffer->magic != ZT_TRACE_BUFFER_MAGIC || probe_id == 0) {
-        return NULL;
+    if (buffer == NULL || buffer->magic != ZT_TRACE_BUFFER_MAGIC ||
+        __atomic_load_n(&buffer->call_action_count, __ATOMIC_ACQUIRE) == 0 ||
+        probe_id == 0 || action_out == NULL) {
+        return 0;
     }
 
-    action = &buffer->call_actions[probe_id % ZT_PAYLOAD_PROBE_ACTION_CAP];
-    if (!action->enabled ||
-        action->probe_id != probe_id ||
-        action->callee_addr == 0) {
-        return NULL;
+    home_slot = (size_t)(probe_id % ZT_PAYLOAD_PROBE_ACTION_CAP);
+    action = &buffer->call_actions[home_slot];
+    if (zt_copy_call_action_if_match(action, probe_id, action_out)) {
+        return 1;
     }
 
-    return action;
+    for (i = 0; i < ZT_PAYLOAD_PROBE_ACTION_CAP; ++i) {
+        if (i == home_slot) {
+            continue;
+        }
+
+        action = &buffer->call_actions[i];
+        if (zt_copy_call_action_if_match(action, probe_id, action_out)) {
+            return 1;
+        }
+    }
+
+    return 0;
 }
 
 static void zt_run_call_action(uint64_t probe_id, uint64_t call_id) {
-    const zt_probe_call_action_t *action;
+    zt_probe_call_action_t action;
     uint64_t (*callee)(void);
     uint64_t retval;
     zt_trace_event_t *event;
@@ -142,13 +179,12 @@ static void zt_run_call_action(uint64_t probe_id, uint64_t call_id) {
         return;
     }
 
-    action = zt_find_call_action(probe_id);
-    if (action == NULL) {
+    if (!zt_find_call_action(probe_id, &action)) {
         return;
     }
 
     in_call_action = 1;
-    callee = (uint64_t (*)(void))(uintptr_t)action->callee_addr;
+    callee = (uint64_t (*)(void))(uintptr_t)action.callee_addr;
     retval = callee();
     in_call_action = 0;
 
@@ -163,7 +199,7 @@ static void zt_run_call_action(uint64_t probe_id, uint64_t call_id) {
     event->timestamp_ns = zt_clock_monotonic_ns();
     event->tid = zt_gettid_u64();
     event->cpu_id = zt_getcpu_u64();
-    event->args[0] = action->callee_addr;
+    event->args[0] = action.callee_addr;
     event->args[1] = retval;
 
     zt_commit_event_slot(event, commit_seq);

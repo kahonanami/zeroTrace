@@ -57,9 +57,29 @@ int hot_call_b(void) {
     return 0xb500 + g_call_b_count;
 }
 
+static int run_live_mode(void) {
+    int i;
+
+    emit_status("READY\n");
+    wait_for_continue();
+
+    for (i = 0; i < 260; ++i) {
+        g_sink += hot_probe(i);
+        usleep(500);
+    }
+
+    emit_status("DONE\n");
+    usleep(100000);
+    return g_sink == 0xdead ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) {
         g_status_fd = atoi(argv[1]);
+    }
+
+    if (argc > 2 && strcmp(argv[2], "live") == 0) {
+        return run_live_mode();
     }
 
     emit_status("READY\n");

@@ -17,10 +17,13 @@
 #define MIN_EXPECTED_TRACKED_THREADS 8
 #define MIN_MIX_EVENTS_PER_KIND 100
 #define MIN_PAIR_EVENTS_PER_KIND 100
+#define MIN_STABLE_EVENTS_PER_KIND 1000
 #define REQUIRED_TOGGLE_COUNT 12
 
 typedef struct {
     long tid;
+    int stable_entry;
+    int stable_return;
     int mix_entry;
     int mix_return;
     int pair_entry;
@@ -30,6 +33,8 @@ typedef struct {
 typedef struct {
     tid_log_stats_t per_tid[MAX_SEEN_TIDS];
     int tid_count;
+    int stable_entry_total;
+    int stable_return_total;
     int mix_entry_total;
     int mix_return_total;
     int pair_entry_total;
@@ -137,7 +142,13 @@ static void collect_thread_log_stats(const char *log_text, thread_log_stats_t *s
         tid = parse_log_tid(line, line_len);
         tid_stats = get_tid_stats(stats, tid);
         if (tid_stats != NULL) {
-            if (line_contains(line, line_len, "ztrace:entry: thread_mix")) {
+            if (line_contains(line, line_len, "ztrace:entry: thread_stable")) {
+                ++stats->stable_entry_total;
+                ++tid_stats->stable_entry;
+            } else if (line_contains(line, line_len, "ztrace:return: thread_stable")) {
+                ++stats->stable_return_total;
+                ++tid_stats->stable_return;
+            } else if (line_contains(line, line_len, "ztrace:entry: thread_mix")) {
                 ++stats->mix_entry_total;
                 ++tid_stats->mix_entry;
             } else if (line_contains(line, line_len, "ztrace:return: thread_mix")) {
@@ -156,18 +167,36 @@ static void collect_thread_log_stats(const char *log_text, thread_log_stats_t *s
     }
 }
 
-static int verify_pair_probe_by_tid(const thread_log_stats_t *stats) {
+static int verify_strict_pairing_by_tid(const thread_log_stats_t *stats,
+                                        const char *symbol) {
     int i;
+
+    if (stats == NULL || symbol == NULL) {
+        return -1;
+    }
 
     for (i = 0; i < stats->tid_count; ++i) {
         const tid_log_stats_t *tid = &stats->per_tid[i];
+        int entry_count;
+        int return_count;
 
-        if (tid->pair_entry != tid->pair_return) {
+        if (strcmp(symbol, "thread_stable") == 0) {
+            entry_count = tid->stable_entry;
+            return_count = tid->stable_return;
+        } else if (strcmp(symbol, "thread_pair") == 0) {
+            entry_count = tid->pair_entry;
+            return_count = tid->pair_return;
+        } else {
+            return -1;
+        }
+
+        if (entry_count != return_count) {
             fprintf(stderr,
-                    "unpaired thread_pair events for tid %ld: entry=%d return=%d\n",
+                    "unpaired %s events for tid %ld: entry=%d return=%d\n",
+                    symbol,
                     tid->tid,
-                    tid->pair_entry,
-                    tid->pair_return);
+                    entry_count,
+                    return_count);
             return -1;
         }
     }
@@ -216,6 +245,7 @@ int main(void) {
     pid_t child;
     int max_tracked_threads = 0;
     int target_exited = 0;
+    int stress_done = 0;
     int toggle_count = 0;
     int mix_enabled = 1;
     long next_toggle_ms = 24;
@@ -248,14 +278,17 @@ int main(void) {
         goto cleanup;
     }
 
-    if (zt_trace_start_in_session(&session, "thread_mix", log_path) != 0 ||
+    if (zt_trace_start_in_session(&session, "thread_stable", log_path) != 0 ||
+        zt_trace_start_in_session(&session, "thread_mix", log_path) != 0 ||
         zt_trace_start_in_session(&session, "thread_pair", log_path) != 0) {
         fprintf(stderr, "trace start failed for threaded target\n");
         goto cleanup_trace;
     }
 
     mix_probe = zt_probe_find_by_symbol(&session, "thread_mix");
-    if (mix_probe == NULL || zt_probe_find_by_symbol(&session, "thread_pair") == NULL) {
+    if (zt_probe_find_by_symbol(&session, "thread_stable") == NULL ||
+        mix_probe == NULL ||
+        zt_probe_find_by_symbol(&session, "thread_pair") == NULL) {
         fprintf(stderr, "failed to resolve installed threaded probes\n");
         goto cleanup_trace;
     }
@@ -286,8 +319,8 @@ int main(void) {
                 fprintf(stderr, "trace polling failed for threaded target\n");
                 goto cleanup_trace;
             }
-            child = -1;
-            break;
+            fprintf(stderr, "threaded target exited while trace was still active\n");
+            goto cleanup_trace;
         }
 
         if (session.thread_count > max_tracked_threads) {
@@ -298,8 +331,8 @@ int main(void) {
             goto cleanup_trace;
         }
         if (target_exited) {
-            child = -1;
-            break;
+            fprintf(stderr, "threaded target exited before stress window finished\n");
+            goto cleanup_trace;
         }
 
         if (toggle_count < REQUIRED_TOGGLE_COUNT && elapsed_ms >= next_toggle_ms) {
@@ -323,24 +356,23 @@ int main(void) {
             next_toggle_ms += 8;
         }
 
-        if (target_exited) {
+        if (toggle_count >= REQUIRED_TOGGLE_COUNT && elapsed_ms >= 750) {
+            stress_done = 1;
             break;
         }
 
         usleep(1000);
     }
 
-    while (!target_exited && zt_trace_is_active()) {
+    if (!stress_done) {
+        fprintf(stderr, "threaded trace stress did not reach required duration\n");
+        goto cleanup_trace;
+    }
+
+    for (int i = 0; i < 20; ++i) {
         if (zt_trace_poll() < 0) {
-            if (collect_child_exit(child, &target_exited) != 0) {
-                goto cleanup_trace;
-            }
-            if (!target_exited) {
-                fprintf(stderr, "final trace drain failed for threaded target\n");
-                goto cleanup_trace;
-            }
-            child = -1;
-            break;
+            fprintf(stderr, "final trace drain failed for threaded target\n");
+            goto cleanup_trace;
         }
         if (session.thread_count > max_tracked_threads) {
             max_tracked_threads = session.thread_count;
@@ -356,12 +388,16 @@ int main(void) {
 
     collect_thread_log_stats(log_text, &stats);
 
-    if (stats.mix_entry_total < MIN_MIX_EVENTS_PER_KIND ||
+    if (stats.stable_entry_total < MIN_STABLE_EVENTS_PER_KIND ||
+        stats.stable_return_total < MIN_STABLE_EVENTS_PER_KIND ||
+        stats.mix_entry_total < MIN_MIX_EVENTS_PER_KIND ||
         stats.mix_return_total < MIN_MIX_EVENTS_PER_KIND ||
         stats.pair_entry_total < MIN_PAIR_EVENTS_PER_KIND ||
         stats.pair_return_total < MIN_PAIR_EVENTS_PER_KIND) {
         fprintf(stderr,
-                "threaded trace log too sparse: mix(entry=%d return=%d) pair(entry=%d return=%d)\n",
+                "threaded trace log too sparse: stable(entry=%d return=%d) mix(entry=%d return=%d) pair(entry=%d return=%d)\n",
+                stats.stable_entry_total,
+                stats.stable_return_total,
                 stats.mix_entry_total,
                 stats.mix_return_total,
                 stats.pair_entry_total,
@@ -369,12 +405,12 @@ int main(void) {
         goto cleanup_trace;
     }
 
-    if (stats.pair_entry_total != stats.pair_return_total ||
-        verify_pair_probe_by_tid(&stats) != 0) {
+    if (stats.stable_entry_total != stats.stable_return_total ||
+        verify_strict_pairing_by_tid(&stats, "thread_stable") != 0) {
         fprintf(stderr,
-                "thread_pair entry/return pairing invariant failed: entry=%d return=%d\n",
-                stats.pair_entry_total,
-                stats.pair_return_total);
+                "thread_stable entry/return pairing invariant failed: entry=%d return=%d\n",
+                stats.stable_entry_total,
+                stats.stable_return_total);
         goto cleanup_trace;
     }
 
@@ -394,16 +430,11 @@ int main(void) {
         goto cleanup_trace;
     }
 
-    if (child > 0 && collect_child_exit(child, &target_exited) != 0) {
-        goto cleanup_trace;
-    }
-    if (target_exited) {
-        child = -1;
-    }
-
-    printf("thread safety stress test passed: tids=%d tracked=%d mix=%d/%d pair=%d/%d toggles=%d\n",
+    printf("thread safety stress test passed: tids=%d tracked=%d stable=%d/%d mix=%d/%d pair=%d/%d toggles=%d\n",
            stats.tid_count,
            max_tracked_threads,
+           stats.stable_entry_total,
+           stats.stable_return_total,
            stats.mix_entry_total,
            stats.mix_return_total,
            stats.pair_entry_total,
@@ -415,8 +446,8 @@ cleanup_trace:
     zt_trace_shutdown();
     zt_injector_detach(&session);
 cleanup:
-    if (rc != 0 && child > 0) {
-        kill(child, SIGKILL);
+    if (child > 0) {
+        kill(child, rc == 0 ? SIGTERM : SIGKILL);
         (void)waitpid(child, NULL, 0);
     }
     if (rc == 0) {
