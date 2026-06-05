@@ -63,7 +63,8 @@ TEST_TARGET_BINS := \
 	$(TEST_BIN_DIR)/test_benchmark_target \
 	$(TEST_BIN_DIR)/test_many_probes_target \
 	$(TEST_BIN_DIR)/test_hot_update_target \
-	$(TEST_BIN_DIR)/test_exit_race_target
+	$(TEST_BIN_DIR)/test_exit_race_target \
+	$(TEST_BIN_DIR)/test_trace_buffer_target
 MANUAL_TEST_BINS := \
 	$(TEST_BIN_DIR)/test_loop
 THREAD_TEST_TARGET_BINS := \

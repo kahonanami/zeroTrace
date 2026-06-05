@@ -10,6 +10,7 @@
 #define ZT_TRACE_GP_ARG_COUNT 6
 #define ZT_TRACE_FP_ARG_COUNT 8
 #define ZT_PAYLOAD_PROBE_ACTION_CAP 32
+#define ZT_CALL_ACTION_ARG_CAP 6
 
 typedef enum {
     ZT_PROBE_FILTER_TOK_END = 0,
@@ -91,6 +92,11 @@ typedef struct {
             uint64_t value4;
             uint64_t value5;
         };
+        struct {
+            uint64_t call_callee_addr;
+            uint64_t call_retval;
+            uint64_t call_arg_count;
+        };
         uint64_t args[ZT_TRACE_GP_ARG_COUNT];
     };
     union {
@@ -105,13 +111,26 @@ typedef struct {
             uint64_t fp7;
         };
         uint64_t fp_args[ZT_TRACE_FP_ARG_COUNT];
+        uint64_t call_args[ZT_CALL_ACTION_ARG_CAP];
     };
 } zt_trace_event_t;
+
+typedef enum {
+    ZT_CALL_ACTION_ARG_CONST = 1,
+    ZT_CALL_ACTION_ARG_ENTRY_ARG = 2,
+} zt_call_action_arg_kind_t;
+
+typedef struct {
+    uint64_t kind;
+    uint64_t value;
+} zt_call_action_arg_t;
 
 typedef struct {
     uint64_t enabled;
     uint64_t probe_id;
     uint64_t callee_addr;
+    uint64_t arg_count;
+    zt_call_action_arg_t args[ZT_CALL_ACTION_ARG_CAP];
 } zt_probe_call_action_t;
 
 typedef struct {

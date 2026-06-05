@@ -329,10 +329,15 @@ static int zt_event_arg_value_ext(const zt_trace_event_t *event,
     return -1;
 }
 
+static size_t zt_min_size(size_t lhs, size_t rhs) {
+    return lhs < rhs ? lhs : rhs;
+}
+
 static int zt_read_remote_cstr(const zt_injector_session_t *session,
                                uint64_t remote_addr,
                                char *buffer,
                                size_t buffer_size) {
+    unsigned char chunk[64];
     size_t i;
 
     if (session == NULL || buffer == NULL || buffer_size == 0) {
@@ -344,19 +349,28 @@ static int zt_read_remote_cstr(const zt_injector_session_t *session,
         return 0;
     }
 
-    for (i = 0; i + 1 < buffer_size; ++i) {
-        unsigned char ch = 0;
+    i = 0;
+    while (i + 1 < buffer_size) {
+        size_t chunk_len = zt_min_size(sizeof(chunk), buffer_size - 1 - i);
+        size_t j;
 
-        if (zt_read_remote_memory(session->pid, remote_addr + i, &ch, 1) != 0) {
-            return -1;
+        if (zt_read_remote_memory(session->pid, remote_addr + i, chunk, chunk_len) != 0) {
+            chunk_len = 1;
+            if (zt_read_remote_memory(session->pid, remote_addr + i, chunk, chunk_len) != 0) {
+                return -1;
+            }
         }
 
-        if (ch == '\0') {
-            buffer[i] = '\0';
-            return 0;
-        }
+        for (j = 0; j < chunk_len && i + 1 < buffer_size; ++j, ++i) {
+            unsigned char ch = chunk[j];
 
-        buffer[i] = isprint(ch) ? (char)ch : '.';
+            if (ch == '\0') {
+                buffer[i] = '\0';
+                return 0;
+            }
+
+            buffer[i] = isprint(ch) ? (char)ch : '.';
+        }
     }
 
     buffer[buffer_size - 1] = '\0';
@@ -408,6 +422,7 @@ static int zt_read_remote_buf_preview(const zt_injector_session_t *session,
                                       size_t len,
                                       char *buffer,
                                       size_t buffer_size) {
+    unsigned char bytes[32];
     size_t i;
     size_t offset = 0;
 
@@ -424,13 +439,19 @@ static int zt_read_remote_buf_preview(const zt_injector_session_t *session,
     }
     buffer[offset++] = '"';
 
-    for (i = 0; i < len; ++i) {
-        unsigned char ch = 0;
-        int written;
-
-        if (zt_read_remote_memory(session->pid, remote_addr + i, &ch, 1) != 0) {
-            return -1;
+    len = zt_min_size(len, sizeof(bytes));
+    if (len > 0 &&
+        zt_read_remote_memory(session->pid, remote_addr, bytes, len) != 0) {
+        for (i = 0; i < len; ++i) {
+            if (zt_read_remote_memory(session->pid, remote_addr + i, &bytes[i], 1) != 0) {
+                return -1;
+            }
         }
+    }
+
+    for (i = 0; i < len; ++i) {
+        unsigned char ch = bytes[i];
+        int written;
 
         if (isprint(ch) && ch != '"' && ch != '\\') {
             if (offset + 1 >= buffer_size) {

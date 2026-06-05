@@ -109,8 +109,8 @@ CLI 常用命令：
   热更新已安装 probe 的过滤条件
 - `update <symbol|id> clear`
   清除已安装 probe 的过滤条件
-- `update <symbol|id> call <callee>`
-  probe entry 命中时，在目标进程内主动调用无参函数 `<callee>`
+- `update <symbol|id> call <callee> [arg0|arg1|...|arg5|0x...]`
+  probe entry 命中时，在目标进程内主动调用 `<callee>`；可传最多 6 个整型参数，参数可以来自当前 probe 的 `arg0..arg5`，也可以是十进制 / 十六进制常量
 - `update <symbol|id> call clear`
   清除 probe 的目标进程内 call action
 - `stop`
@@ -263,15 +263,16 @@ make test
 - 通用寄存器、flags、浮点/SIMD 上下文保存恢复
 - trampoline 构造
 - libc/POSIX 动态库函数 trace
-- 16 个并发 probe 的生命周期测试
+- 16 个并发 probe 的生命周期测试，并逐个读回函数入口 patch，验证入口被改写为架构跳转模板而不是 trap 指令
 - probe 清理 maps-diff 测试：验证最后一个 probe 删除后远程 trampoline pool 被 `munmap`，且函数入口原始字节恢复
 - 多线程 stress 测试：运行中新线程追踪、并发 probe 命中、动态 enable/disable，并用始终启用的 `thread_stable` 按 TID 校验 entry/return 严格配平
 - 线程组控制测试：目标持续创建/退出线程，反复 `interrupt_all/continue_all`，验证停止期间无心跳、恢复后继续运行
 - 异步信号下的 signal safety 测试
 - 短生命周期目标退出窗口测试：反复触发 probe 后立即退出，验证 `zt_trace_poll()` 不把正常退出、trace buffer 映射消失和退出后重复 poll 误判为错误
+- trace buffer reader 测试：故意让高频 probe 打满 ring buffer，验证消费端会输出 `ztrace:lost` 覆盖告警，而不是静默丢事件
 - 条件探针参数过滤测试
 - probe 热更新测试：分阶段验证 filter、probe 内 call action、disable/enable 状态切换，并确认 trampoline slot 不被重建；live 模式验证运行中 call action A/B 切换不会丢失 callee symbol 或错配返回值
-- probe 内目标进程函数调用测试，并覆盖 call action 表槽位碰撞回归
+- probe 内目标进程函数调用测试：覆盖无参 call、带参 call 和 call action 表槽位碰撞回归
 - x86_64 / aarch64 架构后端选择 self-test：验证 Makefile 会按 `ARCH` 选择正确 ISA 后端、stub 和 trampoline 测试集合
 - perf/ftrace 风格事件合流脚本 self-test
 
@@ -309,27 +310,27 @@ benchmark 目标函数是 `bench_getpid()`，它是测试程序中的一个 `noi
 
 ```text
 iterations            : 1000000
-baseline total ns     : 61161192
-baseline per call     : 61.16 ns
+baseline total ns     : 62227654
+baseline per call     : 62.23 ns
 uprobe total ns       : skipped
 uprobe note           : kernel uprobe benchmark skipped: sudo is not available non-interactively
 uprobe per call       : skipped
 uprobe overhead/call  : skipped
 ztrace vs uprobe      : skipped
-ztrace total ns       : 230671858
-ztrace per call       : 230.67 ns
-ztrace overhead/call  : 169.51 ns
+ztrace total ns       : 227514909
+ztrace per call       : 227.51 ns
+ztrace overhead/call  : 165.29 ns
 
 Probe lifecycle latency
 -----------------------
-install latency avg   : 258810 ns (0.259 ms) over 1000 rounds
-uninstall latency avg : 28970 ns (0.029 ms) over 1000 rounds
+install latency avg   : 283278 ns (0.283 ms) over 1000 rounds
+uninstall latency avg : 31699 ns (0.032 ms) over 1000 rounds
 ```
 
 从这组数据可以看到：
 
-- `zeroTrace` 单次额外开销约为 `169.51 ns`，低于题目要求的 `< 1000 ns`，也已经低于项目当前优化目标 `200 ns`
-- `probe` 安装延迟平均约为 `0.259 ms`，清理延迟平均约为 `0.029 ms`，都低于题目要求的 `< 10 ms`
+- `zeroTrace` 单次额外开销约为 `165.29 ns`，低于题目要求的 `< 1000 ns`，也已经低于项目当前优化目标 `200 ns`
+- `probe` 安装延迟平均约为 `0.283 ms`，清理延迟平均约为 `0.032 ms`，都低于题目要求的 `< 10 ms`
 - 若需要生成 zeroTrace vs uprobe 的完整对比，请在具备 `bpftrace` 和非交互 sudo 权限的环境下重新运行 `make benchmark`
 
 ## TODO List
@@ -341,7 +342,7 @@ uninstall latency avg : 28970 ns (0.029 ms) over 1000 rounds
 - [x] 支持线程组级 attach / interrupt / continue / detach，并在运行态刷新新线程
 - [x] 强化线程组 stop/continue 收敛逻辑，覆盖运行中新线程创建窗口
 - [x] 补齐 patch 前 PC 检查，避免线程停在即将被改写的函数入口字节内
-- [x] 实现 A4：probe 命中时在目标进程内主动调用指定无参函数，并在日志中记录调用结果
+- [x] 实现 A4：probe 命中时在目标进程内主动调用指定函数，支持最多 6 个整型参数，并在日志中记录调用参数和返回结果
 - [x] 完善 A5：支持 filter、probe 内 call action、enable/disable 状态的运行时热更新，并通过分阶段与 live 自动化测试验证
 - [x] 修复目标退出窗口下 `zt_trace_poll()` 把正常退出误判为远程读失败的问题
 - [x] 补充 F4 maps-diff 自动化测试，验证 trampoline pool 释放和函数入口字节恢复

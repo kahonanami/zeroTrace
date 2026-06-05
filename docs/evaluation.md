@@ -27,9 +27,9 @@ make benchmark
 - `make test`：通过
 - A5 热更新压力：`test_probe_hot_update` 100 轮通过，单次回归包含 staged 更新和 live call action 更新
 - 目标退出窗口压力：`ZT_EXIT_RACE_ROUNDS=1000 ./bin/tests/test_poll_exit_race` 通过
-- `make benchmark`：zeroTrace 额外开销 `169.51 ns/call`
-- install latency：`0.259 ms`
-- uninstall latency：`0.029 ms`
+- `make benchmark`：zeroTrace 额外开销 `165.29 ns/call`
+- install latency：`0.283 ms`
+- uninstall latency：`0.032 ms`
 
 说明：
 
@@ -44,6 +44,7 @@ make benchmark
 
 ```bash
 bin/tests/test_libc_trace
+bin/tests/test_probe_lifecycle
 ```
 
 目标程序：
@@ -61,6 +62,7 @@ bin/tests/test_libc_trace
 - runner 附加目标进程后分别 trace 三个 libc/POSIX 动态库符号。
 - 目标进程收到 `SIGUSR1` 后执行文件读写、字符串处理和 printf varargs。
 - runner 读取 trace 日志，要求三类动态库函数均出现 entry/return。
+- `test_probe_lifecycle` 在同一进程内安装 `probe_fn01..probe_fn16` 后逐个读回目标函数入口 patch。
 
 关键断言：
 
@@ -68,11 +70,14 @@ bin/tests/test_libc_trace
 - 日志必须包含 `ztrace:entry: read` 和 `ztrace:return: read ->`
 - 日志必须包含 `ztrace:entry: printf`
 - `printf("line len: %zu.", 22)`、`printf("tag: %s.", "hello-vararg")`、`printf("ratio: %.2f.", 3.5)` 必须被正确格式化
+- x86_64 入口 patch 必须是 `ff 25 00 00 00 00 + trampoline_addr`，首字节不得是 `int3(0xcc)`。
+- aarch64 入口 patch 必须是 `ldr x16, #8; br x16; .quad trampoline_addr`，首条指令不得是 `brk`。
 
 结论：
 
 - zeroTrace 能对动态库函数安装用户态 trampoline probe。
 - `read/write/printf` 不依赖主程序 ELF 符号路径，证明当前符号解析可以覆盖已加载共享库。
+- 安装后的函数入口是用户态跳转模板，目标函数命中时直接进入 trampoline/payload stub，不依赖 `int3` trap 陷入内核。
 
 ### 2.2 F2 参数获取与签名格式化
 
@@ -149,8 +154,8 @@ bin/tests/test_benchmark_latency
 最近一次数据：
 
 ```text
-install latency avg   : 258810 ns (0.259 ms) over 1000 rounds
-uninstall latency avg : 28970 ns (0.029 ms) over 1000 rounds
+install latency avg   : 283278 ns (0.283 ms) over 1000 rounds
+uninstall latency avg : 31699 ns (0.032 ms) over 1000 rounds
 ```
 
 结论：
@@ -243,18 +248,25 @@ for i in $(seq 1 10); do ./bin/tests/test_thread_safety || exit 1; done
 - `interrupt_all` 后 `/proc/<pid>/task` 当前线程数不得超过 injector tracked TID 数。
 - 停止期间 drain reporter pipe 后不得再出现心跳；`continue_all` 后心跳必须恢复。
 
-最近一次代表性输出：
+最近一次 10 轮压力摘要：
 
 ```text
-thread safety stress test passed: tids=12 tracked=13 stable=2386/2386 mix=21654/21652 pair=479/479 toggles=12
-thread group control test passed: rounds=80 task_max=31 tracked_max=31 resume_rounds=80
+thread_safety: 10/10 passed
+  tids=12 tracked=13 toggles=12 in every round
+  thread_stable strict pairs: 2338..2400 per round
+  thread_pair strict pairs  : 471..480 per round
+  thread_mix high-frequency : >=21039 entry/return events per side
+
+thread_group_control: 10/10 passed
+  rounds=80 resume_rounds=80 in every round
+  task_max/tracked_max range: 31..32, matched in every round
 ```
 
 结论：
 
 - 当前多线程测试覆盖了新线程追踪、并发命中、动态 patch 开关；严格配平不变量由始终启用的 `thread_stable` 按 TID 验证，高频 `thread_mix` 用于压测吞吐和运行中 enable/disable，低频 `thread_pair` 用于额外多 probe 并发覆盖。
-- 最近一次 10 轮压力复测中，`thread_stable` 每轮 entry/return 都严格配平，配平事件数范围约为 `2321..2400` 对。
-- 线程组控制测试额外证明了动态创建/退出线程时，`interrupt_all` 能收敛到完整 stopped 线程组；停止窗口内目标没有继续运行，恢复后进度继续。
+- 最近一次 10 轮压力复测中，`thread_stable` 每轮 entry/return 都严格配平，配平事件数范围为 `2338..2400` 对；`thread_pair` 也保持 `471..480` 对严格配平。
+- 线程组控制测试最近 10 轮全部通过，动态创建/退出线程时 `interrupt_all` 能收敛到完整 stopped 线程组；停止窗口内目标没有继续运行，恢复后进度继续，最大 task/tracked 线程数达到 `32/32`。
 - 这是比“目标进程不崩溃”更强的不变量验证。
 
 ### 2.8 目标退出窗口稳定性
@@ -286,6 +298,36 @@ ZT_EXIT_RACE_ROUNDS=1000 ./bin/tests/test_poll_exit_race
 
 - 当前实现把 leader exit、线程表清空、远程 trace buffer 映射消失和退出后重复 poll 统一归类为目标退出状态。
 - 该测试直接覆盖此前最容易触发偶发 `zt_trace_poll()` 负值的窗口。
+- 最近一次压力复测 `ZT_EXIT_RACE_ROUNDS=1000 ./bin/tests/test_poll_exit_race` 通过，输出 `poll exit-race test passed (1000 rounds)`。
+
+### 2.9 trace buffer 消费鲁棒性
+
+实验入口：
+
+```bash
+bin/tests/test_trace_buffer_reader
+```
+
+目标程序：
+
+- `bin/tests/test_trace_buffer_target`
+
+验证方法：
+
+- 目标进程等待 `SIGUSR1` 后快速调用 `overflow_probe()` `5000` 次。
+- 每次函数调用会产生 entry / return 两条事件，事件总量超过当前 `ZT_TRACE_EVENT_CAPACITY=1024`。
+- 测试故意延迟首次 `zt_trace_poll()`，让 reader 落后 writer 并触发 ring buffer wrap。
+
+关键断言：
+
+- `zt_trace_poll()` 不能因为 wrap 或 slot 覆盖返回负值。
+- 日志必须包含 `ztrace:lost: dropped`，明确记录覆盖丢失，而不是静默跳过缺口。
+
+结论：
+
+- 当前 reader 采用 header-first + per-slot 读取策略，只在 `committed_seq` 双重校验通过后推进 `last_seq`。
+- 未提交 slot 会保留 `last_seq` 等待下一轮 poll；落后超过 ring buffer 容量时会显式输出 lost record。
+- 最近一次运行输出 `trace buffer reader test passed`。
 
 ## 3. 进阶功能实验
 
@@ -377,15 +419,16 @@ bin/tests/test_probe_hot_update
 
 验证方法：
 
-- `update <symbol|id> call <callee>` 把 callee 地址写入远程 trace buffer 的 `call_actions` 表。
-- payload entry handler 在目标进程内调用该无参函数。
-- 调用结果以 `ztrace:call` 事件写入日志。
+- `update <symbol|id> call <callee> [arg0|arg1|...|arg5|0x...]` 把 callee 地址和参数来源写入远程 trace buffer 的 `call_actions` 表。
+- payload entry handler 在目标进程内解析最多 6 个整型 / 指针参数并调用该函数。
+- 调用参数和结果以 `ztrace:call` 事件写入日志。
 - call event 保存真实 `callee_addr`；trace runner 使用历史 symbol cache 还原 callee 名称，避免运行中热更新后用当前配置误解释旧事件。
 
 关键断言：
 
 - `test_probe_lifecycle` 要求至少 `10` 条 `ztrace:call: probe_fn01 => call_marker() ->` 事件。
 - 日志必须包含 `-> 0x5a01`，证明目标函数返回值被记录。
+- 带参 call action 子测试配置 `call_marker_args(arg0, 0x10, arg0)`，日志必须包含 `call_marker_args(0x0, 0x10, 0x0) -> 0x6b0010` 和 `call_marker_args(0x5, 0x10, 0x5) -> 0x6b0515`，证明 entry 参数和常量参数都真实传入 callee。
 - 槽位碰撞子测试保留 `probe_fn01(id=1)`，反复 `trace/untrace probe_fn02` 推进 probe id，直到产生 `probe_fn02(id=33)`；两者 `probe_id % 32` 相同，但必须同时保留各自 call action。
 - `test_probe_hot_update` 要求 call action A 精确 `30` 条，call action B 精确 `40` 条。
 - live call action 热更新子测试要求 `hot_call_a()` 返回值全部落在 `0xa5xx`，`hot_call_b()` 返回值全部落在 `0xb5xx`，且不允许出现 `<unknown>()` callee。
@@ -394,7 +437,7 @@ bin/tests/test_probe_hot_update
 
 - A4 是真实目标进程内调用，不是 tracer 侧伪造日志。
 - call action 表已经覆盖长期运行中的 probe id 取模槽位碰撞和运行中 A/B callee 切换窗口。
-- 当前支持无参函数；带参数 call action 是后续扩展点。
+- 当前支持无参函数和最多 6 个整型 / 指针参数；参数可以来自当前 probe 的 entry 参数，也可以是常量。
 
 ### 3.5 A5 探针热更新
 
@@ -408,6 +451,13 @@ bin/tests/test_probe_hot_update
 
 ```bash
 for i in $(seq 1 100); do ./bin/tests/test_probe_hot_update || exit 1; done
+```
+
+最近一次压力结果：
+
+```text
+test_probe_hot_update: 100/100 passed
+last live call action round: hot_call_a=170 hot_call_b=45
 ```
 
 五阶段设计：
@@ -453,22 +503,22 @@ make benchmark
 
 ```text
 iterations            : 1000000
-baseline total ns     : 61161192
-baseline per call     : 61.16 ns
+baseline total ns     : 62227654
+baseline per call     : 62.23 ns
 uprobe total ns       : skipped
 uprobe note           : kernel uprobe benchmark skipped: sudo is not available non-interactively
-ztrace total ns       : 230671858
-ztrace per call       : 230.67 ns
-ztrace overhead/call  : 169.51 ns
+ztrace total ns       : 227514909
+ztrace per call       : 227.51 ns
+ztrace overhead/call  : 165.29 ns
 
-install latency avg   : 258810 ns (0.259 ms) over 1000 rounds
-uninstall latency avg : 28970 ns (0.029 ms) over 1000 rounds
+install latency avg   : 283278 ns (0.283 ms) over 1000 rounds
+uninstall latency avg : 31699 ns (0.032 ms) over 1000 rounds
 ```
 
 结果解释：
 
 - `ztrace overhead/call = (ztrace total ns - baseline total ns) / iterations`
-- 当前额外开销 `169.51 ns/call`，低于赛题 `< 1000 ns` 指标，也低于项目优化目标 `200 ns`
+- 当前额外开销 `165.29 ns/call`，低于赛题 `< 1000 ns` 指标，也低于项目优化目标 `200 ns`
 - install/uninstall 延迟均低于 `< 10 ms`
 - 因当前环境跳过 uprobe，完整 zeroTrace vs uprobe 对比需要在有 `bpftrace` 和 `sudo -n` 的机器上复跑
 

@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <limits.h>
+#include <stdint.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -43,7 +44,7 @@ static struct {
     {"stop", "Stop the target process and keep probes unchanged", cmd_stop},
     {"enable", "Enable a probe again: enable <symbol|id>", cmd_enable},
     {"disable", "Disable probe(s): disable <symbol|id|all>", cmd_disable},
-    {"update", "Update probe behavior: update <symbol|id> if <expr> | clear | call <symbol|clear>", cmd_update},
+    {"update", "Update probe behavior: update <symbol|id> if <expr> | clear | call <symbol|clear> [arg0|0x...]", cmd_update},
     {"untrace", "Remove a probe: untrace <symbol|id>", cmd_untrace},
     {"info", "Show info: info target | info probes", cmd_info},
     {"continue", "Continue the stopped target process", cmd_continue},
@@ -53,7 +54,17 @@ static zt_injector_session_t g_cli_session;
 static bool g_cli_attached;
 static char g_cli_log_path[PATH_MAX];
 static long g_cli_log_offset;
-static time_t g_cli_last_poll;
+static uint64_t g_cli_last_poll_ns;
+
+static uint64_t zt_cli_monotonic_ns(void) {
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
+    }
+
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
 
 static int zt_cli_stop_target(void) {
     if (!g_cli_attached) {
@@ -90,6 +101,75 @@ static zt_probe_info_t *zt_cli_find_probe(char *target, uint64_t *probe_id_out) 
 
     *probe_id_out = probe->probe_id;
     return probe;
+}
+
+static int zt_cli_parse_call_arg(const char *text, zt_call_action_arg_t *arg_out) {
+    char *endptr;
+    unsigned long long value;
+
+    if (text == NULL || arg_out == NULL) {
+        return -1;
+    }
+
+    if (strncmp(text, "arg", 3) == 0 && text[3] >= '0' && text[3] <= '5' && text[4] == '\0') {
+        arg_out->kind = ZT_CALL_ACTION_ARG_ENTRY_ARG;
+        arg_out->value = (uint64_t)(text[3] - '0');
+        return 0;
+    }
+
+    errno = 0;
+    value = strtoull(text, &endptr, 0);
+    if (errno != 0 || text == endptr || *endptr != '\0') {
+        return -1;
+    }
+
+    arg_out->kind = ZT_CALL_ACTION_ARG_CONST;
+    arg_out->value = (uint64_t)value;
+    return 0;
+}
+
+static void zt_cli_format_call_args(const zt_probe_call_action_t *action,
+                                    char *buffer,
+                                    size_t buffer_size) {
+    size_t used = 0;
+    uint64_t i;
+
+    if (buffer == NULL || buffer_size == 0) {
+        return;
+    }
+
+    buffer[0] = '\0';
+    if (action == NULL) {
+        return;
+    }
+
+    for (i = 0; i < action->arg_count && i < ZT_CALL_ACTION_ARG_CAP; ++i) {
+        int written;
+
+        if (action->args[i].kind == ZT_CALL_ACTION_ARG_ENTRY_ARG) {
+            written = snprintf(buffer + used,
+                               buffer_size - used,
+                               "%sarg%llu",
+                               i == 0 ? "" : ", ",
+                               (unsigned long long)action->args[i].value);
+        } else {
+            written = snprintf(buffer + used,
+                               buffer_size - used,
+                               "%s0x%llx",
+                               i == 0 ? "" : ", ",
+                               (unsigned long long)action->args[i].value);
+        }
+
+        if (written < 0) {
+            buffer[0] = '\0';
+            return;
+        }
+        if ((size_t)written >= buffer_size - used) {
+            buffer[buffer_size - 1] = '\0';
+            return;
+        }
+        used += (size_t)written;
+    }
 }
 
 static char *zt_next_arg(char *args) {
@@ -191,18 +271,21 @@ static void zt_cli_print_log_updates(void) {
 }
 
 static int zt_cli_event_hook(void) {
-    time_t now;
+    const uint64_t poll_interval_ns = 50000000ULL;
+    uint64_t now;
 
     if (!zt_trace_is_active()) {
         return 0;
     }
 
-    now = time(NULL);
-    if (now == g_cli_last_poll) {
+    now = zt_cli_monotonic_ns();
+    if (now != 0 &&
+        g_cli_last_poll_ns != 0 &&
+        now - g_cli_last_poll_ns < poll_interval_ns) {
         return 0;
     }
 
-    g_cli_last_poll = now;
+    g_cli_last_poll_ns = now;
     if (zt_trace_poll() == 0) {
         zt_cli_print_log_updates();
     }
@@ -336,7 +419,7 @@ static int cmd_trace(char *args) {
         }
 
         g_cli_log_offset = 0;
-        g_cli_last_poll = 0;
+        g_cli_last_poll_ns = 0;
     }
 
     if (zt_trace_start_filtered_in_session(&g_cli_session,
@@ -347,7 +430,7 @@ static int cmd_trace(char *args) {
         if (!zt_trace_is_active()) {
             g_cli_log_path[0] = '\0';
             g_cli_log_offset = 0;
-            g_cli_last_poll = 0;
+            g_cli_last_poll_ns = 0;
         }
         return 0;
     }
@@ -515,7 +598,7 @@ static int cmd_update(char *args) {
     target = zt_next_arg(args);
     mode = zt_next_arg(NULL);
     if (target == NULL || mode == NULL) {
-        printf("Usage: update <symbol|id> if <expr> | clear | call <symbol|clear>\n");
+        printf("Usage: update <symbol|id> if <expr> | clear | call <symbol|clear> [arg0|0x...]\n");
         return 0;
     }
 
@@ -542,13 +625,30 @@ static int cmd_update(char *args) {
 
     if (strcmp(mode, "call") == 0) {
         char *callee = zt_next_arg(NULL);
+        zt_call_action_arg_t call_args[ZT_CALL_ACTION_ARG_CAP];
+        uint64_t arg_count = 0;
+        char *arg_text;
 
-        if (callee == NULL || zt_next_arg(NULL) != NULL) {
-            printf("Usage: update <symbol|id> call <symbol|clear>\n");
+        if (callee == NULL) {
+            printf("Usage: update <symbol|id> call <symbol|clear> [arg0|0x...]\n");
             return 0;
         }
 
+        while ((arg_text = zt_next_arg(NULL)) != NULL) {
+            if (arg_count >= ZT_CALL_ACTION_ARG_CAP ||
+                zt_cli_parse_call_arg(arg_text, &call_args[arg_count]) != 0) {
+                printf("Usage: update <symbol|id> call <symbol|clear> [arg0|0x...]\n");
+                return 0;
+            }
+            ++arg_count;
+        }
+
         if (strcmp(callee, "clear") == 0) {
+            if (arg_count != 0) {
+                printf("Usage: update <symbol|id> call clear\n");
+                return 0;
+            }
+
             if (zt_trace_clear_probe_call_action(&g_cli_session, probe_id) != 0) {
                 printf("Failed to clear call action for probe %s\n", target);
                 return 0;
@@ -558,7 +658,11 @@ static int cmd_update(char *args) {
             return 0;
         }
 
-        if (zt_trace_update_probe_call_action(&g_cli_session, probe_id, callee) != 0) {
+        if (zt_trace_update_probe_call_action_args(&g_cli_session,
+                                                   probe_id,
+                                                   callee,
+                                                   arg_count > 0 ? call_args : NULL,
+                                                   arg_count) != 0) {
             printf("Failed to update probe %s call action to %s\n", target, callee);
             return 0;
         }
@@ -569,7 +673,7 @@ static int cmd_update(char *args) {
 
     if (strcmp(mode, "if") != 0 ||
         zt_probe_filter_compile(strtok(NULL, "\n"), &filter) != 0) {
-        printf("Usage: update <symbol|id> if <expr> | clear | call <symbol|clear>\n");
+        printf("Usage: update <symbol|id> if <expr> | clear | call <symbol|clear> [arg0|0x...]\n");
         return 0;
     }
 
@@ -614,7 +718,7 @@ static int cmd_untrace(char *args) {
     if (!zt_trace_is_active()) {
         g_cli_log_path[0] = '\0';
         g_cli_log_offset = 0;
-        g_cli_last_poll = 0;
+        g_cli_last_poll_ns = 0;
     }
     printf("Removed probe %s\n", target);
     return 0;
@@ -689,7 +793,10 @@ static int cmd_info(char *args) {
                 printf("     filter: %s\n", filter_desc);
             }
             if (call_desc != NULL) {
-                printf("       call: %s()\n", call_desc);
+                char call_args[160];
+
+                zt_cli_format_call_args(&probe->call_action, call_args, sizeof(call_args));
+                printf("       call: %s(%s)\n", call_desc, call_args);
             }
         }
         return 0;

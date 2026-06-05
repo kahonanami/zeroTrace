@@ -9,6 +9,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "../../include/zt_arch.h"
 #include "../../include/zt_injector.h"
 #include "../../include/zt_filter.h"
 #include "../../include/zt_trampoline_manager.h"
@@ -97,6 +98,87 @@ static int mapping_contains_addr(pid_t pid, uint64_t addr) {
     return read_mapping_for_addr(pid, addr, NULL, NULL, NULL, 0) == 0;
 }
 
+#if defined(__aarch64__)
+static int is_aarch64_brk(uint32_t insn) {
+    return (insn & 0xFFE0001Fu) == 0xD4200000u;
+}
+#endif
+
+static int verify_installed_user_jump_patch(pid_t pid, const zt_probe_info_t *probe) {
+    uint8_t patch[ZT_PROBE_ORIG_CODE_MAX];
+    size_t patch_len;
+    uint64_t encoded_target = 0;
+
+    if (pid <= 0 || probe == NULL || probe->target.remote_addr == 0 ||
+        probe->trampoline_addr == 0) {
+        return -1;
+    }
+
+    patch_len = zt_arch_probe_patch_len();
+    if (patch_len == 0 || patch_len > sizeof(patch)) {
+        return -1;
+    }
+
+    memset(patch, 0, sizeof(patch));
+    if (zt_read_remote_memory(pid, probe->target.remote_addr, patch, patch_len) != 0) {
+        return -1;
+    }
+
+#if defined(__x86_64__)
+    if (patch_len < 14 ||
+        patch[0] == 0xCC ||
+        patch[0] != 0xFF ||
+        patch[1] != 0x25 ||
+        patch[2] != 0x00 ||
+        patch[3] != 0x00 ||
+        patch[4] != 0x00 ||
+        patch[5] != 0x00) {
+        fprintf(stderr, "x86_64 probe patch is not an absolute user-space jump\n");
+        return -1;
+    }
+
+    memcpy(&encoded_target, patch + 6, sizeof(encoded_target));
+    if (encoded_target != probe->trampoline_addr) {
+        fprintf(stderr,
+                "x86_64 probe patch target mismatch: got=0x%llx expected=0x%llx\n",
+                (unsigned long long)encoded_target,
+                (unsigned long long)probe->trampoline_addr);
+        return -1;
+    }
+#elif defined(__aarch64__)
+    {
+        uint32_t insn0 = 0;
+        uint32_t insn1 = 0;
+
+        if (patch_len < 16) {
+            fprintf(stderr, "aarch64 probe patch is too short\n");
+            return -1;
+        }
+
+        memcpy(&insn0, patch, sizeof(insn0));
+        memcpy(&insn1, patch + 4, sizeof(insn1));
+        memcpy(&encoded_target, patch + 8, sizeof(encoded_target));
+        if (is_aarch64_brk(insn0) ||
+            insn0 != 0x58000050u ||
+            insn1 != 0xD61F0200u ||
+            encoded_target != probe->trampoline_addr) {
+            fprintf(stderr,
+                    "aarch64 probe patch is not ldr/br user-space jump: insn0=0x%x insn1=0x%x target=0x%llx expected=0x%llx\n",
+                    insn0,
+                    insn1,
+                    (unsigned long long)encoded_target,
+                    (unsigned long long)probe->trampoline_addr);
+            return -1;
+        }
+    }
+#else
+    fprintf(stderr, "unsupported architecture for probe patch verification\n");
+    return -1;
+#endif
+
+    return 0;
+}
+
 static pid_t start_many_probe_target(void) {
     pid_t child = fork();
 
@@ -161,6 +243,11 @@ static int run_many_probe_lifecycle(void) {
     for (i = 0; i < ARRAY_LEN(k_symbols); ++i) {
         if (zt_trace_start_in_session(&session, k_symbols[i], log_path) != 0) {
             fprintf(stderr, "trace start failed for %s\n", k_symbols[i]);
+            goto cleanup_trace;
+        }
+        if (verify_installed_user_jump_patch(child,
+                                             zt_probe_find_by_symbol(&session, k_symbols[i])) != 0) {
+            fprintf(stderr, "probe patch was not a user-space jump for %s\n", k_symbols[i]);
             goto cleanup_trace;
         }
     }
@@ -464,6 +551,96 @@ cleanup_trace:
     return rc;
 }
 
+static int run_probe_call_action_with_args(void) {
+    zt_injector_session_t session;
+    zt_probe_info_t *probe;
+    zt_call_action_arg_t call_args[3];
+    char *log_text = NULL;
+    char log_path[256];
+    pid_t child;
+    int call_count;
+    int rc = 1;
+
+    if (start_many_probe_trace(&session,
+                               &child,
+                               log_path,
+                               sizeof(log_path),
+                               "zt-probe-call-action-args") != 0) {
+        return 1;
+    }
+
+    if (zt_trace_start_in_session(&session, "probe_fn01", log_path) != 0) {
+        fprintf(stderr, "trace start failed for call action args test\n");
+        goto cleanup_trace;
+    }
+
+    call_args[0].kind = ZT_CALL_ACTION_ARG_ENTRY_ARG;
+    call_args[0].value = 0;
+    call_args[1].kind = ZT_CALL_ACTION_ARG_CONST;
+    call_args[1].value = 0x10;
+    call_args[2].kind = ZT_CALL_ACTION_ARG_ENTRY_ARG;
+    call_args[2].value = 0;
+
+    probe = zt_probe_find_by_symbol(&session, "probe_fn01");
+    if (probe == NULL ||
+        zt_trace_update_probe_call_action_args(&session,
+                                               probe->probe_id,
+                                               "call_marker_args",
+                                               call_args,
+                                               3) != 0) {
+        fprintf(stderr, "failed to configure probe call action args\n");
+        goto cleanup_trace;
+    }
+
+    if (kill(child, SIGUSR1) != 0) {
+        perror("kill");
+        goto cleanup_trace;
+    }
+
+    if (zt_test_wait_trace_done(15000) != 0) {
+        fprintf(stderr, "trace polling timed out for call action args test\n");
+        goto cleanup_trace;
+    }
+
+    log_text = zt_test_read_file(log_path);
+    if (log_text == NULL) {
+        fprintf(stderr, "failed to read call action args trace log\n");
+        goto cleanup_trace;
+    }
+
+    call_count = zt_test_count_substring(
+        log_text,
+        "ztrace:call: probe_fn01 => call_marker_args(");
+    if (call_count < 10) {
+        fprintf(stderr, "expected at least 10 call action args events, got %d\n", call_count);
+        goto cleanup_trace;
+    }
+
+    if (strstr(log_text, "call_marker_args(0x0, 0x10, 0x0) -> 0x6b0010") == NULL ||
+        strstr(log_text, "call_marker_args(0x5, 0x10, 0x5) -> 0x6b0515") == NULL) {
+        fprintf(stderr, "call action args were not forwarded into callee\n");
+        goto cleanup_trace;
+    }
+
+    if (!zt_test_process_gone(child)) {
+        fprintf(stderr, "call action args target still alive\n");
+        goto cleanup_trace;
+    }
+
+    printf("probe call action args test passed\n");
+    rc = 0;
+
+cleanup_trace:
+    zt_trace_shutdown();
+    zt_injector_detach(&session);
+    if (rc != 0) {
+        kill(child, SIGKILL);
+    }
+    unlink(log_path);
+    free(log_text);
+    return rc;
+}
+
 static int run_probe_call_action_slot_collision(void) {
     zt_injector_session_t session;
     zt_probe_info_t *first_probe;
@@ -682,6 +859,7 @@ int main(void) {
         run_conditional_probe() != 0 ||
         run_probe_filter_update() != 0 ||
         run_probe_call_action() != 0 ||
+        run_probe_call_action_with_args() != 0 ||
         run_probe_call_action_slot_collision() != 0 ||
         run_probe_cleanup_maps_diff() != 0) {
         return 1;

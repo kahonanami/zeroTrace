@@ -116,18 +116,30 @@ static int zt_copy_call_action_if_match(const zt_probe_call_action_t *action,
                                         uint64_t probe_id,
                                         zt_probe_call_action_t *action_out) {
     zt_probe_call_action_t snapshot;
+    uint64_t enabled;
+    size_t i;
 
     if (action == NULL || action_out == NULL) {
         return 0;
     }
 
+    enabled = __atomic_load_n(&action->enabled, __ATOMIC_ACQUIRE);
+    if (enabled == 0) {
+        return 0;
+    }
+
     snapshot.callee_addr = action->callee_addr;
     snapshot.probe_id = action->probe_id;
+    snapshot.arg_count = action->arg_count;
+    for (i = 0; i < ZT_CALL_ACTION_ARG_CAP; ++i) {
+        snapshot.args[i] = action->args[i];
+    }
     snapshot.enabled = __atomic_load_n(&action->enabled, __ATOMIC_ACQUIRE);
 
-    if (!snapshot.enabled ||
+    if (snapshot.enabled != enabled ||
         snapshot.probe_id != probe_id ||
-        snapshot.callee_addr == 0) {
+        snapshot.callee_addr == 0 ||
+        snapshot.arg_count > ZT_CALL_ACTION_ARG_CAP) {
         return 0;
     }
 
@@ -168,24 +180,97 @@ static int zt_find_call_action(uint64_t probe_id, zt_probe_call_action_t *action
     return 0;
 }
 
-static void zt_run_call_action(uint64_t probe_id, uint64_t call_id) {
+static uint64_t zt_context_gp_arg(const ctx_t *context, uint64_t index) {
+    if (context == NULL) {
+        return 0;
+    }
+
+    switch (index) {
+        case 0: return context->gp_arg0;
+        case 1: return context->gp_arg1;
+        case 2: return context->gp_arg2;
+        case 3: return context->gp_arg3;
+        case 4: return context->gp_arg4;
+        case 5: return context->gp_arg5;
+        default: return 0;
+    }
+}
+
+static void zt_resolve_call_args(const zt_probe_call_action_t *action,
+                                 const ctx_t *context,
+                                 uint64_t resolved_args[ZT_CALL_ACTION_ARG_CAP]) {
+    size_t i;
+
+    for (i = 0; i < ZT_CALL_ACTION_ARG_CAP; ++i) {
+        resolved_args[i] = 0;
+    }
+
+    if (action == NULL || context == NULL) {
+        return;
+    }
+
+    for (i = 0; i < action->arg_count && i < ZT_CALL_ACTION_ARG_CAP; ++i) {
+        switch (action->args[i].kind) {
+            case ZT_CALL_ACTION_ARG_CONST:
+                resolved_args[i] = action->args[i].value;
+                break;
+            case ZT_CALL_ACTION_ARG_ENTRY_ARG:
+                resolved_args[i] = zt_context_gp_arg(context, action->args[i].value);
+                break;
+            default:
+                resolved_args[i] = 0;
+                break;
+        }
+    }
+}
+
+static uint64_t zt_call_action_invoke(uint64_t callee_addr,
+                                      uint64_t arg_count,
+                                      const uint64_t args[ZT_CALL_ACTION_ARG_CAP]) {
+    switch (arg_count) {
+        case 0:
+            return ((uint64_t (*)(void))(uintptr_t)callee_addr)();
+        case 1:
+            return ((uint64_t (*)(uint64_t))(uintptr_t)callee_addr)(
+                args[0]);
+        case 2:
+            return ((uint64_t (*)(uint64_t, uint64_t))(uintptr_t)callee_addr)(
+                args[0], args[1]);
+        case 3:
+            return ((uint64_t (*)(uint64_t, uint64_t, uint64_t))(uintptr_t)callee_addr)(
+                args[0], args[1], args[2]);
+        case 4:
+            return ((uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t))(uintptr_t)callee_addr)(
+                args[0], args[1], args[2], args[3]);
+        case 5:
+            return ((uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))(uintptr_t)callee_addr)(
+                args[0], args[1], args[2], args[3], args[4]);
+        default:
+            return ((uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))(uintptr_t)callee_addr)(
+                args[0], args[1], args[2], args[3], args[4], args[5]);
+    }
+}
+
+static void zt_run_call_action(const ctx_t *context, uint64_t call_id) {
     zt_probe_call_action_t action;
-    uint64_t (*callee)(void);
+    uint64_t call_args[ZT_CALL_ACTION_ARG_CAP];
     uint64_t retval;
     zt_trace_event_t *event;
     uint64_t commit_seq;
+    size_t i;
 
-    if (in_call_action) {
+    if (context == NULL || in_call_action) {
         return;
     }
 
-    if (!zt_find_call_action(probe_id, &action)) {
+    if (!zt_find_call_action(context->func_id, &action)) {
         return;
     }
+
+    zt_resolve_call_args(&action, context, call_args);
 
     in_call_action = 1;
-    callee = (uint64_t (*)(void))(uintptr_t)action.callee_addr;
-    retval = callee();
+    retval = zt_call_action_invoke(action.callee_addr, action.arg_count, call_args);
     in_call_action = 0;
 
     event = zt_reserve_event_slot(&commit_seq);
@@ -193,7 +278,7 @@ static void zt_run_call_action(uint64_t probe_id, uint64_t call_id) {
         return;
     }
 
-    event->probe_id = probe_id;
+    event->probe_id = context->func_id;
     event->event_type = ZT_TRACE_EVENT_CALL;
     event->call_id = call_id;
     event->timestamp_ns = zt_clock_monotonic_ns();
@@ -201,6 +286,10 @@ static void zt_run_call_action(uint64_t probe_id, uint64_t call_id) {
     event->cpu_id = zt_getcpu_u64();
     event->args[0] = action.callee_addr;
     event->args[1] = retval;
+    event->call_arg_count = action.arg_count;
+    for (i = 0; i < ZT_CALL_ACTION_ARG_CAP; ++i) {
+        event->call_args[i] = call_args[i];
+    }
 
     zt_commit_event_slot(event, commit_seq);
 }
@@ -268,7 +357,7 @@ void zt_handle_entry(ctx_t *context, const void *fp_state_area) {
     event->fp_args[7] = zt_fp_state_vec_low64(fp_state_area, 7);
 
     zt_commit_event_slot(event, commit_seq);
-    zt_run_call_action(context->func_id, call_id);
+    zt_run_call_action(context, call_id);
 }
 
 void zt_handle_return(ctx_t *context, const void *fp_state_area) {
