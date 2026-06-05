@@ -24,6 +24,12 @@ static const char *k_symbols[] = {
     "probe_fn13", "probe_fn14", "probe_fn15", "probe_fn16",
 };
 
+enum {
+    LOG_PATH_SIZE = 256,
+    TARGET_STARTUP_WAIT_US = 100000,
+    TRACE_DONE_TIMEOUT_MS = 15000,
+};
+
 typedef struct {
     uint64_t payload_path_addr;
     uint64_t trace_buffer_addr;
@@ -363,7 +369,7 @@ static int start_many_probe_trace(zt_injector_session_t *session,
         return -1;
     }
 
-    usleep(100000);
+    usleep(TARGET_STARTUP_WAIT_US);
 
     if (zt_injector_attach(session, child) != 0) {
         fprintf(stderr, "attach failed\n");
@@ -379,7 +385,7 @@ static int start_many_probe_trace(zt_injector_session_t *session,
 static int run_many_probe_lifecycle(void) {
     zt_injector_session_t session;
     char *log_text = NULL;
-    char log_path[256];
+    char log_path[LOG_PATH_SIZE];
     pid_t child;
     int i;
     int rc = 1;
@@ -405,7 +411,10 @@ static int run_many_probe_lifecycle(void) {
     }
 
     if (session.probe_count < ZT_TEST_ARRAY_LEN(k_symbols)) {
-        fprintf(stderr, "expected 16 probes, got %d\n", session.probe_count);
+        fprintf(stderr,
+                "expected %d probes, got %d\n",
+                ZT_TEST_ARRAY_LEN(k_symbols),
+                session.probe_count);
         goto cleanup_trace;
     }
 
@@ -414,7 +423,7 @@ static int run_many_probe_lifecycle(void) {
         goto cleanup_trace;
     }
 
-    if (zt_test_wait_trace_done(15000) != 0) {
+    if (zt_test_wait_trace_done(TRACE_DONE_TIMEOUT_MS) != 0) {
         fprintf(stderr, "trace polling timed out for many probes\n");
         goto cleanup_trace;
     }
@@ -455,7 +464,7 @@ static int run_conditional_probe(void) {
     zt_probe_filter_t filter;
     zt_injector_session_t session;
     char *log_text = NULL;
-    char log_path[256];
+    char log_path[LOG_PATH_SIZE];
     pid_t child;
     int entry_count;
     int rc = 1;
@@ -483,7 +492,7 @@ static int run_conditional_probe(void) {
         goto cleanup_trace;
     }
 
-    if (zt_test_wait_trace_done(15000) != 0) {
+    if (zt_test_wait_trace_done(TRACE_DONE_TIMEOUT_MS) != 0) {
         fprintf(stderr, "trace polling timed out for conditional probe\n");
         goto cleanup_trace;
     }
@@ -532,7 +541,7 @@ static int run_probe_filter_update(void) {
     zt_injector_session_t session;
     zt_probe_info_t *probe;
     char *log_text = NULL;
-    char log_path[256];
+    char log_path[LOG_PATH_SIZE];
     uint64_t trampoline_addr;
     int trampoline_slot;
     pid_t child;
@@ -585,7 +594,7 @@ static int run_probe_filter_update(void) {
         goto cleanup_trace;
     }
 
-    if (zt_test_wait_trace_done(15000) != 0) {
+    if (zt_test_wait_trace_done(TRACE_DONE_TIMEOUT_MS) != 0) {
         fprintf(stderr, "trace polling timed out for probe update\n");
         goto cleanup_trace;
     }
@@ -631,7 +640,7 @@ static int run_probe_call_action(void) {
     zt_injector_session_t session;
     zt_probe_info_t *probe;
     char *log_text = NULL;
-    char log_path[256];
+    char log_path[LOG_PATH_SIZE];
     pid_t child;
     int call_count;
     int rc = 1;
@@ -661,7 +670,7 @@ static int run_probe_call_action(void) {
         goto cleanup_trace;
     }
 
-    if (zt_test_wait_trace_done(15000) != 0) {
+    if (zt_test_wait_trace_done(TRACE_DONE_TIMEOUT_MS) != 0) {
         fprintf(stderr, "trace polling timed out for call action test\n");
         goto cleanup_trace;
     }
@@ -708,7 +717,7 @@ static int run_probe_call_action_with_args(void) {
     zt_probe_info_t *probe;
     zt_call_action_arg_t call_args[3];
     char *log_text = NULL;
-    char log_path[256];
+    char log_path[LOG_PATH_SIZE];
     pid_t child;
     int call_count;
     int rc = 1;
@@ -749,7 +758,7 @@ static int run_probe_call_action_with_args(void) {
         goto cleanup_trace;
     }
 
-    if (zt_test_wait_trace_done(15000) != 0) {
+    if (zt_test_wait_trace_done(TRACE_DONE_TIMEOUT_MS) != 0) {
         fprintf(stderr, "trace polling timed out for call action args test\n");
         goto cleanup_trace;
     }
@@ -798,7 +807,7 @@ static int run_probe_call_action_slot_collision(void) {
     zt_probe_info_t *first_probe;
     zt_probe_info_t *collision_probe;
     char *log_text = NULL;
-    char log_path[256];
+    char log_path[LOG_PATH_SIZE];
     pid_t child;
     uint64_t first_probe_id;
     int first_call_count;
@@ -866,7 +875,7 @@ static int run_probe_call_action_slot_collision(void) {
         goto cleanup_trace;
     }
 
-    if (zt_test_wait_trace_done(15000) != 0) {
+    if (zt_test_wait_trace_done(TRACE_DONE_TIMEOUT_MS) != 0) {
         fprintf(stderr, "trace polling timed out for call slot collision test\n");
         goto cleanup_trace;
     }
@@ -911,7 +920,7 @@ cleanup_trace:
 static int run_probe_cleanup_maps_diff(void) {
     zt_injector_session_t session;
     zt_probe_info_t *probe;
-    char log_path[256];
+    char log_path[LOG_PATH_SIZE];
     pid_t child;
     uint64_t trampoline_addr;
     uint64_t trampoline_map_start;

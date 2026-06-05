@@ -15,6 +15,18 @@
 #include "zt_trace_runner.h"
 #include "test_trace_utils.h"
 
+enum {
+    LOG_PATH_SIZE = 256,
+    STATUS_BUFFER_SIZE = 512,
+    TRACE_DRAIN_POLL_INTERVAL_US = 1000,
+    STATUS_SELECT_TIMEOUT_US = 20000,
+    STATUS_WAIT_TIMEOUT_MS = 5000,
+    CHILD_EXIT_TIMEOUT_MS = 5000,
+    STAGED_PHASE_DRAIN_MS = 30,
+    LIVE_PHASE_DRAIN_MS = 25,
+    MIN_LIVE_CALL_ACTION_EVENTS = 10,
+};
+
 static int drain_trace_for_ms(pid_t child, long duration_ms) {
     struct timespec start;
 
@@ -34,14 +46,14 @@ static int drain_trace_for_ms(pid_t child, long duration_ms) {
         if (rc > 0) {
             return 1;
         }
-        usleep(1000);
+        usleep(TRACE_DRAIN_POLL_INTERVAL_US);
     }
 
     return 0;
 }
 
 static int wait_for_status(pid_t child, int status_fd, const char *marker, long timeout_ms) {
-    char text[512];
+    char text[STATUS_BUFFER_SIZE];
     size_t used = 0;
     struct timespec start;
 
@@ -67,7 +79,7 @@ static int wait_for_status(pid_t child, int status_fd, const char *marker, long 
         FD_ZERO(&readfds);
         FD_SET(status_fd, &readfds);
         tv.tv_sec = 0;
-        tv.tv_usec = 20000;
+        tv.tv_usec = STATUS_SELECT_TIMEOUT_US;
 
         nfds = select(status_fd + 1, &readfds, NULL, NULL, &tv);
         if (nfds < 0) {
@@ -126,7 +138,7 @@ static int wait_for_child_exit(pid_t child, long timeout_ms) {
         if (rc < 0 && !zt_process_is_exited(child)) {
             return -1;
         }
-        usleep(1000);
+        usleep(TRACE_DRAIN_POLL_INTERVAL_US);
     }
 
     return -1;
@@ -277,7 +289,7 @@ static int run_staged_hot_update_test(void) {
     zt_probe_filter_t final_filter;
     zt_probe_info_t *probe;
     char *log_text = NULL;
-    char log_path[256];
+    char log_path[LOG_PATH_SIZE];
     pid_t child;
     int status_fd = -1;
     uint64_t trampoline_addr;
@@ -302,7 +314,7 @@ static int run_staged_hot_update_test(void) {
         return 1;
     }
 
-    if (wait_for_status(child, status_fd, "READY", 5000) != 0) {
+    if (wait_for_status(child, status_fd, "READY", STATUS_WAIT_TIMEOUT_MS) != 0) {
         fprintf(stderr, "hot-update target did not become ready\n");
         goto cleanup;
     }
@@ -334,8 +346,8 @@ static int run_staged_hot_update_test(void) {
         goto cleanup_trace;
     }
 
-    if (wait_for_status(child, status_fd, "PHASE0", 5000) != 0 ||
-        drain_trace_for_ms(child, 30) != 0) {
+    if (wait_for_status(child, status_fd, "PHASE0", STATUS_WAIT_TIMEOUT_MS) != 0 ||
+        drain_trace_for_ms(child, STAGED_PHASE_DRAIN_MS) != 0) {
         fprintf(stderr, "hot-update false-filter phase failed\n");
         goto cleanup_trace;
     }
@@ -358,8 +370,8 @@ static int run_staged_hot_update_test(void) {
         goto cleanup_trace;
     }
 
-    if (wait_for_status(child, status_fd, "PHASE1", 5000) != 0 ||
-        drain_trace_for_ms(child, 30) != 0) {
+    if (wait_for_status(child, status_fd, "PHASE1", STATUS_WAIT_TIMEOUT_MS) != 0 ||
+        drain_trace_for_ms(child, STAGED_PHASE_DRAIN_MS) != 0) {
         fprintf(stderr, "hot-update phase A polling failed\n");
         goto cleanup_trace;
     }
@@ -375,8 +387,8 @@ static int run_staged_hot_update_test(void) {
         goto cleanup_trace;
     }
 
-    if (wait_for_status(child, status_fd, "PHASE2", 5000) != 0 ||
-        drain_trace_for_ms(child, 30) != 0) {
+    if (wait_for_status(child, status_fd, "PHASE2", STATUS_WAIT_TIMEOUT_MS) != 0 ||
+        drain_trace_for_ms(child, STAGED_PHASE_DRAIN_MS) != 0) {
         fprintf(stderr, "hot-update phase B polling failed\n");
         goto cleanup_trace;
     }
@@ -394,8 +406,8 @@ static int run_staged_hot_update_test(void) {
         goto cleanup_trace;
     }
 
-    if (wait_for_status(child, status_fd, "PHASE3", 5000) != 0 ||
-        drain_trace_for_ms(child, 30) != 0) {
+    if (wait_for_status(child, status_fd, "PHASE3", STATUS_WAIT_TIMEOUT_MS) != 0 ||
+        drain_trace_for_ms(child, STAGED_PHASE_DRAIN_MS) != 0) {
         fprintf(stderr, "hot-update disabled phase polling failed\n");
         goto cleanup_trace;
     }
@@ -415,8 +427,8 @@ static int run_staged_hot_update_test(void) {
         goto cleanup_trace;
     }
 
-    if (wait_for_status(child, status_fd, "DONE", 5000) != 0 ||
-        wait_for_child_exit(child, 5000) != 0) {
+    if (wait_for_status(child, status_fd, "DONE", STATUS_WAIT_TIMEOUT_MS) != 0 ||
+        wait_for_child_exit(child, CHILD_EXIT_TIMEOUT_MS) != 0) {
         fprintf(stderr, "hot-update trace did not finish\n");
         goto cleanup_trace;
     }
@@ -479,7 +491,7 @@ static int run_live_call_action_hot_update_test(void) {
     zt_injector_session_t session;
     zt_probe_info_t *probe;
     char *log_text = NULL;
-    char log_path[256];
+    char log_path[LOG_PATH_SIZE];
     pid_t child;
     int status_fd = -1;
     int call_a_count = 0;
@@ -496,7 +508,7 @@ static int run_live_call_action_hot_update_test(void) {
         return 1;
     }
 
-    if (wait_for_status(child, status_fd, "READY", 5000) != 0) {
+    if (wait_for_status(child, status_fd, "READY", STATUS_WAIT_TIMEOUT_MS) != 0) {
         fprintf(stderr, "hot-update target did not become ready\n");
         goto cleanup;
     }
@@ -530,18 +542,18 @@ static int run_live_call_action_hot_update_test(void) {
         goto cleanup_trace;
     }
 
-    if (drain_trace_for_ms(child, 25) < 0 ||
+    if (drain_trace_for_ms(child, LIVE_PHASE_DRAIN_MS) < 0 ||
         zt_trace_update_probe_call_action(&session, probe->probe_id, "hot_call_b") != 0 ||
-        drain_trace_for_ms(child, 25) < 0 ||
+        drain_trace_for_ms(child, LIVE_PHASE_DRAIN_MS) < 0 ||
         zt_trace_clear_probe_call_action(&session, probe->probe_id) != 0 ||
-        drain_trace_for_ms(child, 25) < 0 ||
+        drain_trace_for_ms(child, LIVE_PHASE_DRAIN_MS) < 0 ||
         zt_trace_update_probe_call_action(&session, probe->probe_id, "hot_call_a") != 0) {
         fprintf(stderr, "live call action hot-update sequence failed\n");
         goto cleanup_trace;
     }
 
-    if (wait_for_status(child, status_fd, "DONE", 5000) != 0 ||
-        wait_for_child_exit(child, 5000) != 0) {
+    if (wait_for_status(child, status_fd, "DONE", STATUS_WAIT_TIMEOUT_MS) != 0 ||
+        wait_for_child_exit(child, CHILD_EXIT_TIMEOUT_MS) != 0) {
         fprintf(stderr, "live hot-update trace did not finish\n");
         goto cleanup_trace;
     }
@@ -556,7 +568,8 @@ static int run_live_call_action_hot_update_test(void) {
         goto cleanup_trace;
     }
 
-    if (call_a_count < 10 || call_b_count < 10) {
+    if (call_a_count < MIN_LIVE_CALL_ACTION_EVENTS ||
+        call_b_count < MIN_LIVE_CALL_ACTION_EVENTS) {
         fprintf(stderr,
                 "live call action hot-update log too sparse: a=%d b=%d\n",
                 call_a_count,

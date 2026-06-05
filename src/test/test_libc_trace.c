@@ -17,6 +17,12 @@ static const char *k_symbols[] = {
     "printf",
 };
 
+enum {
+    LOG_PATH_SIZE = 256,
+    TARGET_STARTUP_WAIT_US = 100000,
+    TRACE_DONE_TIMEOUT_MS = 15000,
+};
+
 static int check_sigconf_parser(void) {
     const zt_func_sig_t *printf_sig;
     const zt_func_sig_t *read_sig;
@@ -69,7 +75,7 @@ static int check_sigconf_parser(void) {
 int main(void) {
     zt_injector_session_t session;
     char *log_text = NULL;
-    char log_path[256];
+    char log_path[LOG_PATH_SIZE];
     pid_t child;
     int i;
     int rc = 1;
@@ -97,7 +103,7 @@ int main(void) {
         _exit(1);
     }
 
-    usleep(100000);
+    usleep(TARGET_STARTUP_WAIT_US);
 
     if (zt_injector_attach(&session, child) != 0) {
         fprintf(stderr, "attach failed\n");
@@ -116,7 +122,7 @@ int main(void) {
         goto cleanup_trace;
     }
 
-    if (zt_test_wait_trace_done(15000) != 0) {
+    if (zt_test_wait_trace_done(TRACE_DONE_TIMEOUT_MS) != 0) {
         fprintf(stderr, "trace polling timed out for libc trace\n");
         goto cleanup_trace;
     }

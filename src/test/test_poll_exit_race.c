@@ -16,6 +16,7 @@
 enum {
     DEFAULT_EXIT_RACE_ROUNDS = 50,
     MAX_EXIT_RACE_ROUNDS = 10000,
+    LOG_PATH_SIZE = 256,
     TRACE_POLL_INTERVAL_US = 1000,
     TARGET_STARTUP_WAIT_US = 50000,
     TRACE_EXIT_TIMEOUT_MS = 5000,
@@ -154,7 +155,7 @@ int main(void) {
 
     for (i = 0; i < rounds; ++i) {
         zt_injector_session_t session;
-        char log_path[256];
+        char log_path[LOG_PATH_SIZE];
         pid_t child;
 
         if (zt_test_make_log_path(log_path, sizeof(log_path), "zt-exit-race") != 0) {

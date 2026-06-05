@@ -15,6 +15,9 @@ TEST_DIR := src/test
 BUILD_DIR := build
 BIN_DIR := bin
 TEST_BIN_DIR := $(BIN_DIR)/tests
+BUILD_ISA_COMMON_DIR := $(BUILD_DIR)/isa/common
+BUILD_ISA_X86_64_DIR := $(BUILD_DIR)/isa/x86_64
+BUILD_ISA_AARCH64_DIR := $(BUILD_DIR)/isa/aarch64
 ARCH ?= $(shell uname -m)
 
 ifeq ($(ARCH),x86_64)
@@ -107,9 +110,9 @@ print-arch-config:
 
 directories:
 	@mkdir -p \
-		$(BUILD_DIR)/isa/common \
-		$(BUILD_DIR)/isa/x86_64 \
-		$(BUILD_DIR)/isa/aarch64 \
+		$(BUILD_ISA_COMMON_DIR) \
+		$(BUILD_ISA_X86_64_DIR) \
+		$(BUILD_ISA_AARCH64_DIR) \
 		$(TEST_BIN_DIR)
 
 $(APP_TARGET): $(OBJ_CORE)
