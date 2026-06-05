@@ -12,6 +12,8 @@
 #include "zt_injector.h"
 #include "zt_trace_runner.h"
 
+#define ZT_TEST_ARRAY_LEN(x) ((int)(sizeof(x) / sizeof((x)[0])))
+
 static int zt_test_make_log_path(char *path, size_t size, const char *name) {
     struct timespec ts;
 

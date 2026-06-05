@@ -1,11 +1,8 @@
 #define _GNU_SOURCE
 
-#include <errno.h>
-#include <signal.h>
 #include <string.h>
 #include <sys/ptrace.h>
 #include <sys/user.h>
-#include <sys/wait.h>
 
 #include <capstone/capstone.h>
 

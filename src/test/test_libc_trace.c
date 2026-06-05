@@ -50,7 +50,7 @@ int main(void) {
         goto cleanup;
     }
 
-    for (i = 0; i < (int)(sizeof(k_symbols) / sizeof(k_symbols[0])); ++i) {
+    for (i = 0; i < ZT_TEST_ARRAY_LEN(k_symbols); ++i) {
         if (zt_trace_start_in_session(&session, k_symbols[i], log_path) != 0) {
             fprintf(stderr, "trace start failed for %s\n", k_symbols[i]);
             goto cleanup_trace;
@@ -73,7 +73,7 @@ int main(void) {
         goto cleanup_trace;
     }
 
-    for (i = 0; i < (int)(sizeof(k_symbols) / sizeof(k_symbols[0])); ++i) {
+    for (i = 0; i < ZT_TEST_ARRAY_LEN(k_symbols); ++i) {
         if (strstr(log_text, k_symbols[i]) == NULL) {
             fprintf(stderr, "missing libc symbol in log: %s\n", k_symbols[i]);
             goto cleanup_trace;

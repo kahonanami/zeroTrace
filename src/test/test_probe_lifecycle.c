@@ -23,8 +23,6 @@ static const char *k_symbols[] = {
     "probe_fn13", "probe_fn14", "probe_fn15", "probe_fn16",
 };
 
-#define ARRAY_LEN(x) ((int)(sizeof(x) / sizeof((x)[0])))
-
 static void kill_and_reap_child(pid_t child) {
     int status;
 
@@ -240,7 +238,7 @@ static int run_many_probe_lifecycle(void) {
         return 1;
     }
 
-    for (i = 0; i < ARRAY_LEN(k_symbols); ++i) {
+    for (i = 0; i < ZT_TEST_ARRAY_LEN(k_symbols); ++i) {
         if (zt_trace_start_in_session(&session, k_symbols[i], log_path) != 0) {
             fprintf(stderr, "trace start failed for %s\n", k_symbols[i]);
             goto cleanup_trace;
@@ -252,7 +250,7 @@ static int run_many_probe_lifecycle(void) {
         }
     }
 
-    if (session.probe_count < ARRAY_LEN(k_symbols)) {
+    if (session.probe_count < ZT_TEST_ARRAY_LEN(k_symbols)) {
         fprintf(stderr, "expected 16 probes, got %d\n", session.probe_count);
         goto cleanup_trace;
     }
@@ -273,7 +271,7 @@ static int run_many_probe_lifecycle(void) {
         goto cleanup_trace;
     }
 
-    for (i = 0; i < ARRAY_LEN(k_symbols); ++i) {
+    for (i = 0; i < ZT_TEST_ARRAY_LEN(k_symbols); ++i) {
         if (strstr(log_text, k_symbols[i]) == NULL) {
             fprintf(stderr, "missing symbol in log: %s\n", k_symbols[i]);
             goto cleanup_trace;

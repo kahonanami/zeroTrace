@@ -11,7 +11,7 @@
 
 - `arch.c`
 - `trampoline_manager.c`
-- `x86_64` 使用 `zt_stub.S`
+- `x86_64` 使用 `stub.S`
 - `aarch64` 使用 `stub.S`
 
 ---

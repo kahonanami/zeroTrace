@@ -144,6 +144,25 @@ static zt_thread_info_t *zt_session_find_thread(zt_injector_session_t *session, 
     return NULL;
 }
 
+static void zt_thread_clear(zt_thread_info_t *thread) {
+    if (thread == NULL) {
+        return;
+    }
+
+    thread->tid = 0;
+    thread->stopped = 0;
+    thread->resume_signal = 0;
+}
+
+static void zt_thread_mark_running(zt_thread_info_t *thread) {
+    if (thread == NULL) {
+        return;
+    }
+
+    thread->stopped = 0;
+    thread->resume_signal = 0;
+}
+
 static int zt_session_add_thread(zt_injector_session_t *session, pid_t tid) {
     zt_thread_info_t *thread;
 
@@ -306,6 +325,36 @@ int zt_process_is_exited(pid_t pid) {
     return state == 'Z' || state == 'X' || state == 'x';
 }
 
+int zt_remote_addr_is_mapped(pid_t pid, uint64_t addr) {
+    char maps_path[64];
+    char line[PATH_MAX + 128];
+    FILE *fp;
+
+    if (pid <= 0 || addr == 0) {
+        return 0;
+    }
+
+    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+    fp = fopen(maps_path, "r");
+    if (fp == NULL) {
+        return 0;
+    }
+
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        unsigned long long start = 0;
+        unsigned long long end = 0;
+
+        if (sscanf(line, "%llx-%llx", &start, &end) == 2 &&
+            addr >= start && addr < end) {
+            fclose(fp);
+            return 1;
+        }
+    }
+
+    fclose(fp);
+    return 0;
+}
+
 static int zt_wait_for_thread_stop(zt_injector_session_t *session, zt_thread_info_t *thread) {
     int status;
 
@@ -322,9 +371,7 @@ static int zt_wait_for_thread_stop(zt_injector_session_t *session, zt_thread_inf
             }
 
             if (WIFEXITED(status) || WIFSIGNALED(status)) {
-                thread->tid = 0;
-                thread->stopped = 0;
-                thread->resume_signal = 0;
+                zt_thread_clear(thread);
                 return 0;
             }
 
@@ -336,8 +383,7 @@ static int zt_wait_for_thread_stop(zt_injector_session_t *session, zt_thread_inf
         }
 
         if (errno == ECHILD || errno == ESRCH) {
-            thread->tid = 0;
-            thread->stopped = 0;
+            zt_thread_clear(thread);
             return 0;
         }
 
@@ -407,9 +453,7 @@ int zt_injector_interrupt_all(zt_injector_session_t *session) {
 
             if (ptrace(PTRACE_INTERRUPT, thread->tid, NULL, NULL) != 0) {
                 if (errno == ESRCH) {
-                    thread->tid = 0;
-                    thread->stopped = 0;
-                    thread->resume_signal = 0;
+                    zt_thread_clear(thread);
                     continue;
                 }
                 return -1;
@@ -464,16 +508,13 @@ int zt_injector_continue_all(zt_injector_session_t *session) {
                    NULL,
                    (void *)(uintptr_t)resume_signal) != 0) {
             if (errno == ESRCH) {
-                thread->tid = 0;
-                thread->stopped = 0;
-                thread->resume_signal = 0;
+                zt_thread_clear(thread);
                 continue;
             }
             return -1;
         }
 
-        thread->stopped = 0;
-        thread->resume_signal = 0;
+        zt_thread_mark_running(thread);
     }
 
     zt_compact_threads(session);
@@ -541,9 +582,7 @@ int zt_injector_poll_events(zt_injector_session_t *session, int *target_exited_o
             if (tid == session->pid) {
                 zt_session_mark_target_exited(session, target_exited_out);
             }
-            thread->tid = 0;
-            thread->stopped = 0;
-            thread->resume_signal = 0;
+            zt_thread_clear(thread);
             zt_compact_threads(session);
             if (session->thread_count == 0) {
                 zt_session_mark_target_exited(session, target_exited_out);
@@ -563,17 +602,14 @@ int zt_injector_poll_events(zt_injector_session_t *session, int *target_exited_o
                        NULL,
                        (void *)(uintptr_t)deliver_sig) != 0) {
                 if (errno == ESRCH) {
-                    thread->tid = 0;
-                    thread->stopped = 0;
-                    thread->resume_signal = 0;
+                    zt_thread_clear(thread);
                     zt_compact_threads(session);
                     continue;
                 }
                 return -1;
             }
 
-            thread->stopped = 0;
-            thread->resume_signal = 0;
+            zt_thread_mark_running(thread);
         }
     }
 }
@@ -617,16 +653,13 @@ static int zt_single_step_thread(zt_injector_session_t *session, zt_thread_info_
                NULL,
                (void *)(uintptr_t)resume_signal) != 0) {
         if (errno == ESRCH) {
-            thread->tid = 0;
-            thread->stopped = 0;
-            thread->resume_signal = 0;
+            zt_thread_clear(thread);
             return 0;
         }
         return -1;
     }
 
-    thread->stopped = 0;
-    thread->resume_signal = 0;
+    zt_thread_mark_running(thread);
     return zt_wait_for_thread_stop(session, thread);
 }
 
@@ -650,9 +683,7 @@ static int zt_ensure_patch_regions_are_safe(zt_injector_session_t *session) {
 
             if (zt_arch_get_pc(thread->tid, &pc) != 0) {
                 if (errno == ESRCH) {
-                    thread->tid = 0;
-                    thread->stopped = 0;
-                    thread->resume_signal = 0;
+                    zt_thread_clear(thread);
                     break;
                 }
                 return -1;
@@ -1316,7 +1347,7 @@ int zt_injector_attach(zt_injector_session_t *session, pid_t pid) {
     session->exe_path[path_len] = '\0';
 
     ret = zt_check_is_pie(session->exe_path, &session->is_pie);
-    if(ret != 0){
+    if (ret != 0) {
         zt_injector_detach(session);
         return -1;
     }

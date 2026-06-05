@@ -19,7 +19,7 @@ ARCH ?= $(shell uname -m)
 
 ifeq ($(ARCH),x86_64)
 ARCH_SRC_C := $(ISA_X86_64_DIR)/arch.c $(ISA_X86_64_DIR)/trampoline_manager.c
-ARCH_SRC_S := $(ISA_X86_64_DIR)/zt_stub.S
+ARCH_SRC_S := $(ISA_X86_64_DIR)/stub.S
 else ifeq ($(ARCH),aarch64)
 ARCH_SRC_C := $(ISA_AARCH64_DIR)/arch.c $(ISA_AARCH64_DIR)/trampoline_manager.c
 ARCH_SRC_S := $(ISA_AARCH64_DIR)/stub.S
@@ -29,15 +29,8 @@ endif
 
 SRC_C_ALL := \
 	$(wildcard $(SRC_DIR)/*.c) \
-	$(wildcard $(ISA_COMMON_DIR)/*.c) \
-	$(wildcard $(ISA_X86_64_DIR)/*.c) \
-	$(wildcard $(ISA_AARCH64_DIR)/*.c)
-SRC_C := $(filter-out \
-	$(ISA_X86_64_DIR)/arch.c \
-	$(ISA_AARCH64_DIR)/arch.c \
-	$(ISA_X86_64_DIR)/trampoline_manager.c \
-	$(ISA_AARCH64_DIR)/trampoline_manager.c, \
-	$(SRC_C_ALL)) $(ARCH_SRC_C)
+	$(wildcard $(ISA_COMMON_DIR)/*.c)
+SRC_C := $(SRC_C_ALL) $(ARCH_SRC_C)
 SRC_S := $(ARCH_SRC_S)
 
 OBJ_CORE := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRC_C)) \

@@ -7,7 +7,6 @@
 #include <stddef.h>
 #include <unistd.h>
 #include <dlfcn.h>
-#include <signal.h>
 #include <sys/mman.h>
 #include <sys/uio.h>
 
@@ -34,6 +33,10 @@ typedef struct {
     char symbol[ZT_PROBE_SYMBOL_MAX];
 } zt_call_symbol_cache_entry_t;
 
+enum {
+    ZT_TRACE_CALL_SYMBOL_CACHE_CAP = ZT_PAYLOAD_PROBE_ACTION_CAP * 2,
+};
+
 typedef enum {
     ZT_TRACE_RUNTIME_INACTIVE = 0,
     ZT_TRACE_RUNTIME_STOPPED,
@@ -46,7 +49,7 @@ typedef struct {
     FILE *log_fp;
     uint64_t last_seq;
     zt_trace_runtime_status_t state;
-    zt_call_symbol_cache_entry_t call_symbols[ZT_PAYLOAD_PROBE_ACTION_CAP * 2];
+    zt_call_symbol_cache_entry_t call_symbols[ZT_TRACE_CALL_SYMBOL_CACHE_CAP];
     int call_symbol_count;
     uint64_t call_action_epoch;
 } zt_active_trace_t;
@@ -76,13 +79,17 @@ static zt_trace_event_t g_event_snapshot[ZT_TRACE_EVENT_CAPACITY];
 static uint64_t g_commit_before[ZT_TRACE_EVENT_CAPACITY];
 static uint64_t g_commit_after[ZT_TRACE_EVENT_CAPACITY];
 
-static void zt_trace_mark_target_exited(void) {
+static void zt_trace_reset_active(int exit_observed) {
     if (g_active_trace.log_fp != NULL) {
         fclose(g_active_trace.log_fp);
     }
     memset(&g_active_trace, 0, sizeof(g_active_trace));
     memset(g_entry_cache, 0, sizeof(g_entry_cache));
-    g_trace_exit_observed = 1;
+    g_trace_exit_observed = exit_observed;
+}
+
+static void zt_trace_mark_target_exited(void) {
+    zt_trace_reset_active(1);
 }
 
 static int zt_trace_is_exit_race(pid_t pid) {
@@ -98,36 +105,6 @@ static int zt_trace_is_exit_race(pid_t pid) {
     return zt_process_is_exited(pid);
 }
 
-static int zt_trace_remote_addr_is_mapped(pid_t pid, uint64_t addr) {
-    char maps_path[64];
-    char line[PATH_MAX + 128];
-    FILE *fp;
-
-    if (pid <= 0 || addr == 0) {
-        return 0;
-    }
-
-    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
-    fp = fopen(maps_path, "r");
-    if (fp == NULL) {
-        return 0;
-    }
-
-    while (fgets(line, sizeof(line), fp) != NULL) {
-        unsigned long long start = 0;
-        unsigned long long end = 0;
-
-        if (sscanf(line, "%llx-%llx", &start, &end) == 2 &&
-            addr >= start && addr < end) {
-            fclose(fp);
-            return 1;
-        }
-    }
-
-    fclose(fp);
-    return 0;
-}
-
 static int zt_trace_read_failure_is_exit_window(pid_t pid, uint64_t remote_addr) {
     int attempt;
 
@@ -136,7 +113,7 @@ static int zt_trace_read_failure_is_exit_window(pid_t pid, uint64_t remote_addr)
             return 1;
         }
 
-        if (!zt_trace_remote_addr_is_mapped(pid, remote_addr)) {
+        if (!zt_remote_addr_is_mapped(pid, remote_addr)) {
             return 1;
         }
 
@@ -144,7 +121,7 @@ static int zt_trace_read_failure_is_exit_window(pid_t pid, uint64_t remote_addr)
     }
 
     return zt_process_is_exited(pid) ||
-           !zt_trace_remote_addr_is_mapped(pid, remote_addr);
+           !zt_remote_addr_is_mapped(pid, remote_addr);
 }
 
 static int zt_trace_mark_exit_window_if_needed(pid_t pid, uint64_t trace_buffer_addr) {
@@ -267,8 +244,7 @@ static void zt_trace_remember_call_symbol(uint64_t addr, const char *symbol) {
         }
     }
 
-    if (g_active_trace.call_symbol_count >=
-        (int)(sizeof(g_active_trace.call_symbols) / sizeof(g_active_trace.call_symbols[0]))) {
+    if (g_active_trace.call_symbol_count >= ZT_TRACE_CALL_SYMBOL_CACHE_CAP) {
         return;
     }
 
@@ -350,6 +326,20 @@ static int zt_trace_assign_call_action_slot(const zt_injector_session_t *session
     return -1;
 }
 
+static void zt_trace_set_probe_filter(zt_probe_info_t *probe,
+                                      const zt_probe_filter_t *filter) {
+    if (probe == NULL) {
+        return;
+    }
+
+    if (filter != NULL) {
+        probe->filter = *filter;
+    } else {
+        memset(&probe->filter, 0, sizeof(probe->filter));
+    }
+    probe->filter.probe_id = probe->probe_id;
+}
+
 static int zt_trace_install_probe(zt_injector_session_t *session,
                                   zt_runtime_state_t *runtime,
                                   const char *symbol,
@@ -368,8 +358,7 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
 
     if (probe->state == ZT_PROBE_INSTALLED) {
         if (filter != NULL) {
-            probe->filter = *filter;
-            probe->filter.probe_id = probe->probe_id;
+            zt_trace_set_probe_filter(probe, filter);
         }
 
         if (probe_out != NULL) {
@@ -383,13 +372,7 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
            probe->target.symbol,
            probe->target.remote_addr);
 
-    if (filter != NULL) {
-        probe->filter = *filter;
-        probe->filter.probe_id = probe->probe_id;
-    } else {
-        memset(&probe->filter, 0, sizeof(probe->filter));
-        probe->filter.probe_id = probe->probe_id;
-    }
+    zt_trace_set_probe_filter(probe, filter);
 
     if (zt_enable_probe(session, probe->probe_id) != 0) {
         printf("zt_enable_probe failed for probe %lu\n", probe->probe_id);
@@ -533,7 +516,7 @@ static void zt_dump_one_trace_event(zt_injector_session_t *session,
     ts_nsec = (unsigned long long)(event->timestamp_ns % 1000000000ULL);
 
     if (event->event_type == ZT_TRACE_EVENT_CALL) {
-        const char *callee_name = "<unknown>";
+        const char *callee_name;
         char call_args[160];
 
         callee_name = zt_trace_find_call_symbol(event->args[0]);
@@ -872,7 +855,7 @@ static int zt_dump_trace_events_since(zt_injector_session_t *session,
         return -1;
     }
 
-    write_seq = __atomic_load_n(&header.write_seq, __ATOMIC_RELAXED);
+    write_seq = header.write_seq;
     if (write_seq == 0 || write_seq <= *last_seq) {
         return 0;
     }
@@ -1242,13 +1225,7 @@ int zt_trace_update_probe_filter(zt_injector_session_t *session,
         return -1;
     }
 
-    if (filter != NULL) {
-        probe->filter = *filter;
-        probe->filter.probe_id = probe->probe_id;
-    } else {
-        memset(&probe->filter, 0, sizeof(probe->filter));
-        probe->filter.probe_id = probe->probe_id;
-    }
+    zt_trace_set_probe_filter(probe, filter);
 
     return 0;
 }
@@ -1414,13 +1391,7 @@ static int zt_trace_stop(void) {
         zt_unregister_probe(g_active_trace.session, probe->probe_id);
     }
 
-    if (g_active_trace.log_fp != NULL) {
-        fclose(g_active_trace.log_fp);
-    }
-
-    memset(&g_active_trace, 0, sizeof(g_active_trace));
-    memset(g_entry_cache, 0, sizeof(g_entry_cache));
-    g_trace_exit_observed = 0;
+    zt_trace_reset_active(0);
     return ret;
 }
 
@@ -1477,9 +1448,7 @@ int zt_trace_start_filtered_in_session(zt_injector_session_t *session,
 
     zt_sigconf_load_default();
 
-    memset(&g_active_trace, 0, sizeof(g_active_trace));
-    memset(g_entry_cache, 0, sizeof(g_entry_cache));
-    g_trace_exit_observed = 0;
+    zt_trace_reset_active(0);
     printf("Tracing target PID %d, %s, is_pie: %d, image_base: 0x%lX\n",
            session->pid,
            session->exe_path,
@@ -1548,12 +1517,7 @@ int zt_trace_remove_probe(zt_injector_session_t *session, uint64_t probe_id) {
     }
 
     if (session->probe_count == 0) {
-        if (g_active_trace.log_fp != NULL) {
-            fclose(g_active_trace.log_fp);
-        }
-        memset(&g_active_trace, 0, sizeof(g_active_trace));
-        memset(g_entry_cache, 0, sizeof(g_entry_cache));
-        g_trace_exit_observed = 0;
+        zt_trace_reset_active(0);
         return 0;
     }
 

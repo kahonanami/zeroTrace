@@ -119,56 +119,47 @@ static void zt_extract_param_name(const char *spec, char *name, size_t name_size
     zt_copy_str(name, name_size, spec + start);
 }
 
+typedef struct {
+    const char *decl;
+    zt_sig_type_t type;
+} zt_sig_type_name_t;
+
+static const zt_sig_type_name_t kExactSigTypes[] = {
+    {"void", ZT_SIG_TYPE_VOID},
+    {"buffer", ZT_SIG_TYPE_BUF},
+    {"const buffer", ZT_SIG_TYPE_CONST_BUF},
+    {"float", ZT_SIG_TYPE_FLOAT},
+    {"double", ZT_SIG_TYPE_DOUBLE},
+    {"size_t", ZT_SIG_TYPE_SIZE},
+    {"ssize_t", ZT_SIG_TYPE_SSIZE},
+    {"unsigned long", ZT_SIG_TYPE_ULONG},
+    {"time_t", ZT_SIG_TYPE_ULONG},
+    {"long", ZT_SIG_TYPE_LONG},
+    {"off_t", ZT_SIG_TYPE_LONG},
+    {"int", ZT_SIG_TYPE_INT},
+    {"unsigned int", ZT_SIG_TYPE_INT},
+    {"pid_t", ZT_SIG_TYPE_INT},
+    {"mode_t", ZT_SIG_TYPE_INT},
+    {"uid_t", ZT_SIG_TYPE_INT},
+    {"gid_t", ZT_SIG_TYPE_INT},
+    {"socklen_t", ZT_SIG_TYPE_INT},
+};
+
 static zt_sig_type_t zt_parse_sig_type(const char *decl) {
+    size_t i;
+
     if (decl == NULL || decl[0] == '\0') {
         return ZT_SIG_TYPE_UNKNOWN;
     }
 
-    if (strcmp(decl, "void") == 0) {
-        return ZT_SIG_TYPE_VOID;
-    }
-
-    if (strcmp(decl, "buffer") == 0) {
-        return ZT_SIG_TYPE_BUF;
-    }
-
-    if (strcmp(decl, "const buffer") == 0) {
-        return ZT_SIG_TYPE_CONST_BUF;
-    }
-
-    if (strcmp(decl, "float") == 0) {
-        return ZT_SIG_TYPE_FLOAT;
-    }
-
-    if (strcmp(decl, "double") == 0) {
-        return ZT_SIG_TYPE_DOUBLE;
+    for (i = 0; i < sizeof(kExactSigTypes) / sizeof(kExactSigTypes[0]); ++i) {
+        if (strcmp(decl, kExactSigTypes[i].decl) == 0) {
+            return kExactSigTypes[i].type;
+        }
     }
 
     if (strstr(decl, "char *") != NULL) {
         return ZT_SIG_TYPE_CSTR;
-    }
-
-    if (strcmp(decl, "size_t") == 0) {
-        return ZT_SIG_TYPE_SIZE;
-    }
-
-    if (strcmp(decl, "ssize_t") == 0) {
-        return ZT_SIG_TYPE_SSIZE;
-    }
-
-    if (strcmp(decl, "unsigned long") == 0 || strcmp(decl, "time_t") == 0) {
-        return ZT_SIG_TYPE_ULONG;
-    }
-
-    if (strcmp(decl, "long") == 0 || strcmp(decl, "off_t") == 0) {
-        return ZT_SIG_TYPE_LONG;
-    }
-
-    if (strcmp(decl, "int") == 0 || strcmp(decl, "unsigned int") == 0 ||
-        strcmp(decl, "pid_t") == 0 || strcmp(decl, "mode_t") == 0 ||
-        strcmp(decl, "uid_t") == 0 || strcmp(decl, "gid_t") == 0 ||
-        strcmp(decl, "socklen_t") == 0) {
-        return ZT_SIG_TYPE_INT;
     }
 
     if (strchr(decl, '*') != NULL) {

@@ -147,25 +147,51 @@ static uint64_t zt_filter_parse_add(zt_filter_eval_t *ctx) {
     return lhs;
 }
 
+static int zt_filter_take_cmp(zt_filter_eval_t *ctx, uint8_t *type_out) {
+    const zt_probe_filter_token_t *token = zt_filter_peek(ctx);
+
+    if (token == NULL || type_out == NULL) {
+        return 0;
+    }
+
+    switch (token->type) {
+        case ZT_PROBE_FILTER_TOK_EQ:
+        case ZT_PROBE_FILTER_TOK_NE:
+        case ZT_PROBE_FILTER_TOK_GT:
+        case ZT_PROBE_FILTER_TOK_GE:
+        case ZT_PROBE_FILTER_TOK_LT:
+        case ZT_PROBE_FILTER_TOK_LE:
+            *type_out = token->type;
+            ++ctx->pos;
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static uint64_t zt_filter_apply_cmp(uint8_t type, uint64_t lhs, uint64_t rhs) {
+    switch (type) {
+        case ZT_PROBE_FILTER_TOK_EQ: return lhs == rhs;
+        case ZT_PROBE_FILTER_TOK_NE: return lhs != rhs;
+        case ZT_PROBE_FILTER_TOK_GT: return lhs > rhs;
+        case ZT_PROBE_FILTER_TOK_GE: return lhs >= rhs;
+        case ZT_PROBE_FILTER_TOK_LT: return lhs < rhs;
+        case ZT_PROBE_FILTER_TOK_LE: return lhs <= rhs;
+        default: return 0;
+    }
+}
+
 static uint64_t zt_filter_parse_cmp(zt_filter_eval_t *ctx) {
     uint64_t lhs = zt_filter_parse_add(ctx);
 
     while (ctx->ok) {
-        if (zt_filter_take(ctx, ZT_PROBE_FILTER_TOK_EQ)) {
-            lhs = lhs == zt_filter_parse_add(ctx);
-        } else if (zt_filter_take(ctx, ZT_PROBE_FILTER_TOK_NE)) {
-            lhs = lhs != zt_filter_parse_add(ctx);
-        } else if (zt_filter_take(ctx, ZT_PROBE_FILTER_TOK_GT)) {
-            lhs = lhs > zt_filter_parse_add(ctx);
-        } else if (zt_filter_take(ctx, ZT_PROBE_FILTER_TOK_GE)) {
-            lhs = lhs >= zt_filter_parse_add(ctx);
-        } else if (zt_filter_take(ctx, ZT_PROBE_FILTER_TOK_LT)) {
-            lhs = lhs < zt_filter_parse_add(ctx);
-        } else if (zt_filter_take(ctx, ZT_PROBE_FILTER_TOK_LE)) {
-            lhs = lhs <= zt_filter_parse_add(ctx);
-        } else {
+        uint8_t type = 0;
+
+        if (!zt_filter_take_cmp(ctx, &type)) {
             break;
         }
+
+        lhs = zt_filter_apply_cmp(type, lhs, zt_filter_parse_add(ctx));
     }
 
     return lhs;
@@ -260,7 +286,7 @@ static int zt_filter_append_arg(zt_probe_filter_t *filter, const char **cursor) 
     }
 
     index = strtoul(*cursor + 3, &endptr, 10);
-    if (*cursor + 3 == endptr || index >= 6) {
+    if (*cursor + 3 == endptr || index >= ZT_TRACE_GP_ARG_COUNT) {
         return -1;
     }
 

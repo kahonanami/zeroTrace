@@ -4,6 +4,10 @@
 
 #include "zt_trampoline_manager.h"
 
+static int zt_trampoline_pool_slot_valid(int slot) {
+    return slot >= 0 && slot < ZT_TRAMPOLINE_POOL_SLOTS;
+}
+
 static int zt_trampoline_pool_all_free(const zt_trampoline_pool_t *pool) {
     int i;
 
@@ -22,7 +26,7 @@ static int zt_trampoline_pool_all_free(const zt_trampoline_pool_t *pool) {
 
 static uint64_t zt_trampoline_pool_slot_addr(const zt_trampoline_pool_t *pool, int slot) {
     if (pool == NULL || pool->remote_addr == 0 ||
-        slot < 0 || slot >= ZT_TRAMPOLINE_POOL_SLOTS) {
+        !zt_trampoline_pool_slot_valid(slot)) {
         return 0;
     }
 
@@ -63,17 +67,16 @@ void zt_trampoline_pool_reset(zt_trampoline_pool_t *pool) {
 }
 
 int zt_trampoline_pool_alloc(zt_injector_session_t *session,
-                        zt_trampoline_pool_t *pool,
-                        zt_probe_info_t *probe,
-                        uint64_t *trampoline_addr_out) {
+                             zt_trampoline_pool_t *pool,
+                             zt_probe_info_t *probe,
+                             uint64_t *trampoline_addr_out) {
     int slot;
 
     if (session == NULL || pool == NULL || probe == NULL || trampoline_addr_out == NULL) {
         return -1;
     }
 
-    if (probe->trampoline_slot >= 0 &&
-        probe->trampoline_slot < ZT_TRAMPOLINE_POOL_SLOTS &&
+    if (zt_trampoline_pool_slot_valid(probe->trampoline_slot) &&
         pool->remote_addr != 0) {
         pool->slot_used[probe->trampoline_slot] = 1;
         probe->trampoline_addr = zt_trampoline_pool_slot_addr(pool, probe->trampoline_slot);
@@ -101,13 +104,13 @@ int zt_trampoline_pool_alloc(zt_injector_session_t *session,
 }
 
 void zt_trampoline_pool_release(zt_injector_session_t *session,
-                           zt_trampoline_pool_t *pool,
-                           zt_probe_info_t *probe) {
+                                zt_trampoline_pool_t *pool,
+                                zt_probe_info_t *probe) {
     if (session == NULL || pool == NULL || probe == NULL) {
         return;
     }
 
-    if (probe->trampoline_slot < 0 || probe->trampoline_slot >= ZT_TRAMPOLINE_POOL_SLOTS) {
+    if (!zt_trampoline_pool_slot_valid(probe->trampoline_slot)) {
         return;
     }
 

@@ -15,6 +15,7 @@
 enum {
     ZT_AARCH64_INSN_SIZE = 4,
     ZT_AARCH64_PATCH_LEN = 16,
+    ZT_AARCH64_REMOTE_SYSCALL_CODE_SIZE = 8,
     ZT_AARCH64_REMOTE_CALL_CODE_SIZE = 24,
 };
 
@@ -120,7 +121,7 @@ static int zt_build_syscall_stub(uint8_t *stub_code,
                                  const uint8_t *saved_code) {
     (void)saved_code;
 
-    if (stub_size != 8) {
+    if (stub_size != ZT_AARCH64_REMOTE_SYSCALL_CODE_SIZE) {
         return -1;
     }
 
@@ -232,7 +233,7 @@ int zt_arch_remote_syscall6(pid_t pid,
 
     return zt_arch_execute_syscall6(pid,
                                     &kRemoteExecOps,
-                                    8,
+                                    ZT_AARCH64_REMOTE_SYSCALL_CODE_SIZE,
                                     zt_remote_stub_pc,
                                     zt_prepare_syscall_regs,
                                     zt_build_syscall_stub,

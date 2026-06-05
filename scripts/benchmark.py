@@ -147,28 +147,35 @@ def sudo_is_available() -> bool:
     return proc.returncode == 0
 
 
+def skip_uprobe(reason: str) -> tuple[None, str]:
+    print("[uprobe] Skipping kernel uprobe benchmark...")
+    print(f"  - {reason}")
+    return None, reason
+
+
 def read_process_until(proc: subprocess.Popen, marker: str, timeout: float = 30.0) -> str:
     fd = proc.stdout.fileno()
     buffer = bytearray()
-    selector = selectors.DefaultSelector()
-    selector.register(fd, selectors.EVENT_READ)
     end_time = time.monotonic() + timeout
     marker_bytes = marker.encode("utf-8")
 
-    while time.monotonic() < end_time:
-        for key, _ in selector.select(timeout=0.2):
-            chunk = os.read(key.fd, 4096)
-            if not chunk:
+    with selectors.DefaultSelector() as selector:
+        selector.register(fd, selectors.EVENT_READ)
+
+        while time.monotonic() < end_time:
+            for key, _ in selector.select(timeout=0.2):
+                chunk = os.read(key.fd, 4096)
+                if not chunk:
+                    text = buffer.decode("utf-8", errors="replace")
+                    raise RuntimeError(f"process exited before marker {marker!r}:\n{text}")
+
+                buffer.extend(chunk)
+                if marker_bytes in buffer:
+                    return buffer.decode("utf-8", errors="replace")
+
+            if proc.poll() is not None:
                 text = buffer.decode("utf-8", errors="replace")
-                raise RuntimeError(f"process exited before marker {marker!r}:\n{text}")
-
-            buffer.extend(chunk)
-            if marker_bytes in buffer:
-                return buffer.decode("utf-8", errors="replace")
-
-        if proc.poll() is not None:
-            text = buffer.decode("utf-8", errors="replace")
-            raise RuntimeError(f"process exited with code {proc.returncode} before marker {marker!r}:\n{text}")
+                raise RuntimeError(f"process exited with code {proc.returncode} before marker {marker!r}:\n{text}")
 
     text = buffer.decode("utf-8", errors="replace")
     raise RuntimeError(f"timeout waiting for marker {marker!r}:\n{text}")
@@ -443,25 +450,20 @@ def main() -> int:
 
     uprobe_skip_reason = None
     if shutil.which("bpftrace") is None:
-        uprobe_ns = None
-        uprobe_skip_reason = "kernel uprobe benchmark skipped: bpftrace is not installed"
-        print("[uprobe] Skipping kernel uprobe benchmark...")
-        print(f"  - {uprobe_skip_reason}")
+        uprobe_ns, uprobe_skip_reason = skip_uprobe(
+            "kernel uprobe benchmark skipped: bpftrace is not installed"
+        )
     elif not sudo_is_available():
-        uprobe_ns = None
-        uprobe_skip_reason = "kernel uprobe benchmark skipped: sudo is not available non-interactively"
-        print("[uprobe] Skipping kernel uprobe benchmark...")
-        print(f"  - {uprobe_skip_reason}")
+        uprobe_ns, uprobe_skip_reason = skip_uprobe(
+            "kernel uprobe benchmark skipped: sudo is not available non-interactively"
+        )
     else:
         uprobe_events_path = find_uprobe_events_path()
         if uprobe_events_path is None:
-            uprobe_ns = None
-            uprobe_skip_reason = (
+            uprobe_ns, uprobe_skip_reason = skip_uprobe(
                 "kernel uprobe benchmark unsupported: "
                 "no uprobe_events interface under /sys/kernel/tracing or /sys/kernel/debug/tracing"
             )
-            print("[uprobe] Skipping kernel uprobe benchmark...")
-            print(f"  - {uprobe_skip_reason}")
         else:
             print(f"  - detected uprobe_events at {uprobe_events_path}")
             uprobe_ns = [

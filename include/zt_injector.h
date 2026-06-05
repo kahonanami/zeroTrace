@@ -67,6 +67,7 @@ int zt_injector_interrupt_all(zt_injector_session_t *session);
 int zt_injector_continue_all(zt_injector_session_t *session);
 int zt_injector_poll_events(zt_injector_session_t *session, int *target_exited_out);
 int zt_process_is_exited(pid_t pid);
+int zt_remote_addr_is_mapped(pid_t pid, uint64_t addr);
 int zt_find_remote_symbol_addr(pid_t pid,
                                const char *module_path,
                                const char *symbol_name,

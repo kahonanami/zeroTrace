@@ -3,7 +3,6 @@
 #include <string.h>
 #include <stdbool.h>
 #include <errno.h>
-#include <signal.h>
 #include <limits.h>
 #include <stdint.h>
 #include <time.h>
@@ -12,7 +11,6 @@
 #include <readline/readline.h>
 #include <readline/history.h>
 
-#include "zt_cli.h"
 #include "zt_filter.h"
 #include "zt_injector.h"
 #include "zt_trace_runner.h"
@@ -30,11 +28,13 @@ static int cmd_untrace(char *args);
 static int cmd_info(char *args);
 static int cmd_continue(char *args);
 
-static struct {
+typedef struct {
     const char *name;
     const char *description;
     int (*handler)(char *);
-} cmd_table[] = {
+} zt_cli_command_t;
+
+static const zt_cli_command_t cmd_table[] = {
     {"help", "Show help message", cmd_help},
     {"exit", "Exit the CLI", cmd_exit},
     {"quit", "Exit the CLI", cmd_exit},
@@ -48,6 +48,16 @@ static struct {
     {"untrace", "Remove a probe: untrace <symbol|id>", cmd_untrace},
     {"info", "Show info: info target | info probes", cmd_info},
     {"continue", "Continue the stopped target process", cmd_continue},
+};
+
+static const char kTraceUsage[] = "Usage: trace <symbol> [if <expr>]";
+static const char kUpdateUsage[] =
+    "Usage: update <symbol|id> if <expr> | clear | call <symbol|clear> [arg0|0x...]";
+static const char kUpdateCallUsage[] =
+    "Usage: update <symbol|id> call <symbol|clear> [arg0|0x...]";
+
+enum {
+    ZT_CLI_COMMAND_COUNT = sizeof(cmd_table) / sizeof(cmd_table[0]),
 };
 
 static zt_injector_session_t g_cli_session;
@@ -105,16 +115,23 @@ static zt_probe_info_t *zt_cli_find_probe(char *target, uint64_t *probe_id_out) 
 
 static int zt_cli_parse_call_arg(const char *text, zt_call_action_arg_t *arg_out) {
     char *endptr;
+    unsigned long entry_arg;
     unsigned long long value;
 
     if (text == NULL || arg_out == NULL) {
         return -1;
     }
 
-    if (strncmp(text, "arg", 3) == 0 && text[3] >= '0' && text[3] <= '5' && text[4] == '\0') {
-        arg_out->kind = ZT_CALL_ACTION_ARG_ENTRY_ARG;
-        arg_out->value = (uint64_t)(text[3] - '0');
-        return 0;
+    if (strncmp(text, "arg", 3) == 0) {
+        errno = 0;
+        entry_arg = strtoul(text + 3, &endptr, 10);
+        if (errno == 0 && text + 3 != endptr && *endptr == '\0' &&
+            entry_arg < ZT_TRACE_GP_ARG_COUNT) {
+            arg_out->kind = ZT_CALL_ACTION_ARG_ENTRY_ARG;
+            arg_out->value = (uint64_t)entry_arg;
+            return 0;
+        }
+        return -1;
     }
 
     errno = 0;
@@ -252,7 +269,7 @@ static void zt_cli_print_log_updates(void) {
         fputs(line, stdout);
     }
 
-    offset = ftell(fp);
+    offset = ferror(fp) ? -1 : ftell(fp);
     fclose(fp);
 
     if (offset >= 0) {
@@ -299,13 +316,13 @@ static int cmd_help(char *args) {
 
     arg = zt_next_arg(args);
     if (arg == NULL) {
-        for (i = 0; i < sizeof(cmd_table) / sizeof(cmd_table[0]); ++i) {
+        for (i = 0; i < ZT_CLI_COMMAND_COUNT; ++i) {
             printf("  %-10s %s\n", cmd_table[i].name, cmd_table[i].description);
         }
         return 0;
     }
 
-    for (i = 0; i < sizeof(cmd_table) / sizeof(cmd_table[0]); ++i) {
+    for (i = 0; i < ZT_CLI_COMMAND_COUNT; ++i) {
         if (strcmp(arg, cmd_table[i].name) == 0) {
             printf("  %-10s %s\n", cmd_table[i].name, cmd_table[i].description);
             return 0;
@@ -392,12 +409,12 @@ static int cmd_trace(char *args) {
 
     symbol = zt_next_arg(args);
     if (symbol == NULL) {
-        printf("Usage: trace <symbol> [if <expr>]\n");
+        printf("%s\n", kTraceUsage);
         return 0;
     }
 
     if (zt_cli_parse_trace_filter(&filter) != 0) {
-        printf("Usage: trace <symbol> [if <expr>]\n");
+        printf("%s\n", kTraceUsage);
         printf("Example: trace write if arg0 == 1 && arg2 > 0\n");
         return 0;
     }
@@ -598,7 +615,7 @@ static int cmd_update(char *args) {
     target = zt_next_arg(args);
     mode = zt_next_arg(NULL);
     if (target == NULL || mode == NULL) {
-        printf("Usage: update <symbol|id> if <expr> | clear | call <symbol|clear> [arg0|0x...]\n");
+        printf("%s\n", kUpdateUsage);
         return 0;
     }
 
@@ -630,14 +647,14 @@ static int cmd_update(char *args) {
         char *arg_text;
 
         if (callee == NULL) {
-            printf("Usage: update <symbol|id> call <symbol|clear> [arg0|0x...]\n");
+            printf("%s\n", kUpdateCallUsage);
             return 0;
         }
 
         while ((arg_text = zt_next_arg(NULL)) != NULL) {
             if (arg_count >= ZT_CALL_ACTION_ARG_CAP ||
                 zt_cli_parse_call_arg(arg_text, &call_args[arg_count]) != 0) {
-                printf("Usage: update <symbol|id> call <symbol|clear> [arg0|0x...]\n");
+                printf("%s\n", kUpdateCallUsage);
                 return 0;
             }
             ++arg_count;
@@ -673,7 +690,7 @@ static int cmd_update(char *args) {
 
     if (strcmp(mode, "if") != 0 ||
         zt_probe_filter_compile(strtok(NULL, "\n"), &filter) != 0) {
-        printf("Usage: update <symbol|id> if <expr> | clear | call <symbol|clear> [arg0|0x...]\n");
+        printf("%s\n", kUpdateUsage);
         return 0;
     }
 
@@ -830,7 +847,7 @@ static int cmd_continue(char *args) {
     return 0;
 }
 
-void zt_cli_main_loop(void) {
+static void zt_cli_main_loop(void) {
     char *input;
 
     rl_event_hook = zt_cli_event_hook;
@@ -852,7 +869,7 @@ void zt_cli_main_loop(void) {
             args = NULL;
         }
 
-        for (i = 0; i < sizeof(cmd_table) / sizeof(cmd_table[0]); ++i) {
+        for (i = 0; i < ZT_CLI_COMMAND_COUNT; ++i) {
             if (strcmp(cmd, cmd_table[i].name) == 0) {
                 if (cmd_table[i].handler(args) != 0) {
                     return;
@@ -861,7 +878,7 @@ void zt_cli_main_loop(void) {
             }
         }
 
-        if (i == sizeof(cmd_table) / sizeof(cmd_table[0])) {
+        if (i == ZT_CLI_COMMAND_COUNT) {
             printf("Unknown command: %s\n", cmd);
         }
     }

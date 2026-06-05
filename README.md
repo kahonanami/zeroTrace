@@ -1,4 +1,4 @@
-# zeroTrace: A Lightweight Dynamic probe for User Space
+# zeroTrace: A Lightweight Dynamic Probe for User Space
 
 > proj40 题目要求见 [project-requirements.md](./docs/project-requirements.md)
 
@@ -45,22 +45,16 @@ make ARCH=aarch64
 make ARCH=aarch64 CC=aarch64-linux-gnu-gcc
 ```
 
-构建产物：
+主要构建产物：
 
 - `bin/ztrace`
   主程序，进入交互式 CLI
 - `bin/libzt_payload.so`
   注入到目标进程中的 payload
-- `bin/tests/test_libc_io_loop`
-  自动化测试使用的 libc/POSIX 动态库函数目标程序
 - `bin/tests/test_loop`
-  唯一保留的手动验证目标程序
-- `bin/tests/test_benchmark_target`
-  benchmark 目标程序
-- `bin/tests/test_benchmark_runner`
-  benchmark 使用的非交互 trace runner
-- `bin/tests/test_benchmark_latency`
-  benchmark 使用的安装/清理延迟测试 runner
+  手动验证目标程序
+
+其余 `bin/tests/` 产物由 `make test` 和 `make benchmark` 自动调用，详细覆盖关系见 [docs/evaluation.md](./docs/evaluation.md)。
 
 清理构建产物：
 
@@ -306,7 +300,7 @@ benchmark 目标函数是 `bench_getpid()`，它是测试程序中的一个 `noi
 - `benchmark/latency.out`
 - `benchmark/report.txt`
 
-一组最新的 x86_64 benchmark 结果如下。本次运行环境没有非交互 sudo 权限，因此 kernel uprobe 项被脚本自动跳过：
+下面是一组已记录的 x86_64 benchmark 参考结果。该次运行环境没有非交互 sudo 权限，因此 kernel uprobe 项被脚本自动跳过：
 
 ```text
 iterations            : 1000000
@@ -338,18 +332,10 @@ uninstall latency avg : 39889 ns (0.040 ms) over 1000 rounds
 
 ## 当前完成情况
 
-- [x] 增强信号安全测试，覆盖目标进程收到异步信号时的 trace 行为
-- [x] 补充浮点寄存器 / SIMD 上下文保存与恢复验证
-- [x] 优化 `zt_trace_poll()` 的轮询策略，使用 `process_vm_readv` 非暂停读取 trace buffer
-- [x] 支持 ARM 架构
-- [x] 支持线程组级 attach / interrupt / continue / detach，并在运行态刷新新线程
-- [x] 强化线程组 stop/continue 收敛逻辑，覆盖运行中新线程创建窗口
-- [x] 补齐 patch 前 PC 检查，避免线程停在即将被改写的函数入口字节内
-- [x] 实现 A4：probe 命中时在目标进程内主动调用指定函数，支持最多 6 个整型参数，并在日志中记录调用参数和返回结果
-- [x] 完善 A5：支持 filter、probe 内 call action、enable/disable 状态的运行时热更新，并通过分阶段与 live 自动化测试验证
-- [x] 修复目标退出窗口下 `zt_trace_poll()` 把正常退出误判为远程读失败的问题
-- [x] 补充 F4 maps-diff 自动化测试，验证 trampoline pool 释放和函数入口字节恢复
-- [x] 优化 payload 和 trace buffer 消费热路径，当前 x86_64 benchmark 额外开销约 `163 ns/call`
+- 基础功能 F1-F7 已实现，并通过自动化测试覆盖 probe 生命周期、参数/返回值、多 probe、多线程、信号安全和资源清理。
+- 进阶功能 A1-A5 已实现，包括 x86_64/aarch64 后端、条件探针、perf/ftrace 风格日志、probe 内 call action 和行为热更新。
+- 当前 x86_64 benchmark 额外开销约 `163 ns/call`，install/uninstall 延迟低于题目指标。
+- 详细覆盖矩阵、实验步骤和剩余验证建议见 [docs/evaluation.md](./docs/evaluation.md)。
 
 ## 文档
 

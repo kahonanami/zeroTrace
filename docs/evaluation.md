@@ -22,9 +22,16 @@ make test
 make benchmark
 ```
 
-当前 x86_64 本机最近一次完整回归结论：
+静态分析：
+
+```bash
+scan-build --status-bugs make clean all
+```
+
+当前已记录的 x86_64 完整回归结论：
 
 - `make test`：通过
+- `scan-build --status-bugs make clean all`：No bugs found
 - A5 热更新压力：`test_probe_hot_update` 100 轮通过，单次回归包含 staged 更新和 live call action 更新
 - 目标退出窗口压力：`ZT_EXIT_RACE_ROUNDS=1000 ./bin/tests/test_poll_exit_race` 通过
 - `make benchmark`：5 轮重复实验中 zeroTrace 额外开销均值 `162.81 ns/call`
@@ -347,6 +354,7 @@ python3 scripts/check_arch_config.py
 - 两个后端均有独立 patch/trampoline/stub 代码。
 - `scripts/check_arch_config.py` 在 x86_64 本机上同时检查 `ARCH=x86_64` 和 `ARCH=aarch64` 的 Makefile 展开结果，确认后端 C 文件、stub 汇编和架构专用 trampoline 测试集合没有选错。
 - x86_64 本机已通过完整 `make test`。
+- aarch64 runtime 回归需要在 ARM64 机器上运行 `make ARCH=aarch64 test`；本机脚本只证明配置选择正确，不伪造跨架构运行结果。
 
 当前结论：
 
@@ -499,7 +507,7 @@ make benchmark
 - uprobe：在具备 `bpftrace` 和非交互 sudo 权限时，用 kernel uprobe 采集同一函数。
 - lifecycle latency：对同一 probe 执行 `1,000` 轮 install/uninstall。
 
-最近一次 x86_64 结果：
+已记录的 x86_64 参考结果：
 
 ```text
 iterations            : 1000000
@@ -536,13 +544,13 @@ uninstall latency avg : 39889 ns (0.040 ms) over 1000 rounds
 | F5 | 探针动态开关 | `disable` 恢复入口 patch 但保留 probe 元数据和 trampoline slot；`enable` 复用 slot 重装 patch | `test_thread_safety` 运行中 12 轮 enable/disable；`test_probe_hot_update` disabled 阶段零泄漏 |
 | F6 | 同一进程至少 16 个并发探针 | probe 表容量 32，trampoline pool 按 slot 管理 | `test_probe_lifecycle` 同进程安装 `probe_fn01..probe_fn16` 并校验日志 |
 | F7 | 多线程安全，不崩溃不死锁 | 线程组级 seize/interrupt/continue/detach；运行态刷新新线程；TLS shadow stack 按线程配对 return | `test_thread_safety`、`test_thread_group_control` |
-| A1 | x86_64 + ARM64 多架构 | Makefile 按 `ARCH` 选择 ISA 后端；两套 patch/trampoline/stub 实现 | x86_64 `make test`；`scripts/check_arch_config.py` 覆盖 `ARCH=x86_64/aarch64`；aarch64 trampoline builder 测试 |
+| A1 | x86_64 + ARM64 多架构 | Makefile 按 `ARCH` 选择 ISA 后端；两套 patch/trampoline/stub 实现 | x86_64 `make test`；`scripts/check_arch_config.py` 覆盖 `ARCH=x86_64/aarch64` 配置选择；ARM64 机器上通过 `make ARCH=aarch64 test` 运行 aarch64 trampoline/runtime 回归 |
 | A2 | 条件探针 | `zt_filter` 解析 `if` 后完整布尔表达式，tracer 侧按 entry event 过滤并同步吞掉 return | `test_probe_lifecycle` conditional/filter update 子测试 |
 | A3 | perf/ftrace 事件流合流 | 日志输出 `comm-pid/tid [cpu] timestamp: ztrace:event`，timestamp 使用目标命中时 `CLOCK_MONOTONIC` | `scripts/merge_trace_events.py --self-test` 由 `make test` 自动执行 |
 | A4 | 探针内调用目标进程函数 | tracer 写远程 `call_actions` 表；payload entry handler 在目标进程内调用 callee 并写 `ZT_TRACE_EVENT_CALL` | `test_probe_lifecycle` 无参 / 带参 / slot 碰撞测试；`test_probe_hot_update` call action 热切换 |
 | A5 | 探针热更新 | filter、call action、enable/disable 状态均可在目标进程运行中更新 | `test_probe_hot_update` 五阶段 staged 测试和 live call action 子测试 |
 
-## 6. 剩余实验建议
+## 6. 附加实验建议
 
 - 最终提交前，在目标 ARM64 机器上重新记录同等粒度的 `make test` 和 `make benchmark` 输出。
 - 若需要更严格的 A3 证明，可在具备 perf/ftrace 权限的环境下采集真实内核事件，并用 `scripts/merge_trace_events.py` 生成合流报告。

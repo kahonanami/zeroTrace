@@ -16,6 +16,46 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+ARCH_CHECKS = {
+    "x86_64": {
+        "present": {
+            "ARCH_SRC_C": [
+                "src/isa/x86_64/arch.c",
+                "src/isa/x86_64/trampoline_manager.c",
+            ],
+            "ARCH_SRC_S": ["src/isa/x86_64/stub.S"],
+            "TEST_C": ["src/test/test_trampoline_builder.c"],
+        },
+        "absent": {
+            "ARCH_SRC_C": [
+                "src/isa/aarch64/arch.c",
+                "src/isa/aarch64/trampoline_manager.c",
+            ],
+            "ARCH_SRC_S": ["src/isa/aarch64/stub.S"],
+            "TEST_C": ["src/test/test_trampoline_builder_aarch64.c"],
+        },
+    },
+    "aarch64": {
+        "present": {
+            "ARCH_SRC_C": [
+                "src/isa/aarch64/arch.c",
+                "src/isa/aarch64/trampoline_manager.c",
+            ],
+            "ARCH_SRC_S": ["src/isa/aarch64/stub.S"],
+            "TEST_C": ["src/test/test_trampoline_builder_aarch64.c"],
+        },
+        "absent": {
+            "ARCH_SRC_C": [
+                "src/isa/x86_64/arch.c",
+                "src/isa/x86_64/trampoline_manager.c",
+            ],
+            "ARCH_SRC_S": ["src/isa/x86_64/stub.S"],
+            "TEST_C": ["src/test/test_trampoline_builder.c"],
+        },
+    },
+}
+
+
 def read_arch_config(arch: str) -> dict[str, list[str]]:
     result = subprocess.run(
         ["make", "-s", "print-arch-config", f"ARCH={arch}"],
@@ -47,35 +87,22 @@ def require_absent(config: dict[str, list[str]], key: str, value: str) -> None:
         raise RuntimeError(f"{key} for ARCH={config.get('ARCH', ['?'])[0]} unexpectedly contains {value}")
 
 
-def check_x86_64() -> None:
-    config = read_arch_config("x86_64")
+def check_arch(arch: str) -> None:
+    config = read_arch_config(arch)
+    checks = ARCH_CHECKS[arch]
 
-    require_contains(config, "ARCH_SRC_C", "src/isa/x86_64/arch.c")
-    require_contains(config, "ARCH_SRC_C", "src/isa/x86_64/trampoline_manager.c")
-    require_contains(config, "ARCH_SRC_S", "src/isa/x86_64/zt_stub.S")
-    require_contains(config, "TEST_C", "src/test/test_trampoline_builder.c")
-    require_absent(config, "ARCH_SRC_C", "src/isa/aarch64/arch.c")
-    require_absent(config, "ARCH_SRC_C", "src/isa/aarch64/trampoline_manager.c")
-    require_absent(config, "ARCH_SRC_S", "src/isa/aarch64/stub.S")
-    require_absent(config, "TEST_C", "src/test/test_trampoline_builder_aarch64.c")
+    for key, values in checks["present"].items():
+        for value in values:
+            require_contains(config, key, value)
 
-
-def check_aarch64() -> None:
-    config = read_arch_config("aarch64")
-
-    require_contains(config, "ARCH_SRC_C", "src/isa/aarch64/arch.c")
-    require_contains(config, "ARCH_SRC_C", "src/isa/aarch64/trampoline_manager.c")
-    require_contains(config, "ARCH_SRC_S", "src/isa/aarch64/stub.S")
-    require_contains(config, "TEST_C", "src/test/test_trampoline_builder_aarch64.c")
-    require_absent(config, "ARCH_SRC_C", "src/isa/x86_64/arch.c")
-    require_absent(config, "ARCH_SRC_C", "src/isa/x86_64/trampoline_manager.c")
-    require_absent(config, "ARCH_SRC_S", "src/isa/x86_64/zt_stub.S")
-    require_absent(config, "TEST_C", "src/test/test_trampoline_builder.c")
+    for key, values in checks["absent"].items():
+        for value in values:
+            require_absent(config, key, value)
 
 
 def main() -> int:
-    check_x86_64()
-    check_aarch64()
+    for arch in ARCH_CHECKS:
+        check_arch(arch)
     print("arch config self-test passed")
     return 0
 
