@@ -399,6 +399,13 @@ static int zt_sig_type_is_numeric(zt_sig_type_t type) {
     }
 }
 
+static int zt_sig_param_is_numeric(const zt_func_sig_t *sig, int index) {
+    return sig != NULL &&
+           index >= 0 &&
+           index < sig->param_count &&
+           zt_sig_type_is_numeric(sig->params[index].type);
+}
+
 static int zt_sig_type_is_fp(zt_sig_type_t type) {
     return type == ZT_SIG_TYPE_FLOAT || type == ZT_SIG_TYPE_DOUBLE;
 }
@@ -484,15 +491,13 @@ static size_t zt_buffer_preview_len(const zt_func_sig_t *sig,
             return 0;
         }
 
-        if (param_index + 2 < sig->param_count &&
-            zt_sig_type_is_numeric(sig->params[param_index + 1].type) &&
-            zt_sig_type_is_numeric(sig->params[param_index + 2].type)) {
+        if (zt_sig_param_is_numeric(sig, param_index + 1) &&
+            zt_sig_param_is_numeric(sig, param_index + 2)) {
             next = zt_event_arg_value(args_event, param_index + 1);
             return zt_cap_preview_len((size_t)(ret_event->value0 * next));
         }
 
-        if (param_index + 1 < sig->param_count &&
-            zt_sig_type_is_numeric(sig->params[param_index + 1].type)) {
+        if (zt_sig_param_is_numeric(sig, param_index + 1)) {
             next = zt_event_arg_value(args_event, param_index + 1);
             return zt_cap_preview_len((size_t)((ret_event->value0 < next) ? ret_event->value0 : next));
         }
@@ -500,16 +505,14 @@ static size_t zt_buffer_preview_len(const zt_func_sig_t *sig,
         return zt_cap_preview_len((size_t)ret_event->value0);
     }
 
-    if (param_index + 2 < sig->param_count &&
-        zt_sig_type_is_numeric(sig->params[param_index + 1].type) &&
-        zt_sig_type_is_numeric(sig->params[param_index + 2].type)) {
+    if (zt_sig_param_is_numeric(sig, param_index + 1) &&
+        zt_sig_param_is_numeric(sig, param_index + 2)) {
         next = zt_event_arg_value(args_event, param_index + 1);
         next2 = zt_event_arg_value(args_event, param_index + 2);
         return zt_cap_preview_len((size_t)(next * next2));
     }
 
-    if (param_index + 1 < sig->param_count &&
-        zt_sig_type_is_numeric(sig->params[param_index + 1].type)) {
+    if (zt_sig_param_is_numeric(sig, param_index + 1)) {
         next = zt_event_arg_value(args_event, param_index + 1);
         return zt_cap_preview_len((size_t)next);
     }
@@ -775,14 +778,11 @@ static int zt_append_value(char *out,
         break;
     }
 
-    if (written < 0 || *offset + (size_t)written >= out_size) {
+    if (written < 0 || (size_t)written >= sizeof(text)) {
         return -1;
     }
 
-    memcpy(out + *offset, text, (size_t)written);
-    *offset += (size_t)written;
-    out[*offset] = '\0';
-    return 0;
+    return zt_append_raw(out, out_size, offset, text);
 }
 
 int zt_format_trace_event_with_sig(const zt_injector_session_t *session,
@@ -818,12 +818,9 @@ int zt_format_trace_event_with_sig(const zt_injector_session_t *session,
             uint64_t raw_value;
 
             if (i > 0) {
-                if (offset + 2 >= out_size) {
+                if (zt_append_raw(out, out_size, &offset, ", ") != 0) {
                     return -1;
                 }
-                memcpy(out + offset, ", ", 2);
-                offset += 2;
-                out[offset] = '\0';
             }
 
             if (zt_sig_type_is_fp(sig->params[i].type)) {
@@ -851,11 +848,10 @@ int zt_format_trace_event_with_sig(const zt_injector_session_t *session,
                                                preview_len,
                                                preview,
                                                sizeof(preview)) == 0) {
-                    written = snprintf(out + offset, out_size - offset, "=%s", preview);
-                    if (written < 0 || (size_t)written >= out_size - offset) {
+                    if (zt_append_raw(out, out_size, &offset, "=") != 0 ||
+                        zt_append_raw(out, out_size, &offset, preview) != 0) {
                         return -1;
                     }
-                    offset += (size_t)written;
                 }
             }
         }
@@ -871,13 +867,7 @@ int zt_format_trace_event_with_sig(const zt_injector_session_t *session,
             }
         }
 
-        if (offset + 2 >= out_size) {
-            return -1;
-        }
-        memcpy(out + offset, ")\n", 2);
-        offset += 2;
-        out[offset] = '\0';
-        return 0;
+        return zt_append_raw(out, out_size, &offset, ")\n");
     }
 
     if (event->event_type == ZT_TRACE_EVENT_RETURN) {
@@ -907,22 +897,16 @@ int zt_format_trace_event_with_sig(const zt_injector_session_t *session,
                                                preview_len,
                                                preview,
                                                sizeof(preview)) == 0) {
-                    written = snprintf(out + offset, out_size - offset, " %s", preview);
-                    if (written < 0 || (size_t)written >= out_size - offset) {
+                    if (zt_append_raw(out, out_size, &offset, " ") != 0 ||
+                        zt_append_raw(out, out_size, &offset, preview) != 0) {
                         return -1;
                     }
-                    offset += (size_t)written;
                 }
                 break;
             }
         }
 
-        if (offset + 1 >= out_size) {
-            return -1;
-        }
-        out[offset++] = '\n';
-        out[offset] = '\0';
-        return 0;
+        return zt_append_raw(out, out_size, &offset, "\n");
     }
 
     return -1;

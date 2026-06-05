@@ -33,6 +33,29 @@ static uint64_t zt_trampoline_pool_slot_addr(const zt_trampoline_pool_t *pool, i
     return pool->remote_addr + ((uint64_t)slot * ZT_TRAMPOLINE_POOL_SLOT_SIZE);
 }
 
+static int zt_trampoline_pool_assign_slot(zt_trampoline_pool_t *pool,
+                                          zt_probe_info_t *probe,
+                                          int slot,
+                                          uint64_t *trampoline_addr_out) {
+    uint64_t addr;
+
+    if (pool == NULL || probe == NULL || trampoline_addr_out == NULL ||
+        !zt_trampoline_pool_slot_valid(slot)) {
+        return -1;
+    }
+
+    addr = zt_trampoline_pool_slot_addr(pool, slot);
+    if (addr == 0) {
+        return -1;
+    }
+
+    pool->slot_used[slot] = 1;
+    probe->trampoline_slot = slot;
+    probe->trampoline_addr = addr;
+    *trampoline_addr_out = addr;
+    return 0;
+}
+
 static int zt_trampoline_pool_ensure(zt_injector_session_t *session, zt_trampoline_pool_t *pool) {
     if (session == NULL || pool == NULL) {
         return -1;
@@ -78,10 +101,10 @@ int zt_trampoline_pool_alloc(zt_injector_session_t *session,
 
     if (zt_trampoline_pool_slot_valid(probe->trampoline_slot) &&
         pool->remote_addr != 0) {
-        pool->slot_used[probe->trampoline_slot] = 1;
-        probe->trampoline_addr = zt_trampoline_pool_slot_addr(pool, probe->trampoline_slot);
-        *trampoline_addr_out = probe->trampoline_addr;
-        return 0;
+        return zt_trampoline_pool_assign_slot(pool,
+                                              probe,
+                                              probe->trampoline_slot,
+                                              trampoline_addr_out);
     }
 
     if (zt_trampoline_pool_ensure(session, pool) != 0) {
@@ -93,11 +116,7 @@ int zt_trampoline_pool_alloc(zt_injector_session_t *session,
             continue;
         }
 
-        pool->slot_used[slot] = 1;
-        probe->trampoline_slot = slot;
-        probe->trampoline_addr = zt_trampoline_pool_slot_addr(pool, slot);
-        *trampoline_addr_out = probe->trampoline_addr;
-        return 0;
+        return zt_trampoline_pool_assign_slot(pool, probe, slot, trampoline_addr_out);
     }
 
     return -1;
@@ -106,15 +125,18 @@ int zt_trampoline_pool_alloc(zt_injector_session_t *session,
 void zt_trampoline_pool_release(zt_injector_session_t *session,
                                 zt_trampoline_pool_t *pool,
                                 zt_probe_info_t *probe) {
+    int slot;
+
     if (session == NULL || pool == NULL || probe == NULL) {
         return;
     }
 
-    if (!zt_trampoline_pool_slot_valid(probe->trampoline_slot)) {
+    slot = probe->trampoline_slot;
+    if (!zt_trampoline_pool_slot_valid(slot)) {
         return;
     }
 
-    pool->slot_used[probe->trampoline_slot] = 0;
+    pool->slot_used[slot] = 0;
     probe->trampoline_slot = -1;
     probe->trampoline_addr = 0;
 

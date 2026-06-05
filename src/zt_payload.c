@@ -114,6 +114,18 @@ static void zt_commit_event_slot(zt_trace_event_t *slot, uint64_t commit_seq) {
     __atomic_store_n(&slot->committed_seq, commit_seq, __ATOMIC_RELEASE);
 }
 
+static inline void zt_init_event_header(zt_trace_event_t *event,
+                                        uint64_t probe_id,
+                                        uint64_t event_type,
+                                        uint64_t call_id) {
+    event->probe_id = probe_id;
+    event->event_type = event_type;
+    event->call_id = call_id;
+    event->timestamp_ns = zt_clock_monotonic_ns();
+    event->tid = zt_gettid_u64();
+    event->cpu_id = zt_getcpu_u64();
+}
+
 static int zt_copy_call_action_if_match(const zt_probe_call_action_t *action,
                                         uint64_t probe_id,
                                         zt_probe_call_action_t *action_out) {
@@ -203,9 +215,7 @@ static void zt_resolve_call_args(const zt_probe_call_action_t *action,
                                  uint64_t resolved_args[ZT_CALL_ACTION_ARG_CAP]) {
     size_t i;
 
-    for (i = 0; i < ZT_CALL_ACTION_ARG_CAP; ++i) {
-        resolved_args[i] = 0;
-    }
+    memset(resolved_args, 0, sizeof(uint64_t) * ZT_CALL_ACTION_ARG_CAP);
 
     if (action == NULL || context == NULL) {
         return;
@@ -280,12 +290,7 @@ static void zt_run_call_action(const ctx_t *context, uint64_t call_id) {
         return;
     }
 
-    event->probe_id = context->func_id;
-    event->event_type = ZT_TRACE_EVENT_CALL;
-    event->call_id = call_id;
-    event->timestamp_ns = zt_clock_monotonic_ns();
-    event->tid = zt_gettid_u64();
-    event->cpu_id = zt_getcpu_u64();
+    zt_init_event_header(event, context->func_id, ZT_TRACE_EVENT_CALL, call_id);
     event->args[0] = action.callee_addr;
     event->args[1] = retval;
     event->call_arg_count = action.arg_count;
@@ -333,12 +338,7 @@ void zt_handle_entry(ctx_t *context, const void *fp_state_area) {
         return;
     }
 
-    event->probe_id = context->func_id;
-    event->event_type = ZT_TRACE_EVENT_ENTRY;
-    event->call_id = call_id;
-    event->timestamp_ns = zt_clock_monotonic_ns();
-    event->tid = zt_gettid_u64();
-    event->cpu_id = zt_getcpu_u64();
+    zt_init_event_header(event, context->func_id, ZT_TRACE_EVENT_ENTRY, call_id);
     event->args[0] = context->gp_arg0;
     event->args[1] = context->gp_arg1;
     event->args[2] = context->gp_arg2;
@@ -377,12 +377,7 @@ void zt_handle_return(ctx_t *context, const void *fp_state_area) {
         return;
     }
 
-    event->probe_id = context->func_id;
-    event->event_type = ZT_TRACE_EVENT_RETURN;
-    event->call_id = call_id;
-    event->timestamp_ns = zt_clock_monotonic_ns();
-    event->tid = zt_gettid_u64();
-    event->cpu_id = zt_getcpu_u64();
+    zt_init_event_header(event, context->func_id, ZT_TRACE_EVENT_RETURN, call_id);
     event->args[0] = context->gp_retval0;
     event->fp_args[0] = zt_fp_state_vec_low64(fp_state_area, 0);
 

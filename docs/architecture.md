@@ -1,6 +1,6 @@
 # zeroTrace Architecture
 
-`zeroTrace` 现在的主流程是：
+`zeroTrace` 的主流程如下：
 
 1. CLI 通过 `ptrace` 附加目标进程
 2. 通过远程 `dlopen` 注入 `libzt_payload.so`
@@ -69,7 +69,7 @@ br  x16
 .quad trampoline_addr
 ```
 
-ARM64 指令固定 4 字节，因此实际覆盖长度会按完整指令累计，并保持 4 字节对齐。
+aarch64 指令固定 4 字节，因此实际覆盖长度会按完整指令累计，并保持 4 字节对齐。
 
 ### 1.3 `zt_trampoline_pool` 与 `trampoline_manager`（trampoline 管理）
 
@@ -302,7 +302,7 @@ attach <pid>
 - 停止后比较 `/proc/<pid>/task` 与 injector 跟踪表，要求当前 task 数不超过 tracked TID 数
 - 停止期间 drain 目标 reporter pipe，并在等待窗口内要求没有任何新心跳
 - 恢复后要求 reporter 心跳重新出现
-- 最近一次回归输出为 `rounds=80 task_max=31 tracked_max=31 resume_rounds=80`
+- 已记录回归输出为 `rounds=80 task_max=31 tracked_max=31 resume_rounds=80`
 
 ### 2.2 trace
 
@@ -391,7 +391,7 @@ trace probe_fn01 if arg0 >= 10
 
 - `src/zt_trampoline_pool.c`
 
-ARM64 后端当前支持：
+aarch64 后端当前支持：
 
 - 通过 `PTRACE_GETREGSET` / `PTRACE_SETREGSET` 读写 `struct user_pt_regs`
 - 用 `x0 ... x5` / `x8` 执行远程 syscall
@@ -400,7 +400,7 @@ ARM64 后端当前支持：
 - 用 `x30/lr` 做返回地址劫持，返回时进入 `exit_stub`
 - 把 `x0 ... x5` 和 `d0 ... d7` 映射到统一的 `args[]` / `fp_args[]` 事件字段
 
-ARM64 trampoline builder 当前已支持：
+aarch64 trampoline builder 当前已支持：
 
 - 普通非 PC-relative 指令原样复制
 - `adr/adrp`
@@ -433,7 +433,7 @@ zt_trace_poll()
 10. 如果远程读在目标退出窗口失败，则通过 `kill(pid, 0)`、`/proc/<pid>/stat` 中的 zombie/dead 状态、共享 trace buffer 是否仍出现在 `/proc/<pid>/maps` 中，以及一个短暂确认窗口判断是否属于正常退出；确认退出后关闭 active trace，而不是把它当作 trace 错误
 11. 如果刚刚已经观测到目标退出，后续重复调用 `zt_trace_poll()` 返回完成态，避免调用方在边界上多 poll 一次时把正常退出误报为失败
 
-当前日志格式采用接近 `perf script` / `ftrace` 的事件流风格，包含：
+当前日志格式采用便于合流分析的 `perf script` / `ftrace` 风格事件流格式，包含：
 
 - `comm-pid/tid`
 - `cpu id`

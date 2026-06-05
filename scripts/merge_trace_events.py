@@ -24,11 +24,11 @@ from pathlib import Path
 
 
 TRACE_LINE_RE = re.compile(
-    r"^(?P<prefix>.*?\[(?P<cpu>\d+)\])"
+    r"^.*?\[\d+\]"
     r"\s+"
-    r"(?:(?P<flags>\S+)\s+)?"
+    r"(?:\S+\s+)?"
     r"(?P<timestamp>\d+\.\d+):"
-    r"(?P<body>.*)$"
+    r".*$"
 )
 
 

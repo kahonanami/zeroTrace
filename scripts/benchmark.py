@@ -49,27 +49,40 @@ def stdev_value(values: list[float]) -> float:
     return statistics.stdev(values) if len(values) > 1 else 0.0
 
 
-def format_float_stats(prefix: str, values: list[float], unit: str = "") -> str:
+def format_stats_block(prefix: str,
+                       mean_text: str,
+                       min_text: str,
+                       max_text: str,
+                       stdev_text: str,
+                       unit: str = "") -> str:
     suffix = f" {unit}" if unit else ""
 
     return (
-        f"{prefix} mean : {mean_value(values):.2f}{suffix}\n"
-        f"{prefix} min  : {min(values):.2f}{suffix}\n"
-        f"{prefix} max  : {max(values):.2f}{suffix}\n"
-        f"{prefix} stdev: {stdev_value(values):.2f}{suffix}\n"
+        f"{prefix} mean : {mean_text}{suffix}\n"
+        f"{prefix} min  : {min_text}{suffix}\n"
+        f"{prefix} max  : {max_text}{suffix}\n"
+        f"{prefix} stdev: {stdev_text}{suffix}\n"
     )
+
+
+def format_float_stats(prefix: str, values: list[float], unit: str = "") -> str:
+    return format_stats_block(prefix,
+                              f"{mean_value(values):.2f}",
+                              f"{min(values):.2f}",
+                              f"{max(values):.2f}",
+                              f"{stdev_value(values):.2f}",
+                              unit)
 
 
 def format_int_stats(prefix: str, values: list[int], unit: str = "") -> str:
     float_values = [float(v) for v in values]
-    suffix = f" {unit}" if unit else ""
 
-    return (
-        f"{prefix} mean : {mean_value(float_values):.0f}{suffix}\n"
-        f"{prefix} min  : {min(values)}{suffix}\n"
-        f"{prefix} max  : {max(values)}{suffix}\n"
-        f"{prefix} stdev: {stdev_value(float_values):.0f}{suffix}\n"
-    )
+    return format_stats_block(prefix,
+                              f"{mean_value(float_values):.0f}",
+                              f"{min(values)}",
+                              f"{max(values)}",
+                              f"{stdev_value(float_values):.0f}",
+                              unit)
 
 
 def find_uprobe_events_path() -> Path | None:
@@ -123,6 +136,20 @@ def run_and_capture(cmd, env=None) -> str:
     return proc.stdout
 
 
+def start_waiting_target() -> subprocess.Popen:
+    env = os.environ.copy()
+    env["ZT_BENCH_WAIT_SIGUSR1"] = "1"
+
+    return subprocess.Popen(
+        [str(TARGET), str(ITERATIONS)],
+        cwd=ROOT_DIR,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+
+
 def wait_for_target_result(proc: subprocess.Popen, timeout: float = 120.0) -> str:
     try:
         out, _ = proc.communicate(timeout=timeout)
@@ -135,6 +162,18 @@ def wait_for_target_result(proc: subprocess.Popen, timeout: float = 120.0) -> st
         raise RuntimeError(f"benchmark target failed with code {proc.returncode}:\n{out}")
 
     return out
+
+
+def stop_process(proc: subprocess.Popen, sig: signal.Signals = signal.SIGTERM, timeout: float = 5.0) -> None:
+    if proc.poll() is not None:
+        return
+
+    proc.send_signal(sig)
+    try:
+        proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
 
 
 def sudo_is_available() -> bool:
@@ -209,16 +248,7 @@ def run_baseline(round_index: int) -> int:
 
 def run_uprobe(round_index: int) -> int:
     print(f"[uprobe {round_index}/{BENCH_REPEATS}] Running kernel uprobe benchmark...")
-    env = os.environ.copy()
-    env["ZT_BENCH_WAIT_SIGUSR1"] = "1"
-    target_proc = subprocess.Popen(
-        [str(TARGET), str(ITERATIONS)],
-        cwd=ROOT_DIR,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+    target_proc = start_waiting_target()
 
     bpftrace_cmd = [
         "sudo",
@@ -238,11 +268,15 @@ def run_uprobe(round_index: int) -> int:
         bufsize=1,
     )
 
-    time.sleep(1.0)
-    os.kill(target_proc.pid, signal.SIGUSR1)
-    target_output = wait_for_target_result(target_proc)
-    bpftrace_proc.send_signal(signal.SIGINT)
-    bpftrace_output, _ = bpftrace_proc.communicate(timeout=5.0)
+    try:
+        time.sleep(1.0)
+        os.kill(target_proc.pid, signal.SIGUSR1)
+        target_output = wait_for_target_result(target_proc)
+        bpftrace_proc.send_signal(signal.SIGINT)
+        bpftrace_output, _ = bpftrace_proc.communicate(timeout=5.0)
+    finally:
+        stop_process(target_proc)
+        stop_process(bpftrace_proc, sig=signal.SIGINT)
 
     if bpftrace_proc.returncode not in (0, 130):
         raise RuntimeError(
@@ -269,16 +303,7 @@ def run_uprobe(round_index: int) -> int:
 
 def run_ztrace(round_index: int) -> int:
     print(f"[ztrace {round_index}/{BENCH_REPEATS}] Running zeroTrace benchmark...")
-    env = os.environ.copy()
-    env["ZT_BENCH_WAIT_SIGUSR1"] = "1"
-    target_proc = subprocess.Popen(
-        [str(TARGET), str(ITERATIONS)],
-        cwd=ROOT_DIR,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+    target_proc = start_waiting_target()
 
     runner_proc = subprocess.Popen(
         [str(BENCH_RUNNER), str(target_proc.pid), "bench_getpid", str(ZTRACE_LOG_OUT)],
@@ -288,11 +313,15 @@ def run_ztrace(round_index: int) -> int:
         text=True,
     )
 
-    print("  - waiting for benchmark runner to become ready...")
-    runner_output = read_process_until(runner_proc, "READY pid=", timeout=20.0)
-    os.kill(target_proc.pid, signal.SIGUSR1)
-    target_output = wait_for_target_result(target_proc, timeout=20.0)
-    runner_output += wait_for_output(runner_proc, "DONE pid=", timeout=20.0)
+    try:
+        print("  - waiting for benchmark runner to become ready...")
+        runner_output = read_process_until(runner_proc, "READY pid=", timeout=20.0)
+        os.kill(target_proc.pid, signal.SIGUSR1)
+        target_output = wait_for_target_result(target_proc, timeout=20.0)
+        runner_output += wait_for_output(runner_proc, "DONE pid=", timeout=20.0)
+    finally:
+        stop_process(target_proc)
+        stop_process(runner_proc)
 
     append_round_output(ZTRACE_RUNNER_OUT, round_index, runner_output)
     append_round_output(ZTRACE_OUT, round_index, target_output)
@@ -303,32 +332,19 @@ def run_ztrace(round_index: int) -> int:
 
 def run_latency() -> tuple[int, int]:
     print("[latency] Running install/uninstall latency benchmark...")
-    env = os.environ.copy()
-    env["ZT_BENCH_WAIT_SIGUSR1"] = "1"
-    target_proc = subprocess.Popen(
-        [str(TARGET), str(ITERATIONS)],
-        cwd=ROOT_DIR,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+    target_proc = start_waiting_target()
 
-    latency_proc = subprocess.run(
-        [str(LATENCY_RUNNER), str(target_proc.pid), "bench_getpid", str(ZTRACE_LOG_OUT), str(LATENCY_ROUNDS)],
-        cwd=ROOT_DIR,
-        check=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-
-    target_proc.send_signal(signal.SIGTERM)
     try:
-        target_proc.communicate(timeout=5.0)
-    except subprocess.TimeoutExpired:
-        target_proc.kill()
-        target_proc.communicate()
+        latency_proc = subprocess.run(
+            [str(LATENCY_RUNNER), str(target_proc.pid), "bench_getpid", str(ZTRACE_LOG_OUT), str(LATENCY_ROUNDS)],
+            cwd=ROOT_DIR,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+    finally:
+        stop_process(target_proc)
 
     write_text(LATENCY_OUT, latency_proc.stdout)
     install_ns, uninstall_ns = extract_latency_ns(latency_proc.stdout)
@@ -450,23 +466,23 @@ def main() -> int:
 
     uprobe_skip_reason = None
     if shutil.which("bpftrace") is None:
-        uprobe_ns, uprobe_skip_reason = skip_uprobe(
+        uprobe_runs, uprobe_skip_reason = skip_uprobe(
             "kernel uprobe benchmark skipped: bpftrace is not installed"
         )
     elif not sudo_is_available():
-        uprobe_ns, uprobe_skip_reason = skip_uprobe(
+        uprobe_runs, uprobe_skip_reason = skip_uprobe(
             "kernel uprobe benchmark skipped: sudo is not available non-interactively"
         )
     else:
         uprobe_events_path = find_uprobe_events_path()
         if uprobe_events_path is None:
-            uprobe_ns, uprobe_skip_reason = skip_uprobe(
+            uprobe_runs, uprobe_skip_reason = skip_uprobe(
                 "kernel uprobe benchmark unsupported: "
                 "no uprobe_events interface under /sys/kernel/tracing or /sys/kernel/debug/tracing"
             )
         else:
             print(f"  - detected uprobe_events at {uprobe_events_path}")
-            uprobe_ns = [
+            uprobe_runs = [
                 run_uprobe(i)
                 for i in range(1, BENCH_REPEATS + 1)
             ]
@@ -476,7 +492,7 @@ def main() -> int:
 
     report = format_report(
         baseline_runs,
-        uprobe_ns,
+        uprobe_runs,
         ztrace_runs,
         install_ns,
         uninstall_ns,

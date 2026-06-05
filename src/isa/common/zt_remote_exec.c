@@ -8,14 +8,21 @@
 #include "../../../include/zt_injector.h"
 #include "zt_remote_exec.h"
 
-static void zt_arch_restore_regs_and_code(pid_t pid,
-                                          const zt_arch_remote_exec_ops_t *ops,
-                                          const void *saved_regs,
-                                          uint64_t stub_pc,
-                                          const uint8_t *saved_code,
-                                          size_t saved_code_size) {
-    ops->set_regs(pid, saved_regs);
-    zt_write_remote_memory(pid, stub_pc, saved_code, saved_code_size);
+static int zt_arch_restore_regs_and_code(pid_t pid,
+                                         const zt_arch_remote_exec_ops_t *ops,
+                                         const void *saved_regs,
+                                         uint64_t stub_pc,
+                                         const uint8_t *saved_code,
+                                         size_t saved_code_size) {
+    int ret = 0;
+
+    if (ops->set_regs(pid, saved_regs) != 0) {
+        ret = -1;
+    }
+    if (zt_write_remote_memory(pid, stub_pc, saved_code, saved_code_size) != 0) {
+        ret = -1;
+    }
+    return ret;
 }
 
 static int zt_arch_execute_remote_stub(pid_t pid,
@@ -97,12 +104,7 @@ static int zt_arch_execute_remote_stub(pid_t pid,
 
     *ret_out = ops->get_retval(regs);
 
-    if (zt_write_remote_memory(pid, stub_pc, saved_code, sizeof(saved_code)) != 0) {
-        ops->set_regs(pid, saved_regs);
-        return -1;
-    }
-
-    return ops->set_regs(pid, saved_regs);
+    return zt_arch_restore_regs_and_code(pid, ops, saved_regs, stub_pc, saved_code, sizeof(saved_code));
 }
 
 typedef struct {

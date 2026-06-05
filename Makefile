@@ -105,13 +105,11 @@ print-arch-config:
 	@printf 'TEST_C=%s\n' '$(TEST_C)'
 
 directories:
-	@mkdir -p $(BUILD_DIR)
-	@mkdir -p $(BUILD_DIR)/isa
-	@mkdir -p $(BUILD_DIR)/isa/common
-	@mkdir -p $(BUILD_DIR)/isa/x86_64
-	@mkdir -p $(BUILD_DIR)/isa/aarch64
-	@mkdir -p $(BIN_DIR)
-	@mkdir -p $(TEST_BIN_DIR)
+	@mkdir -p \
+		$(BUILD_DIR)/isa/common \
+		$(BUILD_DIR)/isa/x86_64 \
+		$(BUILD_DIR)/isa/aarch64 \
+		$(TEST_BIN_DIR)
 
 $(APP_TARGET): $(OBJ_CORE)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)

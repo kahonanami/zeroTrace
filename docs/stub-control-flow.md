@@ -7,12 +7,7 @@
 - `x86_64` 相关实现位于 `src/isa/x86_64/`
 - `aarch64` 相关实现位于 `src/isa/aarch64/`
 
-其中每个架构目录都保持一致的文件划分：
-
-- `arch.c`
-- `trampoline_manager.c`
-- `x86_64` 使用 `stub.S`
-- `aarch64` 使用 `stub.S`
+其中每个架构目录都保持一致的文件划分：`arch.c`、`trampoline_manager.c` 和 `stub.S`。
 
 ---
 
@@ -83,7 +78,7 @@ jmp [continue_addr]
 2. 再补做原函数前导若干条被覆盖掉的指令
 3. 再跳回原函数剩余部分继续执行
 
-`aarch64` 没有像 x86 那样天然把返回地址放在栈上，函数返回地址通常在 `x30/lr` 中。因此 ARM64 trampoline 会显式保存和改写 `x30`：
+`aarch64` 没有像 x86 那样天然把返回地址放在栈上，函数返回地址通常在 `x30/lr` 中。因此 aarch64 trampoline 会显式保存和改写 `x30`：
 
 ```asm
 mov x15, x30          // 保存原始 LR
@@ -96,7 +91,7 @@ mov x16, continue_addr
 br x16
 ```
 
-也就是说，ARM64 的返回劫持不是改写调用者栈上的返回地址，而是把原函数继续执行前的 `x30` 改成 `exit_stub`。真实 LR 会被保存到 payload 的线程本地 shadow stack，`exit_stub` 记录返回值后再取出真实 LR 并 `ret` 回调用者。
+也就是说，aarch64 的返回劫持不是改写调用者栈上的返回地址，而是把原函数继续执行前的 `x30` 改成 `exit_stub`。真实 LR 会被保存到 payload 的线程本地 shadow stack，`exit_stub` 记录返回值后再取出真实 LR 并 `ret` 回调用者。
 
 ---
 
@@ -435,7 +430,7 @@ caller
 
 ## 7. `aarch64`
 
-由于架构问题，ARM64 的返回链闭环和 `x86_64` 不一样，关键不在“改栈上的返回地址”，而在于：
+由于架构问题，aarch64 的返回链闭环和 `x86_64` 不一样，关键不在“改栈上的返回地址”，而在于：
 
 - trampoline 先把原始 `x30/lr` 暂存在 `x15`
 - `entry_stub` 把这个真实 LR 写进 TLS shadow stack
@@ -444,11 +439,11 @@ caller
 - 原函数最终 `ret` 时，先跳进 `exit_stub`
 - `exit_stub` 再从 TLS shadow stack 取回真实 LR，写回 `x30`，最后 `ret` 回调用者
 
-也就是说，ARM64 的“返回地址劫持”发生在 `lr` 寄存器链路里，而不是发生在调用者栈槽里。
+也就是说，aarch64 的“返回地址劫持”发生在 `lr` 寄存器链路里，而不是发生在调用者栈槽里。
 
 ### 7.1 `aarch64 trampoline`
 
-当前 ARM64 trampoline 的逻辑是：
+当前 aarch64 trampoline 的逻辑是：
 
 ```asm
 mov x15, x30          // 保存原始 LR
@@ -532,7 +527,7 @@ entry_stub:
   存的是 `nzcv`
 
 - `context->trampoline_ret_addr`
-  在 ARM64 下实际存的是 trampoline 传进来的“真实 LR”，也就是之前的 `x15`
+  在 aarch64 下实际存的是 trampoline 传进来的“真实 LR”，也就是之前的 `x15`
 
 - `context->func_id`
   存的是 `x17`

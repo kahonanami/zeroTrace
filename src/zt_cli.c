@@ -66,6 +66,12 @@ static char g_cli_log_path[PATH_MAX];
 static long g_cli_log_offset;
 static uint64_t g_cli_last_poll_ns;
 
+static void zt_cli_reset_log_state(void) {
+    g_cli_log_path[0] = '\0';
+    g_cli_log_offset = 0;
+    g_cli_last_poll_ns = 0;
+}
+
 static uint64_t zt_cli_monotonic_ns(void) {
     struct timespec ts;
 
@@ -84,7 +90,7 @@ static int zt_cli_stop_target(void) {
     return zt_injector_interrupt_all(&g_cli_session);
 }
 
-static zt_probe_info_t *zt_cli_find_probe(char *target, uint64_t *probe_id_out) {
+static zt_probe_info_t *zt_cli_find_probe(const char *target, uint64_t *probe_id_out) {
     char *endptr;
     long probe_id;
     zt_probe_info_t *probe;
@@ -161,20 +167,22 @@ static void zt_cli_format_call_args(const zt_probe_call_action_t *action,
     }
 
     for (i = 0; i < action->arg_count && i < ZT_CALL_ACTION_ARG_CAP; ++i) {
+        const zt_call_action_arg_t *arg = &action->args[i];
+        const char *separator = i == 0 ? "" : ", ";
         int written;
 
-        if (action->args[i].kind == ZT_CALL_ACTION_ARG_ENTRY_ARG) {
+        if (arg->kind == ZT_CALL_ACTION_ARG_ENTRY_ARG) {
             written = snprintf(buffer + used,
                                buffer_size - used,
                                "%sarg%llu",
-                               i == 0 ? "" : ", ",
-                               (unsigned long long)action->args[i].value);
+                               separator,
+                               (unsigned long long)arg->value);
         } else {
             written = snprintf(buffer + used,
                                buffer_size - used,
                                "%s0x%llx",
-                               i == 0 ? "" : ", ",
-                               (unsigned long long)action->args[i].value);
+                               separator,
+                               (unsigned long long)arg->value);
         }
 
         if (written < 0) {
@@ -190,10 +198,7 @@ static void zt_cli_format_call_args(const zt_probe_call_action_t *action,
 }
 
 static char *zt_next_arg(char *args) {
-    (void)args;
-
-    char *arg = strtok(NULL, " ");
-    return arg;
+    return strtok(args, " ");
 }
 
 static int zt_cli_parse_trace_filter(zt_probe_filter_t *filter) {
@@ -445,9 +450,7 @@ static int cmd_trace(char *args) {
                                            filter.enabled ? &filter : NULL) != 0) {
         printf("Failed to trace %s\n", symbol);
         if (!zt_trace_is_active()) {
-            g_cli_log_path[0] = '\0';
-            g_cli_log_offset = 0;
-            g_cli_last_poll_ns = 0;
+            zt_cli_reset_log_state();
         }
         return 0;
     }
@@ -464,6 +467,8 @@ static int cmd_trace(char *args) {
 }
 
 static int cmd_stop(char *args) {
+    int ret;
+
     (void)args;
 
     if (!g_cli_attached) {
@@ -471,16 +476,12 @@ static int cmd_stop(char *args) {
         return 0;
     }
 
-    if (zt_trace_is_active()) {
-        if (zt_trace_pause(&g_cli_session) != 0) {
-            printf("Failed to stop pid %d\n", g_cli_session.pid);
-            return 0;
-        }
-    } else {
-        if (zt_cli_stop_target() != 0) {
-            printf("Failed to stop pid %d\n", g_cli_session.pid);
-            return 0;
-        }
+    ret = zt_trace_is_active() ?
+          zt_trace_pause(&g_cli_session) :
+          zt_cli_stop_target();
+    if (ret != 0) {
+        printf("Failed to stop pid %d\n", g_cli_session.pid);
+        return 0;
     }
 
     printf("Pid %d stopped\n", g_cli_session.pid);
@@ -489,7 +490,6 @@ static int cmd_stop(char *args) {
 
 static int cmd_enable(char *args) {
     char *target;
-    zt_probe_info_t *probe;
     uint64_t probe_id;
 
     if (!g_cli_attached) {
@@ -508,8 +508,7 @@ static int cmd_enable(char *args) {
         return 0;
     }
 
-    probe = zt_cli_find_probe(target, &probe_id);
-    if (probe == NULL) {
+    if (zt_cli_find_probe(target, &probe_id) == NULL) {
         printf("Probe not found: %s\n", target);
         return 0;
     }
@@ -598,7 +597,6 @@ static int cmd_disable(char *args) {
 static int cmd_update(char *args) {
     char *target;
     char *mode;
-    zt_probe_info_t *probe;
     zt_probe_filter_t filter;
     uint64_t probe_id;
 
@@ -619,8 +617,7 @@ static int cmd_update(char *args) {
         return 0;
     }
 
-    probe = zt_cli_find_probe(target, &probe_id);
-    if (probe == NULL) {
+    if (zt_cli_find_probe(target, &probe_id) == NULL) {
         printf("Probe not found: %s\n", target);
         return 0;
     }
@@ -707,7 +704,6 @@ static int cmd_update(char *args) {
 
 static int cmd_untrace(char *args) {
     char *target;
-    zt_probe_info_t *probe;
     uint64_t probe_id;
 
     if (!g_cli_attached) {
@@ -721,8 +717,7 @@ static int cmd_untrace(char *args) {
         return 0;
     }
 
-    probe = zt_cli_find_probe(target, &probe_id);
-    if (probe == NULL) {
+    if (zt_cli_find_probe(target, &probe_id) == NULL) {
         printf("Probe not found: %s\n", target);
         return 0;
     }
@@ -733,9 +728,7 @@ static int cmd_untrace(char *args) {
     }
 
     if (!zt_trace_is_active()) {
-        g_cli_log_path[0] = '\0';
-        g_cli_log_offset = 0;
-        g_cli_last_poll_ns = 0;
+        zt_cli_reset_log_state();
     }
     printf("Removed probe %s\n", target);
     return 0;
@@ -824,6 +817,8 @@ static int cmd_info(char *args) {
 }
 
 static int cmd_continue(char *args) {
+    int ret;
+
     (void)args;
 
     if (!g_cli_attached) {
@@ -831,16 +826,12 @@ static int cmd_continue(char *args) {
         return 0;
     }
 
-    if (zt_trace_is_active()) {
-        if (zt_trace_resume(&g_cli_session) != 0) {
-            printf("Failed to continue pid %d\n", g_cli_session.pid);
-            return 0;
-        }
-    } else {
-        if (zt_injector_continue_all(&g_cli_session) != 0) {
-            printf("Failed to continue pid %d\n", g_cli_session.pid);
-            return 0;
-        }
+    ret = zt_trace_is_active() ?
+          zt_trace_resume(&g_cli_session) :
+          zt_injector_continue_all(&g_cli_session);
+    if (ret != 0) {
+        printf("Failed to continue pid %d\n", g_cli_session.pid);
+        return 0;
     }
 
     printf("Continued pid %d\n", g_cli_session.pid);

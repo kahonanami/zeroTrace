@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Validate Makefile architecture selection without cross-compiling.
 
-The full aarch64 runtime test still belongs on an ARM64 machine. This check
+The full aarch64 runtime test still belongs on an aarch64 machine. This check
 keeps the host-independent part honest: selecting ARCH must switch the ISA
 backend sources, stub assembly, and architecture-specific trampoline tests.
 """
@@ -9,7 +9,6 @@ backend sources, stub assembly, and architecture-specific trampoline tests.
 from __future__ import annotations
 
 import subprocess
-import sys
 from pathlib import Path
 
 

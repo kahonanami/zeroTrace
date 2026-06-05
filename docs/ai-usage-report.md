@@ -2,12 +2,17 @@
 
 本文档说明 zeroTrace 开发过程中 AI 工具的使用范围、使用方式和人工校验流程。
 
-## 1. 工具与模型
+## 1. 工具、模型与声明摘要
 
-项目开发过程中使用的 AI 辅助工具包括：
+项目开发过程中使用的 AI 辅助工具声明如下：
 
-- OpenAI ChatGPT / Codex 类代码助手
-- OpenAI GPT-5，用于代码审查、实现方案比较、文档整理和测试设计
+| 字段 | 内容 |
+| --- | --- |
+| 工具名称 | OpenAI ChatGPT / Codex 类代码助手 |
+| 模型名称 | OpenAI GPT-5 |
+| 使用方式 | 交互式问答、结对编程、代码审查和文档整理 |
+| 主要产出 | 实现方案比较、bug 定位思路、测试设计建议、benchmark 解释、文档草案 |
+| 人工确认 | 开发者逐项审阅 diff，并通过构建、自动化测试、benchmark 或文档链接检查确认 |
 
 AI 工具主要以交互式问答和结对编程形式参与开发。相关交互记录体现为：
 
@@ -24,6 +29,14 @@ AI 主要用于辅助完成以下工作：
 - 辅助设计 benchmark 流程，包括 baseline、kernel uprobe、zeroTrace 和 install/uninstall latency 对比
 - 辅助整理 README、架构文档、实验评估文档和 AI 使用报告
 - 辅助生成测试用例思路，例如多 probe、线程组 stop/continue、signal safety、trace buffer wrap、hot update 等场景
+
+| 使用场景 | AI 辅助产出 | 人工校验方式 |
+| --- | --- | --- |
+| 赛题要求拆解 | F1-F7 / A1-A5 覆盖清单、测试矩阵草案 | 对照 `docs/project-requirements.md` 和 `docs/evaluation.md` 逐项确认 |
+| 代码审查与重构 | 冗余逻辑定位、命名统一、模块职责建议 | 通过 `git diff` 检查范围，并运行相关定向测试 |
+| bug 定位 | benchmark 卡住、trace buffer 退出窗口、线程组控制等问题的排查路径 | 使用可复现测试和日志输出验证修复结果 |
+| 性能实验 | benchmark 脚本结构、重复实验统计和结果解释 | 以 `make benchmark` 和 `benchmark/report.txt` 为准 |
+| 文档整理 | README、architecture、evaluation、AI report 的结构建议 | 检查链接、术语一致性和代码/测试证据是否匹配 |
 
 ## 3. 人工主导部分
 

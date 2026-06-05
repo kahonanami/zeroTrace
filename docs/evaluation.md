@@ -109,7 +109,7 @@ bin/tests/test_context_integrity
 结论：
 
 - x86_64 下通用参数、浮点参数和常见 libc varargs 均有自动化证据。
-- aarch64 后端使用相同的上层 event 槽位；在 ARM64 机器上运行同一组 `make test` 回归即可验证对应 ABI 映射。
+- aarch64 后端使用相同的上层 event 槽位；在 aarch64 机器上运行同一组 `make test` 回归即可验证对应 ABI 映射。
 
 ### 2.3 F3 返回值捕获
 
@@ -158,7 +158,7 @@ bin/tests/test_benchmark_latency
 - 删除最后一个 probe 后，原 trampoline 地址不能再出现在 `/proc/<pid>/maps` 中。
 - 删除 probe 后，目标函数入口 `orig_len` 字节必须与安装前保存的原始字节完全一致。
 
-最近一次数据：
+已记录数据：
 
 ```text
 install latency avg   : 427759 ns (0.428 ms) over 1000 rounds
@@ -255,7 +255,7 @@ for i in $(seq 1 10); do ./bin/tests/test_thread_safety || exit 1; done
 - `interrupt_all` 后 `/proc/<pid>/task` 当前线程数不得超过 injector tracked TID 数。
 - 停止期间 drain reporter pipe 后不得再出现心跳；`continue_all` 后心跳必须恢复。
 
-最近一次 10 轮压力摘要：
+已记录 10 轮压力摘要：
 
 ```text
 thread_safety: 10/10 passed
@@ -272,8 +272,8 @@ thread_group_control: 10/10 passed
 结论：
 
 - 当前多线程测试覆盖了新线程追踪、并发命中、动态 patch 开关；严格配平不变量由始终启用的 `thread_stable` 按 TID 验证，高频 `thread_mix` 用于压测吞吐和运行中 enable/disable，低频 `thread_pair` 用于额外多 probe 并发覆盖。
-- 最近一次 10 轮压力复测中，`thread_stable` 每轮 entry/return 都严格配平，配平事件数范围为 `2338..2400` 对；`thread_pair` 也保持 `471..480` 对严格配平。
-- 线程组控制测试最近 10 轮全部通过，动态创建/退出线程时 `interrupt_all` 能收敛到完整 stopped 线程组；停止窗口内目标没有继续运行，恢复后进度继续，最大 task/tracked 线程数达到 `32/32`。
+- 已记录 10 轮压力复测中，`thread_stable` 每轮 entry/return 都严格配平，配平事件数范围为 `2338..2400` 对；`thread_pair` 也保持 `471..480` 对严格配平。
+- 线程组控制测试已记录 10 轮全部通过，动态创建/退出线程时 `interrupt_all` 能收敛到完整 stopped 线程组；停止窗口内目标没有继续运行，恢复后进度继续，最大 task/tracked 线程数达到 `32/32`。
 - 这是比“目标进程不崩溃”更强的不变量验证。
 
 ### 2.8 目标退出窗口稳定性
@@ -305,7 +305,7 @@ ZT_EXIT_RACE_ROUNDS=1000 ./bin/tests/test_poll_exit_race
 
 - 当前实现把 leader exit、线程表清空、远程 trace buffer 映射消失和退出后重复 poll 统一归类为目标退出状态。
 - 该测试直接覆盖此前最容易触发偶发 `zt_trace_poll()` 负值的窗口。
-- 最近一次压力复测 `ZT_EXIT_RACE_ROUNDS=1000 ./bin/tests/test_poll_exit_race` 通过，输出 `poll exit-race test passed (1000 rounds)`。
+- 已记录压力复测 `ZT_EXIT_RACE_ROUNDS=1000 ./bin/tests/test_poll_exit_race` 通过，输出 `poll exit-race test passed (1000 rounds)`。
 
 ### 2.9 trace buffer 消费鲁棒性
 
@@ -334,7 +334,7 @@ bin/tests/test_trace_buffer_reader
 
 - 当前 reader 采用 header-first + range snapshot 策略，只读取本轮新增序列范围，并在 `committed_seq` 前后校验通过后推进 `last_seq`。
 - 未提交 slot 会保留 `last_seq` 等待下一轮 poll；落后超过 ring buffer 容量时会显式输出 lost record。
-- 最近一次运行输出 `trace buffer reader test passed`。
+- 已记录运行输出 `trace buffer reader test passed`。
 
 ## 3. 进阶功能实验
 
@@ -354,13 +354,13 @@ python3 scripts/check_arch_config.py
 - 两个后端均有独立 patch/trampoline/stub 代码。
 - `scripts/check_arch_config.py` 在 x86_64 本机上同时检查 `ARCH=x86_64` 和 `ARCH=aarch64` 的 Makefile 展开结果，确认后端 C 文件、stub 汇编和架构专用 trampoline 测试集合没有选错。
 - x86_64 本机已通过完整 `make test`。
-- aarch64 runtime 回归需要在 ARM64 机器上运行 `make ARCH=aarch64 test`；本机脚本只证明配置选择正确，不伪造跨架构运行结果。
+- aarch64 runtime 回归需要在 aarch64 机器上运行 `make ARCH=aarch64 test`；本机脚本只证明配置选择正确，不伪造跨架构运行结果。
 
 当前结论：
 
-- A1 已实现架构抽象和 ARM64 后端。
+- A1 已实现架构抽象和 aarch64 后端。
 - 当前本机自动化证据覆盖 x86_64 完整运行和 aarch64 构建配置选择。
-- ARM64 运行验证使用同一套 `make test` / `make benchmark` 入口；性能数据与具体硬件强相关，最终提交时应按目标 ARM64 机器重新记录。
+- aarch64 运行验证使用同一套 `make test` / `make benchmark` 入口；性能数据与具体硬件强相关，最终提交时应按目标 aarch64 机器重新记录。
 
 ### 3.2 A2 条件探针
 
@@ -461,7 +461,7 @@ bin/tests/test_probe_hot_update
 for i in $(seq 1 100); do ./bin/tests/test_probe_hot_update || exit 1; done
 ```
 
-最近一次压力结果：
+已记录压力结果：
 
 ```text
 test_probe_hot_update: 100/100 passed
@@ -544,7 +544,7 @@ uninstall latency avg : 39889 ns (0.040 ms) over 1000 rounds
 | F5 | 探针动态开关 | `disable` 恢复入口 patch 但保留 probe 元数据和 trampoline slot；`enable` 复用 slot 重装 patch | `test_thread_safety` 运行中 12 轮 enable/disable；`test_probe_hot_update` disabled 阶段零泄漏 |
 | F6 | 同一进程至少 16 个并发探针 | probe 表容量 32，trampoline pool 按 slot 管理 | `test_probe_lifecycle` 同进程安装 `probe_fn01..probe_fn16` 并校验日志 |
 | F7 | 多线程安全，不崩溃不死锁 | 线程组级 seize/interrupt/continue/detach；运行态刷新新线程；TLS shadow stack 按线程配对 return | `test_thread_safety`、`test_thread_group_control` |
-| A1 | x86_64 + ARM64 多架构 | Makefile 按 `ARCH` 选择 ISA 后端；两套 patch/trampoline/stub 实现 | x86_64 `make test`；`scripts/check_arch_config.py` 覆盖 `ARCH=x86_64/aarch64` 配置选择；ARM64 机器上通过 `make ARCH=aarch64 test` 运行 aarch64 trampoline/runtime 回归 |
+| A1 | x86_64 + aarch64 多架构 | Makefile 按 `ARCH` 选择 ISA 后端；两套 patch/trampoline/stub 实现 | x86_64 `make test`；`scripts/check_arch_config.py` 覆盖 `ARCH=x86_64/aarch64` 配置选择；aarch64 runtime 证据应以目标 aarch64 机器上的 `make ARCH=aarch64 test` 输出为准 |
 | A2 | 条件探针 | `zt_filter` 解析 `if` 后完整布尔表达式，tracer 侧按 entry event 过滤并同步吞掉 return | `test_probe_lifecycle` conditional/filter update 子测试 |
 | A3 | perf/ftrace 事件流合流 | 日志输出 `comm-pid/tid [cpu] timestamp: ztrace:event`，timestamp 使用目标命中时 `CLOCK_MONOTONIC` | `scripts/merge_trace_events.py --self-test` 由 `make test` 自动执行 |
 | A4 | 探针内调用目标进程函数 | tracer 写远程 `call_actions` 表；payload entry handler 在目标进程内调用 callee 并写 `ZT_TRACE_EVENT_CALL` | `test_probe_lifecycle` 无参 / 带参 / slot 碰撞测试；`test_probe_hot_update` call action 热切换 |
@@ -552,5 +552,5 @@ uninstall latency avg : 39889 ns (0.040 ms) over 1000 rounds
 
 ## 6. 附加实验建议
 
-- 最终提交前，在目标 ARM64 机器上重新记录同等粒度的 `make test` 和 `make benchmark` 输出。
+- 最终提交前，在目标 aarch64 机器上重新记录同等粒度的 `make test` 和 `make benchmark` 输出。
 - 若需要更严格的 A3 证明，可在具备 perf/ftrace 权限的环境下采集真实内核事件，并用 `scripts/merge_trace_events.py` 生成合流报告。

@@ -49,6 +49,18 @@ static uint64_t zt_filter_event_arg(const zt_trace_event_t *event, uint64_t arg_
     return event->args[arg_index];
 }
 
+static zt_filter_eval_t zt_filter_eval_init(const zt_probe_filter_t *filter,
+                                            const zt_trace_event_t *event) {
+    zt_filter_eval_t ctx = {
+        .filter = filter,
+        .event = event,
+        .pos = 0,
+        .ok = 1,
+    };
+
+    return ctx;
+}
+
 static const zt_probe_filter_token_t *zt_filter_peek(zt_filter_eval_t *ctx) {
     if (ctx->pos >= ctx->filter->token_count) {
         return NULL;
@@ -220,17 +232,13 @@ static uint64_t zt_filter_parse_or(zt_filter_eval_t *ctx) {
 }
 
 static int zt_filter_validate(const zt_probe_filter_t *filter) {
-    zt_filter_eval_t ctx = {
-        .filter = filter,
-        .event = NULL,
-        .pos = 0,
-        .ok = 1,
-    };
+    zt_filter_eval_t ctx;
 
     if (filter == NULL || !filter->enabled || filter->token_count == 0) {
         return -1;
     }
 
+    ctx = zt_filter_eval_init(filter, NULL);
     (void)zt_filter_parse_or(&ctx);
     return ctx.ok && ctx.pos == filter->token_count ? 0 : -1;
 }
@@ -239,17 +247,17 @@ static int zt_filter_append_token(zt_probe_filter_t *filter,
                                   zt_probe_filter_token_type_t type,
                                   uint64_t value,
                                   uint8_t arg_index) {
-    zt_probe_filter_token_t *token;
+    zt_probe_filter_token_t token = {
+        .type = (uint8_t)type,
+        .value = value,
+        .arg_index = arg_index,
+    };
 
     if (filter->token_count >= ZT_PROBE_FILTER_TOKEN_CAP) {
         return -1;
     }
 
-    token = &filter->tokens[filter->token_count++];
-    memset(token, 0, sizeof(*token));
-    token->type = (uint8_t)type;
-    token->value = value;
-    token->arg_index = arg_index;
+    filter->tokens[filter->token_count++] = token;
     return 0;
 }
 
@@ -400,10 +408,7 @@ int zt_probe_filter_eval(const zt_probe_filter_t *filter, const zt_trace_event_t
         return 1;
     }
 
-    ctx.filter = filter;
-    ctx.event = event;
-    ctx.pos = 0;
-    ctx.ok = 1;
+    ctx = zt_filter_eval_init(filter, event);
     result = zt_filter_parse_or(&ctx);
     if (!ctx.ok || ctx.pos != filter->token_count) {
         return 0;

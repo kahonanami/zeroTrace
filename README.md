@@ -2,7 +2,7 @@
 
 > proj40 题目要求见 [project-requirements.md](./docs/project-requirements.md)
 
-`zeroTrace` 是一个基于 `ptrace` 的用户态函数追踪工具。它会通过远程 `dlopen` 把 `libzt_payload.so` 注入到目标进程，并搜索符号表给指定函数安装探针，通过 CLI 中持续输出函数入口参数和返回值。
+`zeroTrace` 是一个基于 `ptrace` 的用户态函数追踪工具。它会通过远程 `dlopen` 把 `libzt_payload.so` 注入到目标进程，搜索符号表给指定函数安装探针，并在 CLI 与日志文件中持续输出函数入口参数和返回值。
 
 ## 功能
 
@@ -188,7 +188,7 @@ ztrace.<pid>.log
 
 ## 日志格式
 
-当前 trace 日志采用接近 `perf script` / `ftrace` 的事件格式，包含：
+trace 日志采用便于合流分析的 `perf script` / `ftrace` 风格事件格式，包含：
 
 - `comm-pid/tid`
 - `cpu id`
@@ -333,14 +333,16 @@ uninstall latency avg : 39889 ns (0.040 ms) over 1000 rounds
 ## 当前完成情况
 
 - 基础功能 F1-F7 已实现，并通过自动化测试覆盖 probe 生命周期、参数/返回值、多 probe、多线程、信号安全和资源清理。
-- 进阶功能 A1-A5 已实现，包括 x86_64/aarch64 后端、条件探针、perf/ftrace 风格日志、probe 内 call action 和行为热更新。
-- 当前 x86_64 benchmark 额外开销约 `163 ns/call`，install/uninstall 延迟低于题目指标。
+- 进阶功能 A1-A5 已实现，包括 x86_64/aarch64 后端、条件探针、perf/ftrace 风格日志、probe 内 call action 和行为热更新；aarch64 runtime 验证以目标 aarch64 机器上的 `make ARCH=aarch64 test` 为准。
+- 已记录 x86_64 benchmark 额外开销约 `163 ns/call`，install/uninstall 延迟低于题目指标。
 - 详细覆盖矩阵、实验步骤和剩余验证建议见 [docs/evaluation.md](./docs/evaluation.md)。
 
 ## 文档
 
-- [docs/project-requirements.md](./docs/project-requirements.md)：赛题要求整理
-- [docs/architecture.md](./docs/architecture.md)：系统架构、模块职责和关键数据结构
-- [docs/stub-control-flow.md](./docs/stub-control-flow.md)：stub / trampoline 控制流和栈布局细节
-- [docs/evaluation.md](./docs/evaluation.md)：F1-F7 / A1-A5 覆盖矩阵、实验设计和 benchmark 结果
-- [docs/ai-usage-report.md](./docs/ai-usage-report.md)：AI 辅助开发使用报告
+| 文档 | 职责边界 |
+| --- | --- |
+| [docs/project-requirements.md](./docs/project-requirements.md) | 整理赛题要求与交付指标，不解释代码实现 |
+| [docs/architecture.md](./docs/architecture.md) | 说明系统架构、模块职责、关键数据结构和主执行流，不展开逐条实验记录 |
+| [docs/stub-control-flow.md](./docs/stub-control-flow.md) | 专门说明 trampoline / stub 控制流、栈布局和返回地址劫持细节 |
+| [docs/evaluation.md](./docs/evaluation.md) | 记录 F1-F7 / A1-A5 覆盖矩阵、实验方法、benchmark 结果和验证证据 |
+| [docs/ai-usage-report.md](./docs/ai-usage-report.md) | 总结 AI 辅助开发的使用范围、人工校验方式和风险控制 |

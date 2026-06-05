@@ -108,16 +108,15 @@ static int zt_read_image_base(pid_t pid, const char *image_path, uint64_t *base_
 
     while (fgets(line, sizeof(line), fp) != NULL) {
         unsigned long start = 0;
-        unsigned long end = 0;
         unsigned long offset = 0;
-        char perms[8] = {0};
         char path[PATH_MAX] = {0};
-        int fields = sscanf(line, "%lx-%lx %7s %lx %*s %*s %s", &start, &end, perms, &offset, path);
+        int fields = sscanf(line,
+                            "%lx-%*[0-9a-fA-F] %*7s %lx %*s %*s %s",
+                            &start,
+                            &offset,
+                            path);
 
-        (void) end;
-        (void) perms;
-
-        if (fields == 5 && offset == 0 && strcmp(path, image_path) == 0) {
+        if (fields == 3 && offset == 0 && strcmp(path, image_path) == 0) {
             fclose(fp);
             *base_out = start;
             return 0;
@@ -180,8 +179,7 @@ static int zt_session_add_thread(zt_injector_session_t *session, pid_t tid) {
     }
 
     session->threads[session->thread_count].tid = tid;
-    session->threads[session->thread_count].stopped = 0;
-    session->threads[session->thread_count].resume_signal = 0;
+    zt_thread_mark_running(&session->threads[session->thread_count]);
     ++session->thread_count;
     return 0;
 }
@@ -232,6 +230,15 @@ static int zt_resume_signal_from_status(int status) {
     }
 
     return stop_sig;
+}
+
+static void zt_thread_mark_stopped(zt_thread_info_t *thread, int status) {
+    if (thread == NULL) {
+        return;
+    }
+
+    thread->stopped = 1;
+    thread->resume_signal = zt_resume_signal_from_status(status);
 }
 
 static int zt_injector_seize_thread(zt_injector_session_t *session, pid_t tid) {
@@ -365,8 +372,7 @@ static int zt_wait_for_thread_stop(zt_injector_session_t *session, zt_thread_inf
     for (;;) {
         if (waitpid(thread->tid, &status, __WALL) > 0) {
             if (WIFSTOPPED(status)) {
-                thread->stopped = 1;
-                thread->resume_signal = zt_resume_signal_from_status(status);
+                zt_thread_mark_stopped(thread, status);
                 return 0;
             }
 
@@ -593,8 +599,7 @@ int zt_injector_poll_events(zt_injector_session_t *session, int *target_exited_o
         if (WIFSTOPPED(status)) {
             int deliver_sig;
 
-            thread->stopped = 1;
-            thread->resume_signal = zt_resume_signal_from_status(status);
+            zt_thread_mark_stopped(thread, status);
             deliver_sig = thread->resume_signal;
 
             if (ptrace(PTRACE_CONT,
@@ -818,6 +823,12 @@ int zt_write_remote_memory(pid_t pid, uint64_t remote_addr, const void *buffer, 
     return 0;
 }
 
+static int zt_remote_syscall_return_is_error(uint64_t ret) {
+    int64_t signed_ret = (int64_t)ret;
+
+    return signed_ret < 0 && signed_ret >= -4095;
+}
+
 int zt_remote_mmap(pid_t pid,
                    size_t size,
                    int prot,
@@ -841,7 +852,7 @@ int zt_remote_mmap(pid_t pid,
         return -1;
     }
 
-    if ((int64_t)ret < 0 && (int64_t)ret >= -4095) {
+    if (zt_remote_syscall_return_is_error(ret)) {
         return -1;
     }
 
@@ -870,7 +881,7 @@ int zt_remote_munmap(pid_t pid,
         return -1;
     }
 
-    if ((int64_t)ret < 0 && (int64_t)ret >= -4095) {
+    if (zt_remote_syscall_return_is_error(ret)) {
         return -1;
     }
 
@@ -1070,22 +1081,12 @@ int zt_resolve_symbol_target(zt_injector_session_t *session,
     }
 
     while (fgets(line, sizeof(line), fp) != NULL) {
-        unsigned long start = 0;
-        unsigned long end = 0;
-        unsigned long offset = 0;
-        char perms[8] = {0};
         char path[PATH_MAX] = {0};
-        int fields = sscanf(line, "%lx-%lx %7s %lx %*s %*s %s",
-                            &start,
-                            &end,
-                            perms,
-                            &offset,
+        int fields = sscanf(line,
+                            "%*[0-9a-fA-F]-%*[0-9a-fA-F] %*7s %*[0-9a-fA-F] %*s %*s %s",
                             path);
 
-        (void)start;
-        (void)end;
-
-        if (fields != 5 || path[0] != '/') {
+        if (fields != 1 || path[0] != '/') {
             continue;
         }
 
