@@ -81,7 +81,19 @@ Linux 内核提供的 uprobe 机制，原理是修改目标进程指定地址的
 
 ---
 
-## 5. 参考资料
+## 5. 通用参赛交付要求
+
+技术方案 1.1 还包含与代码实现同等重要的通用交付要求：
+
+- 参赛作品源代码需遵循 GPL、Apache、BSD、木兰协议中的至少一种；本仓库根目录已保留 `LICENSE`，当前为 GPLv3。
+- 技术文档和答辩材料需按比赛要求采用开放授权方式发布。
+- 作品需要通过多次 git commit 展示持续迭代过程，提交信息应能说明新增功能、修复或关键改进，避免无说明的批量提交。
+- 若使用 AI / 大模型 / AI Agent 等辅助工具，需要在设计实现文档中声明工具名称、模型名称、使用场景、AI 产出和交互记录说明；本仓库使用 [ai-usage-report.md](./ai-usage-report.md) 记录相关内容。
+- 如果引用非本队代码、文档或往届作品，需要在代码位置、设计文档和答辩材料中说明来源、用途、授权信息和本项目增量贡献。
+
+---
+
+## 6. 参考资料
 * [Linux Uprobe Tracer 官方文档](https://docs.kernel.org/trace/uprobetracer.html)
 * [Linux Kprobes 实现原理](https://docs.kernel.org/trace/kprobes.html)
 * [Libcare: 用户态热补丁库](https://github.com/cloudlinux/libcare)

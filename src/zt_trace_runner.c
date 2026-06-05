@@ -11,12 +11,12 @@
 #include <sys/mman.h>
 #include <sys/uio.h>
 
-#include "../include/zt_injector.h"
-#include "../include/zt_filter.h"
-#include "../include/zt_payload.h"
-#include "../include/zt_sigconf.h"
-#include "../include/zt_trampoline_manager.h"
-#include "../include/zt_trace_runner.h"
+#include "zt_injector.h"
+#include "zt_filter.h"
+#include "zt_payload.h"
+#include "zt_sigconf.h"
+#include "zt_trampoline_manager.h"
+#include "zt_trace_runner.h"
 
 typedef struct {
     char payload_so_path[PATH_MAX];
@@ -145,6 +145,16 @@ static int zt_trace_read_failure_is_exit_window(pid_t pid, uint64_t remote_addr)
 
     return zt_process_is_exited(pid) ||
            !zt_trace_remote_addr_is_mapped(pid, remote_addr);
+}
+
+static int zt_trace_mark_exit_window_if_needed(pid_t pid, uint64_t trace_buffer_addr) {
+    if (zt_trace_is_exit_race(pid) ||
+        zt_trace_read_failure_is_exit_window(pid, trace_buffer_addr)) {
+        zt_trace_mark_target_exited();
+        return 1;
+    }
+
+    return 0;
 }
 
 static int zt_trace_write_call_action(zt_injector_session_t *session,
@@ -687,44 +697,48 @@ static void zt_trace_log_lost_events(const zt_injector_session_t *session,
 
 static int zt_trace_read_commit_snapshot(zt_injector_session_t *session,
                                          const zt_runtime_state_t *runtime,
+                                         uint64_t start_seq,
+                                         uint64_t count,
                                          uint64_t commits[ZT_TRACE_EVENT_CAPACITY]) {
     const long max_iov = 256;
-    uint64_t slot;
+    uint64_t offset;
 
-    if (session == NULL || runtime == NULL || commits == NULL) {
+    if (session == NULL || runtime == NULL || commits == NULL ||
+        start_seq == 0 || count > ZT_TRACE_EVENT_CAPACITY) {
         return -1;
     }
 
-    for (slot = 0; slot < ZT_TRACE_EVENT_CAPACITY; slot += (uint64_t)max_iov) {
+    for (offset = 0; offset < count; offset += (uint64_t)max_iov) {
         struct iovec local_iov[256];
         struct iovec remote_iov[256];
-        size_t count = ZT_TRACE_EVENT_CAPACITY - (size_t)slot;
+        size_t batch_count = (size_t)(count - offset);
         size_t i;
         ssize_t nread;
 
-        if (count > (size_t)max_iov) {
-            count = (size_t)max_iov;
+        if (batch_count > (size_t)max_iov) {
+            batch_count = (size_t)max_iov;
         }
 
-        for (i = 0; i < count; ++i) {
-            uint64_t seq_for_slot = slot + i + 1;
+        for (i = 0; i < batch_count; ++i) {
+            uint64_t seq_for_slot = start_seq + offset + i;
+            uint64_t slot = (seq_for_slot - 1) % ZT_TRACE_EVENT_CAPACITY;
             uint64_t event_addr = zt_trace_event_slot_addr(runtime, seq_for_slot);
 
-            local_iov[i].iov_base = &commits[slot + i];
-            local_iov[i].iov_len = sizeof(commits[slot + i]);
+            local_iov[i].iov_base = &commits[slot];
+            local_iov[i].iov_len = sizeof(commits[slot]);
             remote_iov[i].iov_base =
                 (void *)(uintptr_t)(event_addr + offsetof(zt_trace_event_t, committed_seq));
-            remote_iov[i].iov_len = sizeof(commits[slot + i]);
+            remote_iov[i].iov_len = sizeof(commits[slot]);
         }
 
         nread = process_vm_readv(session->pid,
                                  local_iov,
-                                 count,
+                                 batch_count,
                                  remote_iov,
-                                 count,
+                                 batch_count,
                                  0);
-        if (nread != (ssize_t)(count * sizeof(uint64_t))) {
-            for (i = 0; i < count; ++i) {
+        if (nread != (ssize_t)(batch_count * sizeof(uint64_t))) {
+            for (i = 0; i < batch_count; ++i) {
                 if (zt_read_remote_memory(session->pid,
                                           (uint64_t)(uintptr_t)remote_iov[i].iov_base,
                                           local_iov[i].iov_base,
@@ -739,31 +753,70 @@ static int zt_trace_read_commit_snapshot(zt_injector_session_t *session,
 }
 
 static int zt_trace_read_event_snapshot(zt_injector_session_t *session,
-                                        const zt_runtime_state_t *runtime) {
-    uint64_t events_addr;
+                                        const zt_runtime_state_t *runtime,
+                                        uint64_t start_seq,
+                                        uint64_t count) {
+    uint64_t seq;
+    uint64_t remaining;
 
-    if (session == NULL || runtime == NULL) {
+    if (session == NULL || runtime == NULL ||
+        start_seq == 0 || count > ZT_TRACE_EVENT_CAPACITY) {
         return -1;
     }
 
-    events_addr = runtime->remote_trace_buffer_addr + offsetof(zt_trace_buffer_t, events);
-    return zt_read_remote_memory(session->pid,
-                                 events_addr,
-                                 g_event_snapshot,
-                                 sizeof(g_event_snapshot));
+    seq = start_seq;
+    remaining = count;
+    while (remaining > 0) {
+        uint64_t slot = (seq - 1) % ZT_TRACE_EVENT_CAPACITY;
+        uint64_t run = ZT_TRACE_EVENT_CAPACITY - slot;
+        uint64_t remote_addr;
+
+        if (run > remaining) {
+            run = remaining;
+        }
+
+        remote_addr = runtime->remote_trace_buffer_addr +
+                      offsetof(zt_trace_buffer_t, events) +
+                      (slot * sizeof(zt_trace_event_t));
+        if (zt_read_remote_memory(session->pid,
+                                  remote_addr,
+                                  &g_event_snapshot[slot],
+                                  (size_t)run * sizeof(zt_trace_event_t)) != 0) {
+            return -1;
+        }
+
+        seq += run;
+        remaining -= run;
+    }
+
+    return 0;
 }
 
 static int zt_trace_refresh_event_snapshots(zt_injector_session_t *session,
-                                            const zt_runtime_state_t *runtime) {
-    if (zt_trace_read_commit_snapshot(session, runtime, g_commit_before) != 0) {
+                                            const zt_runtime_state_t *runtime,
+                                            uint64_t start_seq,
+                                            uint64_t count) {
+    if (count == 0) {
+        return 0;
+    }
+
+    if (zt_trace_read_commit_snapshot(session,
+                                      runtime,
+                                      start_seq,
+                                      count,
+                                      g_commit_before) != 0) {
         return -1;
     }
 
-    if (zt_trace_read_event_snapshot(session, runtime) != 0) {
+    if (zt_trace_read_event_snapshot(session, runtime, start_seq, count) != 0) {
         return -1;
     }
 
-    return zt_trace_read_commit_snapshot(session, runtime, g_commit_after);
+    return zt_trace_read_commit_snapshot(session,
+                                         runtime,
+                                         start_seq,
+                                         count,
+                                         g_commit_after);
 }
 
 static zt_trace_slot_status_t zt_trace_snapshot_slot(uint64_t seq,
@@ -802,6 +855,7 @@ static int zt_dump_trace_events_since(zt_injector_session_t *session,
     const char *comm;
     uint64_t write_seq;
     uint64_t seq;
+    uint64_t snapshot_count;
     int did_output = 0;
 
     if (session == NULL || runtime == NULL || last_seq == NULL || out == NULL) {
@@ -823,10 +877,6 @@ static int zt_dump_trace_events_since(zt_injector_session_t *session,
         return 0;
     }
 
-    if (zt_trace_refresh_event_snapshots(session, runtime) != 0) {
-        return -1;
-    }
-
     comm = strrchr(session->exe_path, '/');
     comm = comm != NULL ? comm + 1 : session->exe_path;
     seq = *last_seq + 1;
@@ -841,6 +891,11 @@ static int zt_dump_trace_events_since(zt_injector_session_t *session,
         *last_seq = start_seq - 1;
         seq = start_seq;
         did_output = 1;
+    }
+
+    snapshot_count = write_seq - seq + 1;
+    if (zt_trace_refresh_event_snapshots(session, runtime, seq, snapshot_count) != 0) {
+        return -1;
     }
 
     while (seq <= write_seq) {
@@ -879,6 +934,13 @@ static int zt_dump_trace_events_since(zt_injector_session_t *session,
                 *last_seq = start_seq - 1;
                 seq = start_seq;
                 write_seq = fresh_header.write_seq;
+                snapshot_count = write_seq - seq + 1;
+                if (zt_trace_refresh_event_snapshots(session,
+                                                     runtime,
+                                                     seq,
+                                                     snapshot_count) != 0) {
+                    return -1;
+                }
                 did_output = 1;
                 continue;
             }
@@ -1006,9 +1068,10 @@ static int zt_setup_remote_payload(zt_injector_session_t *session,
         }
     }
 
-    if (zt_remote_call1(session->pid,
+    if (zt_remote_call2(session->pid,
                         runtime->remote_payload_init_addr,
                         runtime->remote_payload_config_addr,
+                        0,
                         &remote_call_ret) != 0) {
         printf("Failed to call remote zt_payload_init\n");
         return -1;
@@ -1019,18 +1082,14 @@ static int zt_setup_remote_payload(zt_injector_session_t *session,
     return 0;
 }
 
-static int zt_stop_target(zt_injector_session_t *session) {
-    if (session == NULL) {
-        return -1;
-    }
-
-    return zt_injector_interrupt_all(session);
+static int zt_trace_session_is_active(const zt_injector_session_t *session) {
+    return session != NULL &&
+           g_active_trace.state != ZT_TRACE_RUNTIME_INACTIVE &&
+           g_active_trace.session == session;
 }
 
 static int zt_trace_ensure_stopped(zt_injector_session_t *session) {
-    if (session == NULL ||
-        g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE ||
-        g_active_trace.session != session) {
+    if (!zt_trace_session_is_active(session)) {
         return -1;
     }
 
@@ -1038,7 +1097,7 @@ static int zt_trace_ensure_stopped(zt_injector_session_t *session) {
         return 0;
     }
 
-    if (zt_stop_target(session) != 0) {
+    if (zt_injector_interrupt_all(session) != 0) {
         return -1;
     }
 
@@ -1047,9 +1106,7 @@ static int zt_trace_ensure_stopped(zt_injector_session_t *session) {
 }
 
 static int zt_trace_ensure_running(zt_injector_session_t *session) {
-    if (session == NULL ||
-        g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE ||
-        g_active_trace.session != session) {
+    if (!zt_trace_session_is_active(session)) {
         return -1;
     }
 
@@ -1077,9 +1134,7 @@ static int zt_trace_check_exit_event(void) {
         pid_t pid = g_active_trace.session->pid;
         uint64_t trace_buffer_addr = g_active_trace.runtime.remote_trace_buffer_addr;
 
-        if (zt_trace_is_exit_race(pid) ||
-            zt_trace_read_failure_is_exit_window(pid, trace_buffer_addr)) {
-            zt_trace_mark_target_exited();
+        if (zt_trace_mark_exit_window_if_needed(pid, trace_buffer_addr)) {
             return 1;
         }
         return -1;
@@ -1091,6 +1146,27 @@ static int zt_trace_check_exit_event(void) {
     }
 
     return 0;
+}
+
+static int zt_trace_handle_read_failure(pid_t pid, uint64_t trace_buffer_addr) {
+    int exit_status = zt_trace_check_exit_event();
+
+    if (exit_status < 0) {
+        if (zt_trace_mark_exit_window_if_needed(pid, trace_buffer_addr)) {
+            return 1;
+        }
+        return -1;
+    }
+
+    if (exit_status > 0) {
+        return 1;
+    }
+
+    if (zt_trace_mark_exit_window_if_needed(pid, trace_buffer_addr)) {
+        return 1;
+    }
+
+    return -1;
 }
 
 int zt_trace_poll(void) {
@@ -1122,26 +1198,8 @@ int zt_trace_poll(void) {
                                    g_active_trace.log_fp) != 0) {
         pid_t pid = g_active_trace.session->pid;
         uint64_t trace_buffer_addr = g_active_trace.runtime.remote_trace_buffer_addr;
-        int exit_status = zt_trace_check_exit_event();
 
-        if (exit_status < 0) {
-            if (zt_trace_is_exit_race(pid) ||
-                zt_trace_read_failure_is_exit_window(pid, trace_buffer_addr)) {
-                zt_trace_mark_target_exited();
-                return 1;
-            }
-            return -1;
-        }
-        if (exit_status > 0) {
-            return 1;
-        }
-
-        if (zt_trace_is_exit_race(pid) ||
-            zt_trace_read_failure_is_exit_window(pid, trace_buffer_addr)) {
-            zt_trace_mark_target_exited();
-            return 1;
-        }
-        return -1;
+        return zt_trace_handle_read_failure(pid, trace_buffer_addr);
     }
 
     return 0;
@@ -1150,9 +1208,7 @@ int zt_trace_poll(void) {
 int zt_trace_disable_probe(zt_injector_session_t *session, uint64_t probe_id) {
     zt_probe_info_t *probe;
 
-    if (session == NULL || probe_id == 0 ||
-        g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE ||
-        g_active_trace.session != session) {
+    if (probe_id == 0 || !zt_trace_session_is_active(session)) {
         return -1;
     }
 
@@ -1177,9 +1233,7 @@ int zt_trace_update_probe_filter(zt_injector_session_t *session,
                                  const zt_probe_filter_t *filter) {
     zt_probe_info_t *probe;
 
-    if (session == NULL || probe_id == 0 ||
-        g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE ||
-        g_active_trace.session != session) {
+    if (probe_id == 0 || !zt_trace_session_is_active(session)) {
         return -1;
     }
 
@@ -1208,9 +1262,8 @@ int zt_trace_update_probe_call_action_args(zt_injector_session_t *session,
     zt_symbol_target_t target;
     uint64_t i;
 
-    if (session == NULL || probe_id == 0 || callee_symbol == NULL ||
-        g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE ||
-        g_active_trace.session != session ||
+    if (probe_id == 0 || callee_symbol == NULL ||
+        !zt_trace_session_is_active(session) ||
         arg_count > ZT_CALL_ACTION_ARG_CAP ||
         (arg_count > 0 && args == NULL)) {
         return -1;
@@ -1273,9 +1326,7 @@ int zt_trace_clear_probe_call_action(zt_injector_session_t *session,
     zt_probe_info_t *probe;
     int old_slot;
 
-    if (session == NULL || probe_id == 0 ||
-        g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE ||
-        g_active_trace.session != session) {
+    if (probe_id == 0 || !zt_trace_session_is_active(session)) {
         return -1;
     }
 
@@ -1302,9 +1353,7 @@ int zt_trace_clear_probe_call_action(zt_injector_session_t *session,
 int zt_trace_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
     zt_probe_info_t *probe;
 
-    if (session == NULL || probe_id == 0 ||
-        g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE ||
-        g_active_trace.session != session) {
+    if (probe_id == 0 || !zt_trace_session_is_active(session)) {
         return -1;
     }
 
@@ -1406,7 +1455,7 @@ int zt_trace_start_filtered_in_session(zt_injector_session_t *session,
     }
 
     if (g_active_trace.state != ZT_TRACE_RUNTIME_INACTIVE) {
-        if (g_active_trace.session != session) {
+        if (!zt_trace_session_is_active(session)) {
             return -1;
         }
 
@@ -1475,7 +1524,7 @@ int zt_trace_remove_probe(zt_injector_session_t *session, uint64_t probe_id) {
         return zt_unregister_probe(session, probe_id);
     }
 
-    if (g_active_trace.session != session) {
+    if (!zt_trace_session_is_active(session)) {
         return -1;
     }
 

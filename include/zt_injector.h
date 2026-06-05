@@ -12,7 +12,6 @@
 #define ZT_PROBE_SYMBOL_MAX 64
 #define ZT_PROBE_MODULE_MAX 512
 #define ZT_PROBE_ORIG_CODE_MAX 32
-#define ZT_PROBE_PATCH_LEN 14
 
 typedef struct {
     char symbol[ZT_PROBE_SYMBOL_MAX];
@@ -28,7 +27,7 @@ typedef enum {
     ZT_PROBE_DISABLED,
 } zt_probe_state_t;
 
-typedef struct{
+typedef struct {
     uint64_t probe_id;
     zt_symbol_target_t target;
     uint64_t trampoline_addr;
@@ -68,7 +67,6 @@ int zt_injector_interrupt_all(zt_injector_session_t *session);
 int zt_injector_continue_all(zt_injector_session_t *session);
 int zt_injector_poll_events(zt_injector_session_t *session, int *target_exited_out);
 int zt_process_is_exited(pid_t pid);
-int zt_find_symbol_addr(const char *elf_path, const char *symbol_name, uint64_t *symbol_addr_out);
 int zt_find_remote_symbol_addr(pid_t pid,
                                const char *module_path,
                                const char *symbol_name,
@@ -86,10 +84,6 @@ int zt_remote_mmap(pid_t pid,
 int zt_remote_munmap(pid_t pid,
                      uint64_t remote_addr,
                      size_t size);
-int zt_remote_call1(pid_t pid,
-                    uint64_t func_addr,
-                    uint64_t arg1,
-                    uint64_t *ret_out);
 int zt_remote_call2(pid_t pid,
                     uint64_t func_addr,
                     uint64_t arg1,
@@ -97,7 +91,6 @@ int zt_remote_call2(pid_t pid,
                     uint64_t *ret_out);
 zt_probe_info_t *zt_probe_find_by_symbol(zt_injector_session_t *session, const char *symbol_name);
 zt_probe_info_t *zt_probe_find_by_id(zt_injector_session_t *session, uint64_t probe_id);
-zt_probe_info_t *zt_probe_alloc(zt_injector_session_t *session, const zt_symbol_target_t *target);
 zt_probe_info_t *zt_register_probe(zt_injector_session_t *session, const char *symbol_name);
 const char *zt_probe_state_name(zt_probe_state_t state);
 int zt_unregister_probe(zt_injector_session_t *session, uint64_t probe_id);

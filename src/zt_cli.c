@@ -12,10 +12,10 @@
 #include <readline/readline.h>
 #include <readline/history.h>
 
-#include "../include/zt_cli.h"
-#include "../include/zt_filter.h"
-#include "../include/zt_injector.h"
-#include "../include/zt_trace_runner.h"
+#include "zt_cli.h"
+#include "zt_filter.h"
+#include "zt_injector.h"
+#include "zt_trace_runner.h"
 
 static int cmd_help(char *args);
 static int cmd_exit(char *args);

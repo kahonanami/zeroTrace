@@ -4,16 +4,6 @@
 #include <stdint.h>
 #include <sys/types.h>
 
-typedef enum {
-    ZT_ARCH_UNSUPPORTED = 0,
-    ZT_ARCH_X86_64,
-    ZT_ARCH_AARCH64,
-} zt_arch_kind_t;
-
-zt_arch_kind_t zt_arch_current(void);
-const char *zt_arch_name(void);
-int zt_arch_is_supported(void);
-
 size_t zt_arch_probe_patch_len(void);
 int zt_arch_calc_patch_span(const uint8_t *code,
                             size_t code_size,

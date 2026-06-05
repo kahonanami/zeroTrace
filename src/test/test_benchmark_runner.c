@@ -2,8 +2,8 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#include "../../include/zt_injector.h"
-#include "../../include/zt_trace_runner.h"
+#include "zt_injector.h"
+#include "zt_trace_runner.h"
 
 int main(int argc, char **argv) {
     zt_injector_session_t session;

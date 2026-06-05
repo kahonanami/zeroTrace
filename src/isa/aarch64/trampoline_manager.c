@@ -344,11 +344,11 @@ fail:
 }
 
 int zt_build_trampoline(const zt_probe_info_t *probe,
-                   uint64_t entry_stub_addr,
-                   uint64_t trampoline_addr,
-                   uint8_t *trampoline_buf,
-                   size_t trampoline_buf_size,
-                   size_t *trampoline_size_out) {
+                        uint64_t entry_stub_addr,
+                        uint64_t trampoline_addr,
+                        uint8_t *trampoline_buf,
+                        size_t trampoline_buf_size,
+                        size_t *trampoline_size_out) {
     size_t offset = 0;
     size_t relocated_size;
     uint64_t continue_addr;

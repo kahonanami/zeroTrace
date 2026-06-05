@@ -18,8 +18,8 @@
 #include <sys/uio.h>
 #include <sys/wait.h>
 
-#include "../include/zt_arch.h"
-#include "../include/zt_injector.h"
+#include "zt_arch.h"
+#include "zt_injector.h"
 
 #ifndef PTRACE_O_TRACESYSGOOD
 #define PTRACE_O_TRACESYSGOOD 0x00000001
@@ -28,6 +28,10 @@
 #ifndef PTRACE_EVENT_STOP
 #define PTRACE_EVENT_STOP 128
 #endif
+
+enum {
+    ZT_PATCH_REGION_MAX_SINGLE_STEPS = 8,
+};
 
 static int zt_read_elf_header(const char *exe_path, Elf64_Ehdr *header) {
     int fd;
@@ -641,7 +645,7 @@ static int zt_ensure_patch_regions_are_safe(zt_injector_session_t *session) {
             continue;
         }
 
-        for (step_count = 0; step_count < 8; ++step_count) {
+        for (step_count = 0; step_count < ZT_PATCH_REGION_MAX_SINGLE_STEPS; ++step_count) {
             uint64_t pc;
 
             if (zt_arch_get_pc(thread->tid, &pc) != 0) {
@@ -850,14 +854,9 @@ int zt_remote_call2(pid_t pid,
     return zt_arch_remote_call2(pid, func_addr, arg1, arg2, ret_out);
 }
 
-int zt_remote_call1(pid_t pid,
-                    uint64_t func_addr,
-                    uint64_t arg1,
-                    uint64_t *ret_out) {
-    return zt_remote_call2(pid, func_addr, arg1, 0, ret_out);
-}
-
-int zt_find_symbol_addr(const char *elf_path, const char *symbol_name, uint64_t *symbol_addr_out) {
+static int zt_find_symbol_addr(const char *elf_path,
+                               const char *symbol_name,
+                               uint64_t *symbol_addr_out) {
     int fd;
     Elf64_Ehdr ehdr;
     Elf64_Shdr *shdrs;
@@ -1109,7 +1108,8 @@ zt_probe_info_t *zt_probe_find_by_id(zt_injector_session_t *session, uint64_t pr
     return NULL;
 }
 
-zt_probe_info_t *zt_probe_alloc(zt_injector_session_t *session, const zt_symbol_target_t *target) {
+static zt_probe_info_t *zt_probe_alloc(zt_injector_session_t *session,
+                                       const zt_symbol_target_t *target) {
     zt_probe_info_t *probe;
     int i;
 
@@ -1300,10 +1300,6 @@ int zt_injector_attach(zt_injector_session_t *session, pid_t pid) {
     memset(session, 0, sizeof(*session));
     session->pid = pid;
     session->next_probe_id = 1;
-
-    if (!zt_arch_is_supported()) {
-        return -1;
-    }
 
     if (zt_injector_refresh_threads(session) != 0 ||
         zt_injector_interrupt_all(session) != 0) {

@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../../include/zt_trampoline_manager.h"
+#include "zt_trampoline_manager.h"
 
 static const size_t kPrefixSize = 16;
 

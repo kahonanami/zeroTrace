@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "../include/zt_filter.h"
+#include "zt_filter.h"
 
 typedef struct {
     const zt_probe_filter_t *filter;

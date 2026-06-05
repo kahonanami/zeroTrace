@@ -9,8 +9,8 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "../../include/zt_injector.h"
-#include "../../include/zt_trace_runner.h"
+#include "zt_injector.h"
+#include "zt_trace_runner.h"
 #include "test_trace_utils.h"
 
 static int exit_race_rounds(void) {
@@ -29,17 +29,6 @@ static int exit_race_rounds(void) {
     }
 
     return (int)rounds;
-}
-
-static long elapsed_ms_since(const struct timespec *start) {
-    struct timespec now;
-
-    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
-        return -1;
-    }
-
-    return (now.tv_sec - start->tv_sec) * 1000L +
-           (now.tv_nsec - start->tv_nsec) / 1000000L;
 }
 
 static pid_t start_exit_race_target(void) {
@@ -114,7 +103,7 @@ static int wait_trace_to_finish(pid_t child, long timeout_ms) {
             return 0;
         }
 
-        if (elapsed_ms_since(&start) > timeout_ms) {
+        if (zt_test_elapsed_ms_since(&start) > timeout_ms) {
             fprintf(stderr, "trace polling timed out for exit-race target %d\n", child);
             return -1;
         }

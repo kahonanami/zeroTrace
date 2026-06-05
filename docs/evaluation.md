@@ -27,9 +27,9 @@ make benchmark
 - `make test`：通过
 - A5 热更新压力：`test_probe_hot_update` 100 轮通过，单次回归包含 staged 更新和 live call action 更新
 - 目标退出窗口压力：`ZT_EXIT_RACE_ROUNDS=1000 ./bin/tests/test_poll_exit_race` 通过
-- `make benchmark`：zeroTrace 额外开销 `165.29 ns/call`
-- install latency：`0.283 ms`
-- uninstall latency：`0.032 ms`
+- `make benchmark`：5 轮重复实验中 zeroTrace 额外开销均值 `162.81 ns/call`
+- install latency：`0.428 ms`
+- uninstall latency：`0.040 ms`
 
 说明：
 
@@ -102,7 +102,7 @@ bin/tests/test_context_integrity
 结论：
 
 - x86_64 下通用参数、浮点参数和常见 libc varargs 均有自动化证据。
-- aarch64 后端使用相同的上层 event 槽位，需在 ARM64 机器上保持同样回归。
+- aarch64 后端使用相同的上层 event 槽位；在 ARM64 机器上运行同一组 `make test` 回归即可验证对应 ABI 映射。
 
 ### 2.3 F3 返回值捕获
 
@@ -154,8 +154,8 @@ bin/tests/test_benchmark_latency
 最近一次数据：
 
 ```text
-install latency avg   : 283278 ns (0.283 ms) over 1000 rounds
-uninstall latency avg : 31699 ns (0.032 ms) over 1000 rounds
+install latency avg   : 427759 ns (0.428 ms) over 1000 rounds
+uninstall latency avg : 39889 ns (0.040 ms) over 1000 rounds
 ```
 
 结论：
@@ -315,7 +315,7 @@ bin/tests/test_trace_buffer_reader
 验证方法：
 
 - 目标进程等待 `SIGUSR1` 后快速调用 `overflow_probe()` `5000` 次。
-- 每次函数调用会产生 entry / return 两条事件，事件总量超过当前 `ZT_TRACE_EVENT_CAPACITY=1024`。
+- 每次函数调用会产生 entry / return 两条事件，事件总量超过当前 `ZT_TRACE_EVENT_CAPACITY=4096`。
 - 测试故意延迟首次 `zt_trace_poll()`，让 reader 落后 writer 并触发 ring buffer wrap。
 
 关键断言：
@@ -325,7 +325,7 @@ bin/tests/test_trace_buffer_reader
 
 结论：
 
-- 当前 reader 采用 header-first + per-slot 读取策略，只在 `committed_seq` 双重校验通过后推进 `last_seq`。
+- 当前 reader 采用 header-first + range snapshot 策略，只读取本轮新增序列范围，并在 `committed_seq` 前后校验通过后推进 `last_seq`。
 - 未提交 slot 会保留 `last_seq` 等待下一轮 poll；落后超过 ring buffer 容量时会显式输出 lost record。
 - 最近一次运行输出 `trace buffer reader test passed`。
 
@@ -352,7 +352,7 @@ python3 scripts/check_arch_config.py
 
 - A1 已实现架构抽象和 ARM64 后端。
 - 当前本机自动化证据覆盖 x86_64 完整运行和 aarch64 构建配置选择。
-- 论文式最终数据仍应补充 ARM64 机器上的 `make test` 和 `make benchmark` 输出。
+- ARM64 运行验证使用同一套 `make test` / `make benchmark` 入口；性能数据与具体硬件强相关，最终提交时应按目标 ARM64 机器重新记录。
 
 ### 3.2 A2 条件探针
 
@@ -503,26 +503,46 @@ make benchmark
 
 ```text
 iterations            : 1000000
-baseline total ns     : 62227654
-baseline per call     : 62.23 ns
+repeats               : 5
+baseline total ns     mean : 63723125 ns
+baseline per call     mean : 63.72 ns
 uprobe total ns       : skipped
 uprobe note           : kernel uprobe benchmark skipped: sudo is not available non-interactively
-ztrace total ns       : 227514909
-ztrace per call       : 227.51 ns
-ztrace overhead/call  : 165.29 ns
+ztrace total ns       mean : 226531102 ns
+ztrace per call       mean : 226.53 ns
+ztrace overhead/call  mean : 162.81 ns
+ztrace overhead/call  min  : 160.89 ns
+ztrace overhead/call  max  : 165.36 ns
 
-install latency avg   : 283278 ns (0.283 ms) over 1000 rounds
-uninstall latency avg : 31699 ns (0.032 ms) over 1000 rounds
+install latency avg   : 427759 ns (0.428 ms) over 1000 rounds
+uninstall latency avg : 39889 ns (0.040 ms) over 1000 rounds
 ```
 
 结果解释：
 
 - `ztrace overhead/call = (ztrace total ns - baseline total ns) / iterations`
-- 当前额外开销 `165.29 ns/call`，低于赛题 `< 1000 ns` 指标，也低于项目优化目标 `200 ns`
+- 当前额外开销均值 `162.81 ns/call`，低于赛题 `< 1000 ns` 指标，也低于项目优化目标 `200 ns`
 - install/uninstall 延迟均低于 `< 10 ms`
 - 因当前环境跳过 uprobe，完整 zeroTrace vs uprobe 对比需要在有 `bpftrace` 和 `sudo -n` 的机器上复跑
 
-## 5. 剩余实验建议
+## 5. 题目覆盖矩阵
 
-- 在 ARM64 机器上记录同等粒度的 `make test` 和 `make benchmark` 输出。
+| ID | 要求 | 当前实现 | 自动化证据 |
+| --- | --- | --- | --- |
+| F1 | 动态库函数探针插入，用户态跳转且不产生 trap | 遍历目标已加载模块解析符号，入口 patch 到远程 trampoline，再跳入 payload stub | `test_libc_trace` trace `write/read/printf`；`test_probe_lifecycle` 读回 patch，确认 x86_64 不是 `int3`、aarch64 不是 `brk` |
+| F2 | 获取至少前 6 个参数，遵循 ABI | entry event 保存 `args[0..5]`；x86_64 对应 `rdi/rsi/rdx/rcx/r8/r9`，aarch64 对应 `x0..x5` | `test_libc_trace`、`test_probe_lifecycle`、`test_thread_safety` |
+| F3 | 捕获函数返回值 | entry stub 伪造返回链，return 进入 exit stub；return event 记录整数 / 指针和浮点返回值 | `test_context_integrity`、`test_libc_trace`、`test_probe_hot_update` |
+| F4 | 探针清理，恢复原始指令，无内存泄漏 | `untrace` 恢复入口字节；trampoline slot 释放，pool 全空时远程 `munmap` | `test_probe_lifecycle` 的 maps-diff 清理子测试；`test_benchmark_latency` 1000 轮 install/uninstall |
+| F5 | 探针动态开关 | `disable` 恢复入口 patch 但保留 probe 元数据和 trampoline slot；`enable` 复用 slot 重装 patch | `test_thread_safety` 运行中 12 轮 enable/disable；`test_probe_hot_update` disabled 阶段零泄漏 |
+| F6 | 同一进程至少 16 个并发探针 | probe 表容量 32，trampoline pool 按 slot 管理 | `test_probe_lifecycle` 同进程安装 `probe_fn01..probe_fn16` 并校验日志 |
+| F7 | 多线程安全，不崩溃不死锁 | 线程组级 seize/interrupt/continue/detach；运行态刷新新线程；TLS shadow stack 按线程配对 return | `test_thread_safety`、`test_thread_group_control` |
+| A1 | x86_64 + ARM64 多架构 | Makefile 按 `ARCH` 选择 ISA 后端；两套 patch/trampoline/stub 实现 | x86_64 `make test`；`scripts/check_arch_config.py` 覆盖 `ARCH=x86_64/aarch64`；aarch64 trampoline builder 测试 |
+| A2 | 条件探针 | `zt_filter` 解析 `if` 后完整布尔表达式，tracer 侧按 entry event 过滤并同步吞掉 return | `test_probe_lifecycle` conditional/filter update 子测试 |
+| A3 | perf/ftrace 事件流合流 | 日志输出 `comm-pid/tid [cpu] timestamp: ztrace:event`，timestamp 使用目标命中时 `CLOCK_MONOTONIC` | `scripts/merge_trace_events.py --self-test` 由 `make test` 自动执行 |
+| A4 | 探针内调用目标进程函数 | tracer 写远程 `call_actions` 表；payload entry handler 在目标进程内调用 callee 并写 `ZT_TRACE_EVENT_CALL` | `test_probe_lifecycle` 无参 / 带参 / slot 碰撞测试；`test_probe_hot_update` call action 热切换 |
+| A5 | 探针热更新 | filter、call action、enable/disable 状态均可在目标进程运行中更新 | `test_probe_hot_update` 五阶段 staged 测试和 live call action 子测试 |
+
+## 6. 剩余实验建议
+
+- 最终提交前，在目标 ARM64 机器上重新记录同等粒度的 `make test` 和 `make benchmark` 输出。
 - 若需要更严格的 A3 证明，可在具备 perf/ftrace 权限的环境下采集真实内核事件，并用 `scripts/merge_trace_events.py` 生成合流报告。

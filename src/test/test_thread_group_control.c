@@ -13,7 +13,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "../../include/zt_injector.h"
+#include "zt_injector.h"
 
 #define REQUIRED_STOP_ROUNDS 80
 #define MIN_TRACKED_THREADS 12

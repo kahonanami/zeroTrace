@@ -7,8 +7,7 @@
 
 #include <string.h>
 
-#include "../include/zt_payload.h"
-#include "../include/zt_stub.h"
+#include "zt_payload.h"
 
 typedef struct {
     uint64_t ret_addr;
@@ -17,11 +16,12 @@ typedef struct {
 } zt_saved_probe_frame_t;
 
 enum {
+    ZT_MAX_SAVED_RET_ADDR = 256,
     ZT_FP_STATE_VEC_OFFSET = 0,
     ZT_FP_STATE_VEC_STRIDE = 16,
 };
 
-static __thread zt_saved_probe_frame_t saved_frames[MAX_SAVED_RET_ADDR];
+static __thread zt_saved_probe_frame_t saved_frames[ZT_MAX_SAVED_RET_ADDR];
 static __thread int call_stack_idx;
 static __thread uint64_t last_call_id;
 static __thread uint64_t cached_tid;
@@ -29,6 +29,8 @@ static __thread int in_call_action;
 
 static zt_payload_config_t g_payload_config;
 static uint64_t g_call_id_seq;
+
+static uint64_t peek_call_id_c(void);
 
 static uint64_t zt_clock_monotonic_ns(void) {
     struct timespec ts;
@@ -67,7 +69,7 @@ static uint64_t zt_fp_state_vec_low64(const void *fp_state_area, int index) {
     uint64_t value = 0;
     const unsigned char *base;
 
-    if (fp_state_area == NULL || index < 0 || index >= 8) {
+    if (fp_state_area == NULL || index < 0 || index >= ZT_TRACE_FP_ARG_COUNT) {
         return 0;
     }
 
@@ -314,10 +316,6 @@ int zt_payload_init(const zt_payload_config_t *config) {
     return 0;
 }
 
-void *zt_payload_get_entry_stub_addr(void) {
-    return (void *)entry_stub;
-}
-
 void zt_handle_entry(ctx_t *context, const void *fp_state_area) {
     zt_trace_event_t *event;
     uint64_t call_id;
@@ -392,7 +390,7 @@ void zt_handle_return(ctx_t *context, const void *fp_state_area) {
 }
 
 uint64_t save_probe_frame_c(uint64_t ret_addr, uint64_t func_id) {
-    if (call_stack_idx >= MAX_SAVED_RET_ADDR) {
+    if (call_stack_idx >= ZT_MAX_SAVED_RET_ADDR) {
         return 1;
     }
 
@@ -412,7 +410,7 @@ uint64_t peek_probe_id_c(void) {
     return saved_frames[call_stack_idx - 1].probe_id;
 }
 
-uint64_t peek_call_id_c(void) {
+static uint64_t peek_call_id_c(void) {
     if (call_stack_idx <= 0) {
         return 0;
     }

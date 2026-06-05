@@ -8,8 +8,8 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "../../include/zt_injector.h"
-#include "../../include/zt_trace_runner.h"
+#include "zt_injector.h"
+#include "zt_trace_runner.h"
 #include "test_trace_utils.h"
 
 #define MAX_SEEN_TIDS 64
@@ -40,17 +40,6 @@ typedef struct {
     int pair_entry_total;
     int pair_return_total;
 } thread_log_stats_t;
-
-static long elapsed_ms_since(const struct timespec *start) {
-    struct timespec now;
-
-    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
-        return -1;
-    }
-
-    return (now.tv_sec - start->tv_sec) * 1000L +
-           (now.tv_nsec - start->tv_nsec) / 1000000L;
-}
 
 static int line_contains(const char *line, size_t len, const char *needle) {
     size_t needle_len;
@@ -304,7 +293,7 @@ int main(void) {
     }
 
     while (zt_trace_is_active()) {
-        long elapsed_ms = elapsed_ms_since(&start_ts);
+        long elapsed_ms = zt_test_elapsed_ms_since(&start_ts);
 
         if (elapsed_ms < 0 || elapsed_ms > 10000) {
             fprintf(stderr, "threaded trace stress timed out\n");

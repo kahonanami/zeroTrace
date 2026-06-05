@@ -2,7 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../../include/zt_trampoline_manager.h"
+#include "zt_trampoline_manager.h"
 
 enum {
     kInsnSize = 4,

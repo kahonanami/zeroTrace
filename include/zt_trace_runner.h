@@ -1,8 +1,5 @@
 #pragma once
 
-#include <stddef.h>
-#include <sys/types.h>
-
 #include "zt_injector.h"
 
 int zt_trace_start_in_session(zt_injector_session_t *session,

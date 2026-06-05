@@ -192,17 +192,11 @@ trace 输出会同时写到当前工作目录下的日志文件：
 ztrace.<pid>.log
 ```
 
-例如：
-
-```text
-ztrace.1473057.log
-```
-
 ## 日志格式
 
 当前 trace 日志采用接近 `perf script` / `ftrace` 的事件格式，包含：
 
-- `comm/pid/tid`
+- `comm-pid/tid`
 - `cpu id`
 - `CLOCK_MONOTONIC` 时间戳
 - `ztrace:entry` / `ztrace:return`
@@ -293,6 +287,12 @@ make benchmark
 
 其中 kernel uprobe 依赖 `bpftrace` 和非交互 sudo 权限。若当前环境没有安装 `bpftrace`，或 `sudo -n` 无法直接执行，脚本会自动跳过 uprobe 对比项，并继续生成 baseline、zeroTrace 和 probe lifecycle latency 的报告。
 
+默认情况下，baseline / zeroTrace / uprobe 会各运行 `5` 轮并输出 mean / min / max / stdev。可以通过环境变量覆盖：
+
+```bash
+ZT_BENCH_ITERATIONS=1000000 ZT_BENCH_REPEATS=5 make benchmark
+```
+
 benchmark 目标函数是 `bench_getpid()`，它是测试程序中的一个 `noinline` wrapper，内部调用 `syscall(SYS_getpid)`，这样可以避免 libc/vDSO 细节干扰测量。
 
 运行完成后，结果会写到被忽略的 `benchmark/` 目录中，主要包括：
@@ -310,30 +310,33 @@ benchmark 目标函数是 `bench_getpid()`，它是测试程序中的一个 `noi
 
 ```text
 iterations            : 1000000
-baseline total ns     : 62227654
-baseline per call     : 62.23 ns
+repeats               : 5
+baseline total ns     mean : 63723125 ns
+baseline per call     mean : 63.72 ns
 uprobe total ns       : skipped
 uprobe note           : kernel uprobe benchmark skipped: sudo is not available non-interactively
 uprobe per call       : skipped
 uprobe overhead/call  : skipped
 ztrace vs uprobe      : skipped
-ztrace total ns       : 227514909
-ztrace per call       : 227.51 ns
-ztrace overhead/call  : 165.29 ns
+ztrace total ns       mean : 226531102 ns
+ztrace per call       mean : 226.53 ns
+ztrace overhead/call  mean : 162.81 ns
+ztrace overhead/call  min  : 160.89 ns
+ztrace overhead/call  max  : 165.36 ns
 
 Probe lifecycle latency
 -----------------------
-install latency avg   : 283278 ns (0.283 ms) over 1000 rounds
-uninstall latency avg : 31699 ns (0.032 ms) over 1000 rounds
+install latency avg   : 427759 ns (0.428 ms) over 1000 rounds
+uninstall latency avg : 39889 ns (0.040 ms) over 1000 rounds
 ```
 
 从这组数据可以看到：
 
-- `zeroTrace` 单次额外开销约为 `165.29 ns`，低于题目要求的 `< 1000 ns`，也已经低于项目当前优化目标 `200 ns`
-- `probe` 安装延迟平均约为 `0.283 ms`，清理延迟平均约为 `0.032 ms`，都低于题目要求的 `< 10 ms`
+- `zeroTrace` 单次额外开销均值约为 `162.81 ns`，低于题目要求的 `< 1000 ns`，也已经低于项目当前优化目标 `200 ns`
+- `probe` 安装延迟平均约为 `0.428 ms`，清理延迟平均约为 `0.040 ms`，都低于题目要求的 `< 10 ms`
 - 若需要生成 zeroTrace vs uprobe 的完整对比，请在具备 `bpftrace` 和非交互 sudo 权限的环境下重新运行 `make benchmark`
 
-## TODO List
+## 当前完成情况
 
 - [x] 增强信号安全测试，覆盖目标进程收到异步信号时的 trace 行为
 - [x] 补充浮点寄存器 / SIMD 上下文保存与恢复验证
@@ -346,11 +349,12 @@ uninstall latency avg : 31699 ns (0.032 ms) over 1000 rounds
 - [x] 完善 A5：支持 filter、probe 内 call action、enable/disable 状态的运行时热更新，并通过分阶段与 live 自动化测试验证
 - [x] 修复目标退出窗口下 `zt_trace_poll()` 把正常退出误判为远程读失败的问题
 - [x] 补充 F4 maps-diff 自动化测试，验证 trampoline pool 释放和函数入口字节恢复
-- [x] 优化 payload 事件写入热路径，当前 x86_64 benchmark 额外开销约 `170 ns/call`
+- [x] 优化 payload 和 trace buffer 消费热路径，当前 x86_64 benchmark 额外开销约 `163 ns/call`
 
 ## 文档
 
-- [docs/architecture.md](./docs/architecture.md)
-- [docs/stub-control-flow.md](./docs/stub-control-flow.md)
-- [docs/verification-matrix.md](./docs/verification-matrix.md)
-- [docs/evaluation.md](./docs/evaluation.md)
+- [docs/project-requirements.md](./docs/project-requirements.md)：赛题要求整理
+- [docs/architecture.md](./docs/architecture.md)：系统架构、模块职责和关键数据结构
+- [docs/stub-control-flow.md](./docs/stub-control-flow.md)：stub / trampoline 控制流和栈布局细节
+- [docs/evaluation.md](./docs/evaluation.md)：F1-F7 / A1-A5 覆盖矩阵、实验设计和 benchmark 结果
+- [docs/ai-usage-report.md](./docs/ai-usage-report.md)：AI 辅助开发使用报告

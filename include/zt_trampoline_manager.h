@@ -17,16 +17,16 @@ typedef struct {
 } zt_trampoline_pool_t;
 
 int zt_build_trampoline(const zt_probe_info_t *probe,
-                   uint64_t entry_stub_addr,
-                   uint64_t trampoline_addr,
-                   uint8_t *trampoline_buf,
-                   size_t trampoline_buf_size,
-                   size_t *trampoline_size_out);
+                        uint64_t entry_stub_addr,
+                        uint64_t trampoline_addr,
+                        uint8_t *trampoline_buf,
+                        size_t trampoline_buf_size,
+                        size_t *trampoline_size_out);
 void zt_trampoline_pool_reset(zt_trampoline_pool_t *pool);
 int zt_trampoline_pool_alloc(zt_injector_session_t *session,
-                        zt_trampoline_pool_t *pool,
-                        zt_probe_info_t *probe,
-                        uint64_t *trampoline_addr_out);
+                             zt_trampoline_pool_t *pool,
+                             zt_probe_info_t *probe,
+                             uint64_t *trampoline_addr_out);
 void zt_trampoline_pool_release(zt_injector_session_t *session,
-                           zt_trampoline_pool_t *pool,
-                           zt_probe_info_t *probe);
+                                zt_trampoline_pool_t *pool,
+                                zt_probe_info_t *probe);

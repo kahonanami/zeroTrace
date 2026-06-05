@@ -1,5 +1,3 @@
-#include <stdio.h>
-
 #include <limits.h>
 #include <string.h>
 
@@ -221,7 +219,6 @@ static int zt_emit_relocated_orig_code(const zt_probe_info_t *probe,
     for (i = 0; i < count; ++i) {
         const cs_insn *cur = &insn[i];
         const cs_x86 *x86 = &cur->detail->x86;
-        int handled = 0;
         uint8_t op_index;
 
         if (zt_is_rel_call(cur)) {
@@ -282,12 +279,9 @@ static int zt_emit_relocated_orig_code(const zt_probe_info_t *probe,
                                         new_disp) != 0) {
                         goto fail;
                     }
-                    handled = 1;
                     break;
                 }
             }
-
-            (void)handled;
         }
     }
 
@@ -303,11 +297,11 @@ fail:
 }
 
 int zt_build_trampoline(const zt_probe_info_t *probe,
-                   uint64_t entry_stub_addr,
-                   uint64_t trampoline_addr,
-                   uint8_t *trampoline_buf,
-                   size_t trampoline_buf_size,
-                   size_t *trampoline_size_out) {
+                        uint64_t entry_stub_addr,
+                        uint64_t trampoline_addr,
+                        uint8_t *trampoline_buf,
+                        size_t trampoline_buf_size,
+                        size_t *trampoline_size_out) {
     size_t offset;
     size_t needed_size;
     size_t relocated_size;

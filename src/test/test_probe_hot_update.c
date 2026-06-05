@@ -10,21 +10,10 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "../../include/zt_filter.h"
-#include "../../include/zt_injector.h"
-#include "../../include/zt_trace_runner.h"
+#include "zt_filter.h"
+#include "zt_injector.h"
+#include "zt_trace_runner.h"
 #include "test_trace_utils.h"
-
-static long elapsed_ms_since(const struct timespec *start) {
-    struct timespec now;
-
-    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
-        return -1;
-    }
-
-    return (now.tv_sec - start->tv_sec) * 1000L +
-           (now.tv_nsec - start->tv_nsec) / 1000000L;
-}
 
 static int drain_trace_for_ms(pid_t child, long duration_ms) {
     struct timespec start;
@@ -33,7 +22,7 @@ static int drain_trace_for_ms(pid_t child, long duration_ms) {
         return -1;
     }
 
-    while (elapsed_ms_since(&start) < duration_ms) {
+    while (zt_test_elapsed_ms_since(&start) < duration_ms) {
         int rc = zt_trace_poll();
 
         if (rc < 0) {
@@ -62,7 +51,7 @@ static int wait_for_status(pid_t child, int status_fd, const char *marker, long 
 
     memset(text, 0, sizeof(text));
 
-    while (elapsed_ms_since(&start) < timeout_ms) {
+    while (zt_test_elapsed_ms_since(&start) < timeout_ms) {
         fd_set readfds;
         struct timeval tv;
         int nfds;
@@ -121,7 +110,7 @@ static int wait_for_child_exit(pid_t child, long timeout_ms) {
         return -1;
     }
 
-    while (elapsed_ms_since(&start) < timeout_ms) {
+    while (zt_test_elapsed_ms_since(&start) < timeout_ms) {
         int status;
         pid_t waited = waitpid(child, &status, WNOHANG);
         int rc;

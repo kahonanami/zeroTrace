@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "../include/zt_sigconf.h"
+#include "zt_sigconf.h"
 
 static zt_func_sig_t g_sig_table[ZT_SIGCONF_MAX_FUNCS];
 static int g_sig_count;
@@ -321,7 +321,7 @@ static int zt_event_arg_value_ext(const zt_trace_event_t *event,
         return -1;
     }
 
-    if (index < 6) {
+    if (index < ZT_TRACE_GP_ARG_COUNT) {
         *value_out = zt_event_arg_value(event, index);
         return 0;
     }

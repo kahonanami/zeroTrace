@@ -3,8 +3,8 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "../../include/zt_injector.h"
-#include "../../include/zt_trace_runner.h"
+#include "zt_injector.h"
+#include "zt_trace_runner.h"
 
 static long long diff_ns(const struct timespec *start, const struct timespec *end) {
     return ((long long)(end->tv_sec - start->tv_sec) * 1000000000LL) +

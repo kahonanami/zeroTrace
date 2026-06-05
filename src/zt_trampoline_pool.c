@@ -2,7 +2,7 @@
 #include <string.h>
 #include <sys/mman.h>
 
-#include "../include/zt_trampoline_manager.h"
+#include "zt_trampoline_manager.h"
 
 static int zt_trampoline_pool_all_free(const zt_trampoline_pool_t *pool) {
     int i;

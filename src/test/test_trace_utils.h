@@ -9,8 +9,8 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "../../include/zt_injector.h"
-#include "../../include/zt_trace_runner.h"
+#include "zt_injector.h"
+#include "zt_trace_runner.h"
 
 static int zt_test_make_log_path(char *path, size_t size, const char *name) {
     struct timespec ts;
@@ -90,9 +90,19 @@ static __attribute__((unused)) int zt_test_count_substring(const char *text, con
     return count;
 }
 
+static __attribute__((unused)) long zt_test_elapsed_ms_since(const struct timespec *start) {
+    struct timespec now;
+
+    if (start == NULL || clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        return -1;
+    }
+
+    return (now.tv_sec - start->tv_sec) * 1000L +
+           (now.tv_nsec - start->tv_nsec) / 1000000L;
+}
+
 static __attribute__((unused)) int zt_test_wait_trace_done(unsigned int timeout_ms) {
     struct timespec start;
-    struct timespec now;
 
     if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) {
         return -1;
@@ -105,12 +115,7 @@ static __attribute__((unused)) int zt_test_wait_trace_done(unsigned int timeout_
             return -1;
         }
 
-        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
-            return -1;
-        }
-
-        if (((now.tv_sec - start.tv_sec) * 1000) +
-            ((now.tv_nsec - start.tv_nsec) / 1000000) > (long)timeout_ms) {
+        if (zt_test_elapsed_ms_since(&start) > (long)timeout_ms) {
             return -1;
         }
 

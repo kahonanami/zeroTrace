@@ -2,8 +2,7 @@
 
 #include <stdint.h>
 
-#define MAX_SAVED_RET_ADDR 256
-#define ZT_TRACE_EVENT_CAPACITY 1024
+#define ZT_TRACE_EVENT_CAPACITY 4096
 #define ZT_TRACE_BUFFER_MAGIC 0x5a54425546464552ULL
 #define ZT_PROBE_FILTER_EXPR_MAX 128
 #define ZT_PROBE_FILTER_TOKEN_CAP 64
@@ -147,10 +146,8 @@ typedef struct {
 } zt_payload_config_t;
 
 int zt_payload_init(const zt_payload_config_t *config);
-void *zt_payload_get_entry_stub_addr(void);
 void zt_handle_entry(ctx_t *context, const void *fp_state_area);
 void zt_handle_return(ctx_t *context, const void *fp_state_area);
 uint64_t save_probe_frame_c(uint64_t ret_addr, uint64_t func_id);
 uint64_t peek_probe_id_c(void);
-uint64_t peek_call_id_c(void);
 uint64_t get_ret_addr_c(void);

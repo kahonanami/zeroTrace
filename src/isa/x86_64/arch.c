@@ -106,18 +106,6 @@ static const zt_arch_remote_exec_ops_t kRemoteExecOps = {
     .get_retval = zt_get_retval,
 };
 
-zt_arch_kind_t zt_arch_current(void) {
-    return ZT_ARCH_X86_64;
-}
-
-const char *zt_arch_name(void) {
-    return "x86_64";
-}
-
-int zt_arch_is_supported(void) {
-    return 1;
-}
-
 int zt_arch_get_pc(pid_t pid, uint64_t *pc_out) {
     struct user_regs_struct regs;
 

@@ -6,8 +6,8 @@
 #include <string.h>
 #include <unistd.h>
 
-#include "../../include/zt_injector.h"
-#include "../../include/zt_trace_runner.h"
+#include "zt_injector.h"
+#include "zt_trace_runner.h"
 #include "test_trace_utils.h"
 
 static const char *k_symbols[] = {

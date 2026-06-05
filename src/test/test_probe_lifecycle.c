@@ -9,11 +9,11 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#include "../../include/zt_arch.h"
-#include "../../include/zt_injector.h"
-#include "../../include/zt_filter.h"
-#include "../../include/zt_trampoline_manager.h"
-#include "../../include/zt_trace_runner.h"
+#include "zt_arch.h"
+#include "zt_injector.h"
+#include "zt_filter.h"
+#include "zt_trampoline_manager.h"
+#include "zt_trace_runner.h"
 #include "test_trace_utils.h"
 
 static const char *k_symbols[] = {
