@@ -71,9 +71,10 @@ BENCHMARK_BINS := \
 	$(TEST_BIN_DIR)/test_benchmark_target \
 	$(TEST_BIN_DIR)/test_benchmark_runner \
 	$(TEST_BIN_DIR)/test_benchmark_latency
-NON_AUTO_TEST_BINS := $(TEST_FIXTURE_BINS) $(THREAD_FIXTURE_BINS) $(MANUAL_TEST_BINS)
-CORE_TEST_BINS := $(filter-out $(NON_AUTO_TEST_BINS), $(TEST_BINS))
-AUTO_TEST_BINS := $(filter-out $(BENCHMARK_BINS), $(CORE_TEST_BINS))
+STANDALONE_TEST_BINS := $(TEST_FIXTURE_BINS) $(THREAD_FIXTURE_BINS) $(MANUAL_TEST_BINS)
+RUN_TEST_SKIP_BINS := $(STANDALONE_TEST_BINS) $(BENCHMARK_BINS)
+CORE_TEST_BINS := $(filter-out $(STANDALONE_TEST_BINS), $(TEST_BINS))
+AUTO_TEST_BINS := $(filter-out $(RUN_TEST_SKIP_BINS), $(TEST_BINS))
 APP_TARGET := $(BIN_DIR)/ztrace
 
 .PHONY: all clean directories test run-tests benchmark print-arch-config

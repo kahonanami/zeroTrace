@@ -62,6 +62,8 @@ static int run_filter_short_circuit_semantics(void) {
         expect_filter_result("arg0 == 0 || 10 / arg0 > 1", 20, 0) != 0 ||
         expect_filter_result("arg0 != 0 && 10 / arg0 > 1", 0, 0) != 0 ||
         expect_filter_result("arg0 != 0 && 10 / arg0 > 1", 5, 1) != 0 ||
+        expect_filter_result("arg0 == 0x10", 16, 1) != 0 ||
+        expect_filter_result("arg0 < 0x10", 16, 0) != 0 ||
         expect_filter_result("10 / arg0 > 1", 0, 0) != 0) {
         return 1;
     }

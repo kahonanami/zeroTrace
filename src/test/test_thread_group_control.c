@@ -15,9 +15,19 @@
 
 #include "zt_injector.h"
 
-#define REQUIRED_STOP_ROUNDS 80
-#define MIN_TRACKED_THREADS 12
-#define MIN_RESUME_PROGRESS_ROUNDS 20
+enum {
+    REQUIRED_STOP_ROUNDS = 80,
+    MIN_TRACKED_THREADS = 12,
+    MIN_RESUME_PROGRESS_ROUNDS = 20,
+    USEC_PER_SEC = 1000000,
+    TARGET_READY_ATTEMPTS = 100,
+    TARGET_READY_REPORT_TIMEOUT_US = 10000,
+    TARGET_STARTUP_WAIT_US = 100000,
+    STOP_STRESS_PAUSE_US = 4000,
+    STOP_QUIET_TIMEOUT_US = 3000,
+    RESUME_SETTLE_WAIT_US = 3000,
+    RESUME_REPORT_TIMEOUT_US = 30000,
+};
 
 static int count_task_threads(pid_t pid) {
     char path[64];
@@ -92,8 +102,8 @@ static int wait_for_report(int fd, long timeout_us) {
 
     FD_ZERO(&readfds);
     FD_SET(fd, &readfds);
-    tv.tv_sec = timeout_us / 1000000L;
-    tv.tv_usec = timeout_us % 1000000L;
+    tv.tv_sec = timeout_us / USEC_PER_SEC;
+    tv.tv_usec = timeout_us % USEC_PER_SEC;
 
     do {
         rc = select(fd + 1, &readfds, NULL, NULL, &tv);
@@ -182,8 +192,8 @@ static pid_t start_thread_control_target(int *report_fd_out) {
 static int wait_for_target_report(int fd) {
     int i;
 
-    for (i = 0; i < 100; ++i) {
-        int rc = wait_for_report(fd, 10000);
+    for (i = 0; i < TARGET_READY_ATTEMPTS; ++i) {
+        int rc = wait_for_report(fd, TARGET_READY_REPORT_TIMEOUT_US);
 
         if (rc < 0) {
             return -1;
@@ -212,7 +222,7 @@ int main(void) {
         return 1;
     }
 
-    usleep(100000);
+    usleep(TARGET_STARTUP_WAIT_US);
 
     if (zt_injector_attach(&session, child) != 0) {
         fprintf(stderr, "failed to attach thread-control target\n");
@@ -239,7 +249,7 @@ int main(void) {
         int task_threads;
         int stopped_threads;
 
-        usleep(4000);
+        usleep(STOP_STRESS_PAUSE_US);
 
         if (zt_injector_interrupt_all(&session) != 0) {
             fprintf(stderr, "interrupt_all failed at round %d\n", round);
@@ -264,7 +274,7 @@ int main(void) {
             goto cleanup;
         }
 
-        if (expect_no_report(report_fd, 3000) != 0) {
+        if (expect_no_report(report_fd, STOP_QUIET_TIMEOUT_US) != 0) {
             fprintf(stderr, "target reported progress while all threads should be stopped\n");
             goto cleanup;
         }
@@ -281,8 +291,8 @@ int main(void) {
             goto cleanup;
         }
 
-        usleep(3000);
-        if (wait_for_report(report_fd, 30000) > 0) {
+        usleep(RESUME_SETTLE_WAIT_US);
+        if (wait_for_report(report_fd, RESUME_REPORT_TIMEOUT_US) > 0) {
             ++resume_progress_rounds;
         }
     }

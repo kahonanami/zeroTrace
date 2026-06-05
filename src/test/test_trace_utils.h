@@ -14,6 +14,12 @@
 
 #define ZT_TEST_ARRAY_LEN(x) ((int)(sizeof(x) / sizeof((x)[0])))
 
+enum {
+    ZT_TEST_MSEC_PER_SEC = 1000,
+    ZT_TEST_NSEC_PER_MSEC = 1000000,
+    ZT_TEST_TRACE_POLL_INTERVAL_US = 10000,
+};
+
 static int zt_test_make_log_path(char *path, size_t size, const char *name) {
     struct timespec ts;
 
@@ -99,8 +105,8 @@ static __attribute__((unused)) long zt_test_elapsed_ms_since(const struct timesp
         return -1;
     }
 
-    return (now.tv_sec - start->tv_sec) * 1000L +
-           (now.tv_nsec - start->tv_nsec) / 1000000L;
+    return (now.tv_sec - start->tv_sec) * ZT_TEST_MSEC_PER_SEC +
+           (now.tv_nsec - start->tv_nsec) / ZT_TEST_NSEC_PER_MSEC;
 }
 
 static __attribute__((unused)) int zt_test_wait_trace_done(unsigned int timeout_ms) {
@@ -121,7 +127,7 @@ static __attribute__((unused)) int zt_test_wait_trace_done(unsigned int timeout_
             return -1;
         }
 
-        usleep(10000);
+        usleep(ZT_TEST_TRACE_POLL_INTERVAL_US);
     }
 
     return 0;

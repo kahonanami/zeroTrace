@@ -21,6 +21,8 @@ enum {
     ZT_FP_STATE_VEC_STRIDE = 16,
 };
 
+static const uint64_t NSEC_PER_SEC = 1000000000ULL;
+
 static __thread zt_saved_probe_frame_t saved_frames[ZT_MAX_SAVED_RET_ADDR];
 static __thread int call_stack_idx;
 static __thread uint64_t last_call_id;
@@ -39,7 +41,7 @@ static uint64_t zt_clock_monotonic_ns(void) {
         return 0;
     }
 
-    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    return (uint64_t)ts.tv_sec * NSEC_PER_SEC + (uint64_t)ts.tv_nsec;
 }
 
 static uint64_t zt_gettid_u64(void) {
@@ -296,15 +298,14 @@ static void zt_run_call_action(const ctx_t *context, uint64_t call_id) {
 }
 
 int zt_payload_init(const zt_payload_config_t *config) {
+    zt_trace_buffer_t *buffer;
+
     if (config != NULL) {
         g_payload_config = *config;
     }
 
-    if (g_payload_config.shared_buffer_addr != 0 &&
-        g_payload_config.shared_buffer_size >= sizeof(zt_trace_buffer_t)) {
-        zt_trace_buffer_t *buffer =
-            (zt_trace_buffer_t *)(uintptr_t)g_payload_config.shared_buffer_addr;
-
+    buffer = zt_get_trace_buffer();
+    if (buffer != NULL) {
         memset(buffer, 0, sizeof(*buffer));
         buffer->magic = ZT_TRACE_BUFFER_MAGIC;
         buffer->write_seq = 0;

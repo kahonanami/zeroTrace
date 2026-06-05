@@ -5,6 +5,10 @@
 #include "zt_injector.h"
 #include "zt_trace_runner.h"
 
+enum {
+    TRACE_POLL_INTERVAL_US = 10000,
+};
+
 int main(int argc, char **argv) {
     zt_injector_session_t session;
     char *endptr;
@@ -44,7 +48,7 @@ int main(int argc, char **argv) {
             zt_injector_detach(&session);
             return 1;
         }
-        usleep(10000);
+        usleep(TRACE_POLL_INTERVAL_US);
     }
 
     zt_trace_shutdown();

@@ -14,6 +14,8 @@ from pathlib import Path
 ITERATIONS = int(os.environ.get("ZT_BENCH_ITERATIONS", "1000000"))
 BENCH_REPEATS = int(os.environ.get("ZT_BENCH_REPEATS", "5"))
 LATENCY_ROUNDS = int(os.environ.get("ZT_BENCH_LATENCY_ROUNDS", "1000"))
+NSEC_PER_MSEC = 1_000_000.0
+ZTRACE_RUNNER_TIMEOUT_SEC = 20.0
 ROOT_DIR = Path(__file__).resolve().parent.parent
 TARGET = ROOT_DIR / "bin" / "tests" / "test_benchmark_target"
 BENCH_RUNNER = ROOT_DIR / "bin" / "tests" / "test_benchmark_runner"
@@ -27,6 +29,16 @@ ZTRACE_RUNNER_OUT = RESULT_DIR / "ztrace.runner.out"
 ZTRACE_LOG_OUT = RESULT_DIR / "ztrace.benchmark.log"
 LATENCY_OUT = RESULT_DIR / "latency.out"
 REPORT_OUT = RESULT_DIR / "report.txt"
+RESULT_FILES = [
+    BASELINE_OUT,
+    UPROBE_OUT,
+    UPROBE_TRACE_OUT,
+    ZTRACE_OUT,
+    ZTRACE_RUNNER_OUT,
+    ZTRACE_LOG_OUT,
+    LATENCY_OUT,
+    REPORT_OUT,
+]
 
 
 def write_text(path: Path, data: str) -> None:
@@ -315,10 +327,10 @@ def run_ztrace(round_index: int) -> int:
 
     try:
         print("  - waiting for benchmark runner to become ready...")
-        runner_output = read_process_until(runner_proc, "READY pid=", timeout=20.0)
+        runner_output = read_process_until(runner_proc, "READY pid=", timeout=ZTRACE_RUNNER_TIMEOUT_SEC)
         os.kill(target_proc.pid, signal.SIGUSR1)
-        target_output = wait_for_target_result(target_proc, timeout=20.0)
-        runner_output += wait_for_output(runner_proc, "DONE pid=", timeout=20.0)
+        target_output = wait_for_target_result(target_proc, timeout=ZTRACE_RUNNER_TIMEOUT_SEC)
+        runner_output += wait_for_output(runner_proc, "DONE pid=", timeout=ZTRACE_RUNNER_TIMEOUT_SEC)
     finally:
         stop_process(target_proc)
         stop_process(runner_proc)
@@ -365,7 +377,7 @@ def format_report(baseline_runs: list[int],
         for i in range(min(len(ztrace_runs), len(baseline_runs)))
     ]
 
-    if uprobe_runs is not None:
+    if uprobe_runs:
         uprobe_per_call = [value / ITERATIONS for value in uprobe_runs]
         uprobe_overheads = [
             (uprobe_runs[i] - baseline_runs[i]) / ITERATIONS
@@ -416,8 +428,8 @@ def format_report(baseline_runs: list[int],
         "\n"
         "Probe lifecycle latency\n"
         "-----------------------\n"
-        f"install latency avg   : {install_ns} ns ({install_ns / 1000000.0:.3f} ms) over {LATENCY_ROUNDS} rounds\n"
-        f"uninstall latency avg : {uninstall_ns} ns ({uninstall_ns / 1000000.0:.3f} ms) over {LATENCY_ROUNDS} rounds\n\n"
+        f"install latency avg   : {install_ns} ns ({install_ns / NSEC_PER_MSEC:.3f} ms) over {LATENCY_ROUNDS} rounds\n"
+        f"uninstall latency avg : {uninstall_ns} ns ({uninstall_ns / NSEC_PER_MSEC:.3f} ms) over {LATENCY_ROUNDS} rounds\n\n"
         "Files\n"
         "-----\n"
         f"baseline output : {BASELINE_OUT}\n"
@@ -458,7 +470,7 @@ def main() -> int:
         return 1
 
     RESULT_DIR.mkdir(parents=True, exist_ok=True)
-    for path in [BASELINE_OUT, UPROBE_OUT, UPROBE_TRACE_OUT, ZTRACE_OUT, ZTRACE_RUNNER_OUT, ZTRACE_LOG_OUT, LATENCY_OUT, REPORT_OUT]:
+    for path in RESULT_FILES:
         if path.exists():
             path.unlink()
 

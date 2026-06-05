@@ -142,14 +142,14 @@ bin/tests/test_probe_hot_update
 
 ```bash
 bin/tests/test_probe_lifecycle
-bin/tests/test_benchmark_latency
+make benchmark
 ```
 
 验证方法：
 
 - `test_probe_lifecycle` 在同一目标进程上安装 16 个 probe，并在 trace 结束时调用 shutdown/untrace 路径恢复原始指令。
 - `test_probe_lifecycle` 的 cleanup 子测试会在目标仍存活时记录 trampoline 地址、函数入口原始字节，并通过 payload path 字符串、`ZT_TRACE_BUFFER_MAGIC` 和 payload config 内容识别 runtime mmap 地址；执行 `zt_trace_remove_probe()` 后读取 `/proc/<pid>/maps` 和目标入口内存做差分验证。
-- `test_benchmark_latency` 对 `bench_getpid` 做 1000 轮 install/uninstall，统计平均延迟。
+- `make benchmark` 会调用 `test_benchmark_latency` 对 `bench_getpid` 做 1000 轮 install/uninstall，统计平均延迟。
 - trampoline pool 以 slot 管理远程 executable memory；slot 释放后若 pool 全空则远程 `munmap`。
 - trace runner 还会释放本轮 trace 创建的 payload path、trace buffer 和 payload config 等远程 runtime mmap 区域。
 
@@ -377,7 +377,7 @@ bin/tests/test_probe_lifecycle
 
 - 子测试 `run_conditional_probe` 使用 `arg0 >= 10 && arg0 < 20`。
 - 子测试 `run_probe_filter_update` 使用 `arg0 >= 15 && (arg0 < 20 || arg0 == 99)`。
-- 子测试 `run_filter_short_circuit_semantics` 使用 synthetic event 验证 `&&` / `||` 短路语义，特别覆盖 `arg0 == 0 || 10 / arg0 > 1` 这类右侧除零应被短路保护的表达式。
+- 子测试 `run_filter_short_circuit_semantics` 使用 synthetic event 验证 `&&` / `||` 短路语义，特别覆盖 `arg0 == 0 || 10 / arg0 > 1` 这类右侧除零应被短路保护的表达式，并覆盖 `0x10` 十六进制常量解析。
 
 关键断言：
 
@@ -512,7 +512,7 @@ make benchmark
 - uprobe：在具备 `bpftrace` 和非交互 sudo 权限时，用 kernel uprobe 采集同一函数。
 - lifecycle latency：对同一 probe 执行 `1,000` 轮 install/uninstall。
 
-`benchmark/report.txt` 位于被忽略的 `benchmark/` 目录中，代表最近一次本地运行结果；下面保留的是标准参数下已记录的 x86_64 参考结果：
+`make benchmark` 会在被忽略的 `benchmark/` 目录中生成 `report.txt` 和各子项日志；本节只摘录标准参数下已确认的 x86_64 参考结果：
 
 ```text
 iterations            : 1000000
@@ -545,7 +545,7 @@ uninstall latency avg : 76822 ns (0.077 ms) over 1000 rounds
 | F1 | 动态库函数探针插入，用户态跳转且不产生 trap | 遍历目标已加载模块解析符号，入口 patch 到远程 trampoline，再跳入 payload stub | `test_libc_trace` trace `write/read/printf`；`test_probe_lifecycle` 读回 patch，确认 x86_64 不是 `int3`、aarch64 不是 `brk` |
 | F2 | 获取至少前 6 个参数，遵循 ABI | entry event 保存 `args[0..5]`；x86_64 对应 `rdi/rsi/rdx/rcx/r8/r9`，aarch64 对应 `x0..x5` | `test_libc_trace`、`test_probe_lifecycle`、`test_thread_safety` |
 | F3 | 捕获函数返回值 | entry stub 伪造返回链，return 进入 exit stub；return event 记录整数 / 指针和浮点返回值 | `test_context_integrity`、`test_libc_trace`、`test_probe_hot_update` |
-| F4 | 探针清理，恢复原始指令，无内存泄漏 | `untrace` 恢复入口字节；trampoline slot 释放，pool 全空时远程 `munmap`；trace runner 释放 payload path、trace buffer 和 payload config | `test_probe_lifecycle` 的 maps-diff 清理子测试；`test_benchmark_latency` 1000 轮 install/uninstall |
+| F4 | 探针清理，恢复原始指令，无内存泄漏 | `untrace` 恢复入口字节；trampoline slot 释放，pool 全空时远程 `munmap`；trace runner 释放 payload path、trace buffer 和 payload config | `test_probe_lifecycle` 的 maps-diff 清理子测试；`make benchmark` 中的 `test_benchmark_latency` 1000 轮 install/uninstall |
 | F5 | 探针动态开关 | `disable` 恢复入口 patch 但保留 probe 元数据和 trampoline slot；`enable` 复用 slot 重装 patch | `test_thread_safety` 运行中 12 轮 enable/disable；`test_probe_hot_update` disabled 阶段零泄漏 |
 | F6 | 同一进程至少 16 个并发探针 | probe 表容量 32，trampoline pool 按 slot 管理 | `test_probe_lifecycle` 同进程安装 `probe_fn01..probe_fn16` 并校验日志 |
 | F7 | 多线程安全，不崩溃不死锁 | 线程组级 seize/interrupt/continue/detach；运行态刷新新线程；TLS shadow stack 按线程配对 return | `test_thread_safety`、`test_thread_group_control` |

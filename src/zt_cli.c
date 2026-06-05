@@ -60,6 +60,9 @@ enum {
     ZT_CLI_COMMAND_COUNT = sizeof(cmd_table) / sizeof(cmd_table[0]),
 };
 
+static const uint64_t NSEC_PER_SEC = 1000000000ULL;
+static const uint64_t CLI_LOG_POLL_INTERVAL_NS = 50000000ULL;
+
 static zt_injector_session_t g_cli_session;
 static bool g_cli_attached;
 static char g_cli_log_path[PATH_MAX];
@@ -79,7 +82,7 @@ static uint64_t zt_cli_monotonic_ns(void) {
         return 0;
     }
 
-    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    return (uint64_t)ts.tv_sec * NSEC_PER_SEC + (uint64_t)ts.tv_nsec;
 }
 
 static int zt_cli_stop_target(void) {
@@ -150,6 +153,17 @@ static zt_probe_info_t *zt_cli_find_probe(const char *target, uint64_t *probe_id
     }
 
     *probe_id_out = probe->probe_id;
+    return probe;
+}
+
+static zt_probe_info_t *zt_cli_require_probe_target(const char *target,
+                                                    uint64_t *probe_id_out) {
+    zt_probe_info_t *probe = zt_cli_find_probe(target, probe_id_out);
+
+    if (probe == NULL) {
+        printf("Probe not found: %s\n", target);
+    }
+
     return probe;
 }
 
@@ -235,9 +249,12 @@ static char *zt_next_arg(char *args) {
     return strtok(args, " ");
 }
 
+static int zt_cli_compile_remaining_filter(zt_probe_filter_t *filter) {
+    return zt_probe_filter_compile(strtok(NULL, "\n"), filter);
+}
+
 static int zt_cli_parse_trace_filter(zt_probe_filter_t *filter) {
     char *maybe_if;
-    char *expr;
 
     if (filter == NULL) {
         return -1;
@@ -254,8 +271,7 @@ static int zt_cli_parse_trace_filter(zt_probe_filter_t *filter) {
         return -1;
     }
 
-    expr = strtok(NULL, "\n");
-    return zt_probe_filter_compile(expr, filter);
+    return zt_cli_compile_remaining_filter(filter);
 }
 
 static char *rl_gets(void) {
@@ -327,7 +343,6 @@ static void zt_cli_print_log_updates(void) {
 }
 
 static int zt_cli_event_hook(void) {
-    const uint64_t poll_interval_ns = 50000000ULL;
     uint64_t now;
 
     if (!zt_trace_is_active()) {
@@ -337,7 +352,7 @@ static int zt_cli_event_hook(void) {
     now = zt_cli_monotonic_ns();
     if (now != 0 &&
         g_cli_last_poll_ns != 0 &&
-        now - g_cli_last_poll_ns < poll_interval_ns) {
+        now - g_cli_last_poll_ns < CLI_LOG_POLL_INTERVAL_NS) {
         return 0;
     }
 
@@ -531,8 +546,7 @@ static int cmd_enable(char *args) {
         return 0;
     }
 
-    if (zt_cli_find_probe(target, &probe_id) == NULL) {
-        printf("Probe not found: %s\n", target);
+    if (zt_cli_require_probe_target(target, &probe_id) == NULL) {
         return 0;
     }
 
@@ -596,9 +610,8 @@ static int cmd_disable(char *args) {
         return 0;
     }
 
-    probe = zt_cli_find_probe(target, &probe_id);
+    probe = zt_cli_require_probe_target(target, &probe_id);
     if (probe == NULL) {
-        printf("Probe not found: %s\n", target);
         return 0;
     }
 
@@ -628,8 +641,7 @@ static int cmd_update(char *args) {
         return 0;
     }
 
-    if (zt_cli_find_probe(target, &probe_id) == NULL) {
-        printf("Probe not found: %s\n", target);
+    if (zt_cli_require_probe_target(target, &probe_id) == NULL) {
         return 0;
     }
 
@@ -697,7 +709,7 @@ static int cmd_update(char *args) {
     }
 
     if (strcmp(mode, "if") != 0 ||
-        zt_probe_filter_compile(strtok(NULL, "\n"), &filter) != 0) {
+        zt_cli_compile_remaining_filter(&filter) != 0) {
         printf("%s\n", kUpdateUsage);
         return 0;
     }
@@ -727,8 +739,7 @@ static int cmd_untrace(char *args) {
         return 0;
     }
 
-    if (zt_cli_find_probe(target, &probe_id) == NULL) {
-        printf("Probe not found: %s\n", target);
+    if (zt_cli_require_probe_target(target, &probe_id) == NULL) {
         return 0;
     }
 

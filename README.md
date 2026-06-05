@@ -246,23 +246,15 @@ fp_mix(double a, double b) -> double
 make test
 ```
 
-当前测试覆盖：
+当前测试按赛题要求覆盖以下方向：
 
-- 通用寄存器、flags、浮点/SIMD 上下文保存恢复
-- trampoline 构造
-- libc/POSIX 动态库函数 trace
-- 16 个并发 probe 的生命周期测试，并逐个读回函数入口 patch，验证入口被改写为架构跳转模板而不是 trap 指令
-- probe 清理 maps-diff 测试：验证最后一个 probe 删除后远程 trampoline pool/runtime mmap 被释放，且函数入口原始字节恢复
-- 多线程 stress 测试：运行中新线程追踪、并发 probe 命中、动态 enable/disable，并用始终启用的 `thread_stable` 按 TID 校验 entry/return 严格配平
-- 线程组控制测试：目标持续创建/退出线程，反复 `interrupt_all/continue_all`，验证停止期间无心跳、恢复后继续运行
-- 异步信号下的 signal safety 测试
-- 短生命周期目标退出窗口测试：反复触发 probe 后立即退出，验证 `zt_trace_poll()` 不把正常退出、trace buffer 映射消失和退出后重复 poll 误判为错误
-- trace buffer reader 测试：故意让高频 probe 打满 ring buffer，验证消费端会输出 `ztrace:lost` 覆盖告警，而不是静默丢事件
-- 条件探针参数过滤测试
-- probe 热更新测试：分阶段验证 filter、probe 内 call action、disable/enable 状态切换，并确认 trampoline slot 不被重建；live 模式验证运行中 call action A/B 切换不会丢失 callee symbol 或错配返回值
-- probe 内目标进程函数调用测试：覆盖无参 call、带参 call 和 call action 表槽位碰撞回归
-- x86_64 / aarch64 架构后端选择 self-test：验证 Makefile 会按 `ARCH` 选择正确 ISA 后端、stub 和 trampoline 测试集合；该项是配置自检，aarch64 runtime 仍以目标 aarch64 机器上的 `make ARCH=aarch64 test` 为准
-- perf/ftrace 风格事件合流脚本 self-test
+- probe 生命周期、原始指令恢复、trampoline 构造和 runtime 资源清理
+- 参数/返回值、签名格式化、条件过滤和 probe 内 call action
+- 多 probe、多线程、线程组 stop/continue、signal safety 和短生命周期退出窗口
+- trace buffer wrap/lost event 处理和 perf/ftrace 风格合流脚本
+- x86_64 runtime 回归与 x86_64/aarch64 后端配置 self-test
+
+install/uninstall latency 由 `make benchmark` 中的 probe lifecycle latency 子项测量。逐项实验入口、关键断言和 F1-F7 / A1-A5 覆盖矩阵见 [docs/evaluation.md](./docs/evaluation.md)。
 
 ## Benchmark
 
@@ -289,18 +281,7 @@ ZT_BENCH_ITERATIONS=1000000 ZT_BENCH_REPEATS=5 make benchmark
 
 benchmark 目标函数是 `bench_getpid()`，它是测试程序中的一个 `noinline` wrapper，内部调用 `syscall(SYS_getpid)`，这样可以避免 libc/vDSO 细节干扰测量。
 
-运行完成后，结果会写到被忽略的 `benchmark/` 目录中，主要包括：
-
-- `benchmark/baseline.out`
-- `benchmark/uprobe.out`
-- `benchmark/uprobe.bpftrace.out`
-- `benchmark/ztrace.out`
-- `benchmark/ztrace.runner.out`
-- `benchmark/ztrace.benchmark.log`
-- `benchmark/latency.out`
-- `benchmark/report.txt`
-
-`benchmark/report.txt` 反映最近一次本地运行结果，可能会因为环境变量或机器负载不同而变化。下面是一组使用标准参数记录的 x86_64 benchmark 参考结果；该次运行环境没有非交互 sudo 权限，因此 kernel uprobe 项被脚本自动跳过：
+运行完成后，结果会写到被忽略的 `benchmark/` 目录中；`benchmark/report.txt` 是汇总报告，其余文件保留各子项 stdout / trace log 便于定位。下面是一组使用标准参数记录的 x86_64 benchmark 参考结果；该次运行环境没有非交互 sudo 权限，因此 kernel uprobe 项被脚本自动跳过：
 
 ```text
 iterations            : 1000000

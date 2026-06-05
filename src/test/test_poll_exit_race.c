@@ -13,19 +13,28 @@
 #include "zt_trace_runner.h"
 #include "test_trace_utils.h"
 
+enum {
+    DEFAULT_EXIT_RACE_ROUNDS = 50,
+    MAX_EXIT_RACE_ROUNDS = 10000,
+    TRACE_POLL_INTERVAL_US = 1000,
+    TARGET_STARTUP_WAIT_US = 50000,
+    TRACE_EXIT_TIMEOUT_MS = 5000,
+};
+
 static int exit_race_rounds(void) {
     const char *value = getenv("ZT_EXIT_RACE_ROUNDS");
     char *endptr;
     long rounds;
 
     if (value == NULL || value[0] == '\0') {
-        return 50;
+        return DEFAULT_EXIT_RACE_ROUNDS;
     }
 
     errno = 0;
     rounds = strtol(value, &endptr, 10);
-    if (errno != 0 || value == endptr || *endptr != '\0' || rounds <= 0 || rounds > 10000) {
-        return 50;
+    if (errno != 0 || value == endptr || *endptr != '\0' ||
+        rounds <= 0 || rounds > MAX_EXIT_RACE_ROUNDS) {
+        return DEFAULT_EXIT_RACE_ROUNDS;
     }
 
     return (int)rounds;
@@ -108,7 +117,7 @@ static int wait_trace_to_finish(pid_t child, long timeout_ms) {
             return -1;
         }
 
-        usleep(1000);
+        usleep(TRACE_POLL_INTERVAL_US);
     }
 
     return 0;
@@ -161,7 +170,7 @@ int main(void) {
             return 1;
         }
 
-        usleep(50000);
+        usleep(TARGET_STARTUP_WAIT_US);
         if (zt_injector_attach(&session, child) != 0) {
             restore_stdout(saved_stdout);
             fprintf(stderr, "attach failed in exit-race round %d\n", i);
@@ -188,7 +197,7 @@ int main(void) {
             return 1;
         }
 
-        if (wait_trace_to_finish(child, 5000) != 0) {
+        if (wait_trace_to_finish(child, TRACE_EXIT_TIMEOUT_MS) != 0) {
             restore_stdout(saved_stdout);
             fprintf(stderr, "zt_trace_poll returned an error in exit-race round %d\n", i);
             zt_trace_shutdown();

@@ -10,11 +10,15 @@
 #include <time.h>
 #include <unistd.h>
 
+static const int64_t NSEC_PER_SEC = 1000000000LL;
+static const long DEFAULT_ITERATIONS = 1000000L;
+static const char WAIT_SIGNAL_ENV[] = "ZT_BENCH_WAIT_SIGUSR1";
+
 static int64_t diff_ns(const struct timespec *start, const struct timespec *end) {
     int64_t sec = (int64_t)end->tv_sec - (int64_t)start->tv_sec;
     int64_t nsec = (int64_t)end->tv_nsec - (int64_t)start->tv_nsec;
 
-    return sec * 1000000000LL + nsec;
+    return sec * NSEC_PER_SEC + nsec;
 }
 
 __attribute__((noinline))
@@ -23,7 +27,7 @@ long bench_getpid(void) {
 }
 
 int main(int argc, char **argv) {
-    long iterations = 1000000;
+    long iterations = DEFAULT_ITERATIONS;
     const char *wait_env;
     struct timespec start;
     struct timespec end;
@@ -41,7 +45,7 @@ int main(int argc, char **argv) {
         }
     }
 
-    wait_env = getenv("ZT_BENCH_WAIT_SIGUSR1");
+    wait_env = getenv(WAIT_SIGNAL_ENV);
     if (wait_env != NULL && strcmp(wait_env, "1") == 0) {
         sigset_t set;
         int sig;

@@ -1,6 +1,13 @@
+# Build outputs
 bin/
 build/
-*.log
+
+# Runtime and benchmark artifacts
 benchmark/
+*.log
+*.out
+perf.data*
+
+# Python cache
 __pycache__/
 *.pyc

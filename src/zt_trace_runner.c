@@ -40,6 +40,8 @@ enum {
     ZT_TRACE_CALL_SYMBOL_CACHE_CAP = ZT_PAYLOAD_PROBE_ACTION_CAP * 2,
 };
 
+static const uint64_t NSEC_PER_SEC = 1000000000ULL;
+
 typedef enum {
     ZT_TRACE_RUNTIME_INACTIVE = 0,
     ZT_TRACE_RUNTIME_STOPPED,
@@ -84,6 +86,10 @@ static zt_entry_cache_slot_t g_entry_cache[ZT_TRACE_EVENT_CAPACITY];
 static zt_trace_event_t g_event_snapshot[ZT_TRACE_EVENT_CAPACITY];
 static uint64_t g_commit_before[ZT_TRACE_EVENT_CAPACITY];
 static uint64_t g_commit_after[ZT_TRACE_EVENT_CAPACITY];
+
+enum {
+    ZT_TRACE_READ_IOV_MAX = 256,
+};
 
 static void zt_trace_reset_active(int exit_observed) {
     if (g_active_trace.log_fp != NULL) {
@@ -610,8 +616,8 @@ static void zt_trace_print_event_prefix(FILE *out,
         return;
     }
 
-    ts_sec = (unsigned long long)(event->timestamp_ns / 1000000000ULL);
-    ts_nsec = (unsigned long long)(event->timestamp_ns % 1000000000ULL);
+    ts_sec = (unsigned long long)(event->timestamp_ns / NSEC_PER_SEC);
+    ts_nsec = (unsigned long long)(event->timestamp_ns % NSEC_PER_SEC);
     fprintf(out,
             "%s-%d/%llu [%03llu] %5llu.%09llu: ztrace:%s: ",
             comm,
@@ -789,7 +795,6 @@ static int zt_trace_read_commit_snapshot(zt_injector_session_t *session,
                                          uint64_t start_seq,
                                          uint64_t count,
                                          uint64_t commits[ZT_TRACE_EVENT_CAPACITY]) {
-    const long max_iov = 256;
     uint64_t offset;
 
     if (session == NULL || runtime == NULL || commits == NULL ||
@@ -797,15 +802,15 @@ static int zt_trace_read_commit_snapshot(zt_injector_session_t *session,
         return -1;
     }
 
-    for (offset = 0; offset < count; offset += (uint64_t)max_iov) {
-        struct iovec local_iov[256];
-        struct iovec remote_iov[256];
+    for (offset = 0; offset < count; offset += ZT_TRACE_READ_IOV_MAX) {
+        struct iovec local_iov[ZT_TRACE_READ_IOV_MAX];
+        struct iovec remote_iov[ZT_TRACE_READ_IOV_MAX];
         size_t batch_count = (size_t)(count - offset);
         size_t i;
         size_t batch_bytes;
 
-        if (batch_count > (size_t)max_iov) {
-            batch_count = (size_t)max_iov;
+        if (batch_count > ZT_TRACE_READ_IOV_MAX) {
+            batch_count = ZT_TRACE_READ_IOV_MAX;
         }
 
         for (i = 0; i < batch_count; ++i) {

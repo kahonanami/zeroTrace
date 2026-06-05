@@ -5,6 +5,7 @@
 #include "zt_trampoline_manager.h"
 
 static const size_t kPrefixSize = 16;
+static const size_t kTailSize = 22;
 
 static int fail_msg(const char *msg) {
     fprintf(stderr, "%s\n", msg);
@@ -59,7 +60,7 @@ static int test_plain_copy(void) {
         return fail_msg("zt_build_trampoline failed for plain copy");
     }
 
-    relocated_size = trampoline_size - kPrefixSize - 22u;
+    relocated_size = trampoline_size - kPrefixSize - kTailSize;
     if (relocated_size != probe.orig_len) {
         return fail_msg("unexpected relocated size for plain copy");
     }
@@ -91,7 +92,7 @@ static int test_rip_relative_relocation(void) {
         return fail_msg("zt_build_trampoline failed for RIP-relative case");
     }
 
-    relocated_size = trampoline_size - kPrefixSize - 22u;
+    relocated_size = trampoline_size - kPrefixSize - kTailSize;
     if (relocated_size != sizeof(kOrig)) {
         return fail_msg("unexpected relocated size for RIP-relative case");
     }
@@ -129,7 +130,7 @@ static int test_relative_call_rewrite(void) {
         return fail_msg("zt_build_trampoline failed for relative call case");
     }
 
-    relocated_size = trampoline_size - kPrefixSize - 22u;
+    relocated_size = trampoline_size - kPrefixSize - kTailSize;
     if (relocated_size != 17u) {
         return fail_msg("unexpected relocated size for relative call rewrite");
     }
@@ -169,7 +170,7 @@ static int test_conditional_jump_rewrite(void) {
         return fail_msg("zt_build_trampoline failed for conditional jump case");
     }
 
-    relocated_size = trampoline_size - kPrefixSize - 22u;
+    relocated_size = trampoline_size - kPrefixSize - kTailSize;
     if (relocated_size != 15u) {
         return fail_msg("unexpected relocated size for conditional jump rewrite");
     }

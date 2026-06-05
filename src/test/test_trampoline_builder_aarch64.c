@@ -9,6 +9,9 @@ enum {
     kPrefixSize = 44,
     kTailSize = 20,
     kMovAbsInsnCount = 4,
+    kMovAbsSize = kMovAbsInsnCount * kInsnSize,
+    kAbsBranchSize = kMovAbsSize + kInsnSize,
+    kCondAbsBranchSize = kInsnSize + kAbsBranchSize,
 };
 
 static int fail_msg(const char *msg) {
@@ -92,7 +95,7 @@ static int check_common_layout(const zt_probe_info_t *probe,
                           16,
                           continue_addr,
                           "wrong mov_abs x16 continue addr in trampoline tail") != 0 ||
-        expect_u32_at(trampoline, tail_offset + 16, 0xD61F0200u, "missing br x16 in trampoline tail") != 0) {
+        expect_u32_at(trampoline, tail_offset + kMovAbsSize, 0xD61F0200u, "missing br x16 in trampoline tail") != 0) {
         return -1;
     }
 
@@ -148,7 +151,7 @@ static int test_adr_rewrite(void) {
     }
 
     relocated_size = trampoline_size - kPrefixSize - kTailSize;
-    if (relocated_size != 16u) {
+    if (relocated_size != kMovAbsSize) {
         return fail_msg("unexpected relocated size for aarch64 adr rewrite");
     }
 
@@ -182,7 +185,7 @@ static int test_bl_rewrite(void) {
     }
 
     relocated_size = trampoline_size - kPrefixSize - kTailSize;
-    if (relocated_size != 20u) {
+    if (relocated_size != kAbsBranchSize) {
         return fail_msg("unexpected relocated size for aarch64 bl rewrite");
     }
 
@@ -192,7 +195,7 @@ static int test_bl_rewrite(void) {
                           16,
                           target_addr,
                           "aarch64 bl target rewrite mismatch") != 0 ||
-        expect_u32_at(trampoline, kPrefixSize + 16, 0xD63F0200u, "aarch64 bl missing blr x16") != 0) {
+        expect_u32_at(trampoline, kPrefixSize + kMovAbsSize, 0xD63F0200u, "aarch64 bl missing blr x16") != 0) {
         return -1;
     }
 
@@ -217,7 +220,7 @@ static int test_b_rewrite(void) {
     }
 
     relocated_size = trampoline_size - kPrefixSize - kTailSize;
-    if (relocated_size != 20u) {
+    if (relocated_size != kAbsBranchSize) {
         return fail_msg("unexpected relocated size for aarch64 b rewrite");
     }
 
@@ -227,7 +230,7 @@ static int test_b_rewrite(void) {
                           16,
                           target_addr,
                           "aarch64 b target rewrite mismatch") != 0 ||
-        expect_u32_at(trampoline, kPrefixSize + 16, 0xD61F0200u, "aarch64 b missing br x16") != 0) {
+        expect_u32_at(trampoline, kPrefixSize + kMovAbsSize, 0xD61F0200u, "aarch64 b missing br x16") != 0) {
         return -1;
     }
 
@@ -252,7 +255,7 @@ static int test_b_cond_rewrite(void) {
     }
 
     relocated_size = trampoline_size - kPrefixSize - kTailSize;
-    if (relocated_size != 24u) {
+    if (relocated_size != kCondAbsBranchSize) {
         return fail_msg("unexpected relocated size for aarch64 conditional branch rewrite");
     }
 
@@ -266,7 +269,7 @@ static int test_b_cond_rewrite(void) {
                           16,
                           target_addr,
                           "aarch64 conditional branch target rewrite mismatch") != 0 ||
-        expect_u32_at(trampoline, kPrefixSize + 20, 0xD61F0200u, "aarch64 conditional branch missing br x16") != 0) {
+        expect_u32_at(trampoline, kPrefixSize + kInsnSize + kMovAbsSize, 0xD61F0200u, "aarch64 conditional branch missing br x16") != 0) {
         return -1;
     }
 
@@ -292,7 +295,7 @@ static int test_cbz_rewrite(void) {
     }
 
     relocated_size = trampoline_size - kPrefixSize - kTailSize;
-    if (relocated_size != 24u) {
+    if (relocated_size != kCondAbsBranchSize) {
         return fail_msg("unexpected relocated size for aarch64 cbz rewrite");
     }
 
@@ -307,7 +310,7 @@ static int test_cbz_rewrite(void) {
                           16,
                           target_addr,
                           "aarch64 cbz target rewrite mismatch") != 0 ||
-        expect_u32_at(trampoline, kPrefixSize + 20, 0xD61F0200u, "aarch64 cbz missing br x16") != 0) {
+        expect_u32_at(trampoline, kPrefixSize + kInsnSize + kMovAbsSize, 0xD61F0200u, "aarch64 cbz missing br x16") != 0) {
         return -1;
     }
 
@@ -333,7 +336,7 @@ static int test_tbz_rewrite(void) {
     }
 
     relocated_size = trampoline_size - kPrefixSize - kTailSize;
-    if (relocated_size != 24u) {
+    if (relocated_size != kCondAbsBranchSize) {
         return fail_msg("unexpected relocated size for aarch64 tbz rewrite");
     }
 
@@ -348,7 +351,7 @@ static int test_tbz_rewrite(void) {
                           16,
                           target_addr,
                           "aarch64 tbz target rewrite mismatch") != 0 ||
-        expect_u32_at(trampoline, kPrefixSize + 20, 0xD61F0200u, "aarch64 tbz missing br x16") != 0) {
+        expect_u32_at(trampoline, kPrefixSize + kInsnSize + kMovAbsSize, 0xD61F0200u, "aarch64 tbz missing br x16") != 0) {
         return -1;
     }
 

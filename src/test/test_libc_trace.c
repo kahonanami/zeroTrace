@@ -39,7 +39,8 @@ static int check_sigconf_parser(void) {
         printf_sig->param_count < 1 ||
         strcmp(printf_sig->params[0].name, "fmt") != 0 ||
         strcmp(printf_sig->params[0].decl, "const char *") != 0 ||
-        printf_sig->params[0].type != ZT_SIG_TYPE_CSTR) {
+        printf_sig->params[0].type != ZT_SIG_TYPE_CSTR ||
+        printf_sig->ret.type != ZT_SIG_TYPE_INT) {
         fprintf(stderr, "printf signature parser mismatch\n");
         return -1;
     }
@@ -47,7 +48,8 @@ static int check_sigconf_parser(void) {
     if (read_sig->param_count < 2 ||
         strcmp(read_sig->params[1].name, "buf") != 0 ||
         strcmp(read_sig->params[1].decl, "buffer") != 0 ||
-        read_sig->params[1].type != ZT_SIG_TYPE_BUF) {
+        read_sig->params[1].type != ZT_SIG_TYPE_BUF ||
+        read_sig->ret.type != ZT_SIG_TYPE_LONG) {
         fprintf(stderr, "read signature parser mismatch\n");
         return -1;
     }
@@ -55,7 +57,8 @@ static int check_sigconf_parser(void) {
     if (write_sig->param_count < 2 ||
         strcmp(write_sig->params[1].name, "buf") != 0 ||
         strcmp(write_sig->params[1].decl, "const buffer") != 0 ||
-        write_sig->params[1].type != ZT_SIG_TYPE_CONST_BUF) {
+        write_sig->params[1].type != ZT_SIG_TYPE_CONST_BUF ||
+        write_sig->ret.type != ZT_SIG_TYPE_LONG) {
         fprintf(stderr, "write signature parser mismatch\n");
         return -1;
     }

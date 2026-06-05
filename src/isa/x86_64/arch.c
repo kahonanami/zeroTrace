@@ -66,7 +66,9 @@ static void zt_prepare_call_regs(void *regs_out,
 static int zt_build_syscall_stub(uint8_t *stub_code,
                                  size_t stub_size,
                                  const uint8_t *saved_code) {
-    if (stub_size != ZT_X86_64_REMOTE_SYSCALL_CODE_SIZE || saved_code == NULL) {
+    if (stub_code == NULL ||
+        stub_size != ZT_X86_64_REMOTE_SYSCALL_CODE_SIZE ||
+        saved_code == NULL) {
         return -1;
     }
 
@@ -81,7 +83,9 @@ static int zt_build_call_stub(uint8_t *stub_code,
                               size_t stub_size,
                               const uint8_t *saved_code,
                               uint64_t func_addr) {
-    if (stub_size != ZT_X86_64_REMOTE_CALL_CODE_SIZE || saved_code == NULL) {
+    if (stub_code == NULL ||
+        stub_size != ZT_X86_64_REMOTE_CALL_CODE_SIZE ||
+        saved_code == NULL) {
         return -1;
     }
 

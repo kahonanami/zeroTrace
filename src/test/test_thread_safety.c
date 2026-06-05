@@ -12,13 +12,22 @@
 #include "zt_trace_runner.h"
 #include "test_trace_utils.h"
 
-#define MAX_SEEN_TIDS 64
-#define MIN_EXPECTED_LOG_TIDS 8
-#define MIN_EXPECTED_TRACKED_THREADS 8
-#define MIN_MIX_EVENTS_PER_KIND 100
-#define MIN_PAIR_EVENTS_PER_KIND 100
-#define MIN_STABLE_EVENTS_PER_KIND 1000
-#define REQUIRED_TOGGLE_COUNT 12
+enum {
+    MAX_SEEN_TIDS = 64,
+    MIN_EXPECTED_LOG_TIDS = 8,
+    MIN_EXPECTED_TRACKED_THREADS = 8,
+    MIN_MIX_EVENTS_PER_KIND = 100,
+    MIN_PAIR_EVENTS_PER_KIND = 100,
+    MIN_STABLE_EVENTS_PER_KIND = 1000,
+    REQUIRED_TOGGLE_COUNT = 12,
+    TARGET_STARTUP_WAIT_US = 100000,
+    THREAD_STRESS_TIMEOUT_MS = 10000,
+    TOGGLE_INITIAL_DELAY_MS = 24,
+    TOGGLE_INTERVAL_MS = 8,
+    STRESS_REQUIRED_DURATION_MS = 750,
+    TRACE_POLL_INTERVAL_US = 1000,
+    FINAL_DRAIN_POLLS = 20,
+};
 
 typedef struct {
     long tid;
@@ -237,7 +246,7 @@ int main(void) {
     int stress_done = 0;
     int toggle_count = 0;
     int mix_enabled = 1;
-    long next_toggle_ms = 24;
+    long next_toggle_ms = TOGGLE_INITIAL_DELAY_MS;
     int rc = 1;
     struct timespec start_ts;
 
@@ -260,7 +269,7 @@ int main(void) {
         _exit(1);
     }
 
-    usleep(100000);
+    usleep(TARGET_STARTUP_WAIT_US);
 
     if (zt_injector_attach(&session, child) != 0) {
         fprintf(stderr, "attach failed\n");
@@ -295,7 +304,7 @@ int main(void) {
     while (zt_trace_is_active()) {
         long elapsed_ms = zt_test_elapsed_ms_since(&start_ts);
 
-        if (elapsed_ms < 0 || elapsed_ms > 10000) {
+        if (elapsed_ms < 0 || elapsed_ms > THREAD_STRESS_TIMEOUT_MS) {
             fprintf(stderr, "threaded trace stress timed out\n");
             goto cleanup_trace;
         }
@@ -342,15 +351,16 @@ int main(void) {
                 goto cleanup_trace;
             }
             ++toggle_count;
-            next_toggle_ms += 8;
+            next_toggle_ms += TOGGLE_INTERVAL_MS;
         }
 
-        if (toggle_count >= REQUIRED_TOGGLE_COUNT && elapsed_ms >= 750) {
+        if (toggle_count >= REQUIRED_TOGGLE_COUNT &&
+            elapsed_ms >= STRESS_REQUIRED_DURATION_MS) {
             stress_done = 1;
             break;
         }
 
-        usleep(1000);
+        usleep(TRACE_POLL_INTERVAL_US);
     }
 
     if (!stress_done) {
@@ -358,7 +368,7 @@ int main(void) {
         goto cleanup_trace;
     }
 
-    for (int i = 0; i < 20; ++i) {
+    for (int i = 0; i < FINAL_DRAIN_POLLS; ++i) {
         if (zt_trace_poll() < 0) {
             fprintf(stderr, "final trace drain failed for threaded target\n");
             goto cleanup_trace;
@@ -366,7 +376,7 @@ int main(void) {
         if (session.thread_count > max_tracked_threads) {
             max_tracked_threads = session.thread_count;
         }
-        usleep(1000);
+        usleep(TRACE_POLL_INTERVAL_US);
     }
 
     log_text = zt_test_read_file(log_path);

@@ -11,10 +11,6 @@ static int zt_trampoline_pool_slot_valid(int slot) {
 static int zt_trampoline_pool_all_free(const zt_trampoline_pool_t *pool) {
     int i;
 
-    if (pool == NULL) {
-        return 1;
-    }
-
     for (i = 0; i < ZT_TRAMPOLINE_POOL_SLOTS; ++i) {
         if (pool->slot_used[i]) {
             return 0;

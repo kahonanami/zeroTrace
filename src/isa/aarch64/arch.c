@@ -121,7 +121,7 @@ static int zt_build_syscall_stub(uint8_t *stub_code,
                                  const uint8_t *saved_code) {
     (void)saved_code;
 
-    if (stub_size != ZT_AARCH64_REMOTE_SYSCALL_CODE_SIZE) {
+    if (stub_code == NULL || stub_size != ZT_AARCH64_REMOTE_SYSCALL_CODE_SIZE) {
         return -1;
     }
 
@@ -136,7 +136,7 @@ static int zt_build_call_stub(uint8_t *stub_code,
                               uint64_t func_addr) {
     (void)saved_code;
 
-    if (stub_size != ZT_AARCH64_REMOTE_CALL_CODE_SIZE) {
+    if (stub_code == NULL || stub_size != ZT_AARCH64_REMOTE_CALL_CODE_SIZE) {
         return -1;
     }
 

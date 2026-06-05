@@ -48,8 +48,10 @@ static int reap_child(pid_t child) {
 int main(void) {
     zt_injector_session_t session;
     char log_path[256];
-    char *log_text;
-    pid_t child;
+    char *log_text = NULL;
+    pid_t child = -1;
+    int attached = 0;
+    int target_released = 0;
     int ret = 1;
 
     if (zt_test_make_log_path(log_path, sizeof(log_path), "zt-trace-buffer") != 0) {
@@ -60,30 +62,26 @@ int main(void) {
     child = start_trace_buffer_target();
     if (child < 0) {
         perror("fork");
-        unlink(log_path);
-        return 1;
+        goto out;
     }
 
     usleep(50000);
     if (zt_injector_attach(&session, child) != 0) {
         fprintf(stderr, "failed to attach trace-buffer target\n");
-        kill(child, SIGKILL);
-        unlink(log_path);
-        return 1;
+        goto out;
     }
+    attached = 1;
 
     if (zt_trace_start_in_session(&session, "overflow_probe", log_path) != 0) {
         fprintf(stderr, "failed to trace overflow_probe\n");
-        zt_injector_detach(&session);
-        kill(child, SIGKILL);
-        unlink(log_path);
-        return 1;
+        goto out;
     }
 
     if (kill(child, SIGUSR1) != 0) {
         perror("kill");
         goto out;
     }
+    target_released = 1;
 
     usleep(150000);
     if (zt_trace_poll() < 0) {
@@ -99,17 +97,23 @@ int main(void) {
 
     if (strstr(log_text, "ztrace:lost: dropped") == NULL) {
         fprintf(stderr, "expected explicit ztrace:lost record in overflow log\n");
-        free(log_text);
         goto out;
     }
 
-    free(log_text);
     ret = 0;
 
 out:
-    zt_trace_shutdown();
-    zt_injector_detach(&session);
-    if (reap_child(child) != 0) {
+    free(log_text);
+    if (zt_trace_is_active()) {
+        zt_trace_shutdown();
+    }
+    if (attached) {
+        zt_injector_detach(&session);
+    }
+    if (child > 0 && !target_released) {
+        kill(child, SIGKILL);
+    }
+    if (child > 0 && reap_child(child) != 0) {
         ret = 1;
     }
     unlink(log_path);

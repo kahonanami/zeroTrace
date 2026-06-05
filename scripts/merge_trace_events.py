@@ -23,6 +23,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+NSEC_PER_SEC = 1_000_000_000
+NSEC_FRACTION_WIDTH = 9
+
 TRACE_LINE_RE = re.compile(
     r"^.*?\[\d+\]"
     r"\s+"
@@ -43,8 +46,8 @@ class TraceEvent:
 
 def timestamp_to_ns(value: str) -> int:
     seconds_text, fraction_text = value.split(".", 1)
-    fraction_text = (fraction_text + "000000000")[:9]
-    return int(seconds_text) * 1_000_000_000 + int(fraction_text)
+    fraction_text = (fraction_text + ("0" * NSEC_FRACTION_WIDTH))[:NSEC_FRACTION_WIDTH]
+    return int(seconds_text) * NSEC_PER_SEC + int(fraction_text)
 
 
 def parse_trace_line(line: str) -> int | None:

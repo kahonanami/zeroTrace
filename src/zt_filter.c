@@ -52,6 +52,16 @@ static uint64_t zt_filter_event_arg(const zt_trace_event_t *event, uint64_t arg_
     return event->args[arg_index];
 }
 
+static void zt_filter_skip_spaces(const char **cursor) {
+    if (cursor == NULL || *cursor == NULL) {
+        return;
+    }
+
+    while (isspace((unsigned char)**cursor)) {
+        ++*cursor;
+    }
+}
+
 static zt_filter_eval_t zt_filter_eval_init(const zt_probe_filter_t *filter,
                                             const zt_trace_event_t *event) {
     zt_filter_eval_t ctx = {
@@ -386,9 +396,7 @@ static int zt_filter_append_number(zt_probe_filter_t *filter, const char **curso
 static int zt_filter_append_next_token(zt_probe_filter_t *filter, const char **cursor) {
     int rc;
 
-    while (isspace((unsigned char)**cursor)) {
-        ++*cursor;
-    }
+    zt_filter_skip_spaces(cursor);
 
     if (**cursor == '\0') {
         return 0;
@@ -427,9 +435,7 @@ int zt_probe_filter_compile(const char *expr, zt_probe_filter_t *filter) {
 
     memset(filter, 0, sizeof(*filter));
     p = expr;
-    while (isspace((unsigned char)*p)) {
-        ++p;
-    }
+    zt_filter_skip_spaces(&p);
 
     if (*p == '\0' || strlen(p) >= sizeof(filter->expr)) {
         return -1;

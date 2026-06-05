@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+#include <errno.h>
 #include <signal.h>
 #include <string.h>
 #include <sys/ptrace.h>
@@ -23,6 +24,25 @@ static int zt_arch_restore_regs_and_code(pid_t pid,
         ret = -1;
     }
     return ret;
+}
+
+static int zt_arch_wait_for_stub_stop(pid_t pid, int *status_out) {
+    int status;
+
+    if (status_out == NULL) {
+        return -1;
+    }
+
+    for (;;) {
+        if (waitpid(pid, &status, 0) == pid) {
+            *status_out = status;
+            return 0;
+        }
+
+        if (errno != EINTR) {
+            return -1;
+        }
+    }
 }
 
 static int zt_arch_execute_remote_stub(pid_t pid,
@@ -86,28 +106,28 @@ static int zt_arch_execute_remote_stub(pid_t pid,
     }
 
     if (ptrace(PTRACE_CONT, pid, NULL, NULL) != 0) {
-        zt_arch_restore_regs_and_code(pid, ops, saved_regs, stub_pc, saved_code, sizeof(saved_code));
-        return -1;
+        goto restore_and_fail;
     }
 
-    if (waitpid(pid, &status, 0) < 0) {
-        zt_arch_restore_regs_and_code(pid, ops, saved_regs, stub_pc, saved_code, sizeof(saved_code));
-        return -1;
+    if (zt_arch_wait_for_stub_stop(pid, &status) != 0) {
+        goto restore_and_fail;
     }
 
     if (!WIFSTOPPED(status) || WSTOPSIG(status) != SIGTRAP) {
-        zt_arch_restore_regs_and_code(pid, ops, saved_regs, stub_pc, saved_code, sizeof(saved_code));
-        return -1;
+        goto restore_and_fail;
     }
 
     if (ops->get_regs(pid, regs) != 0) {
-        zt_arch_restore_regs_and_code(pid, ops, saved_regs, stub_pc, saved_code, sizeof(saved_code));
-        return -1;
+        goto restore_and_fail;
     }
 
     *ret_out = ops->get_retval(regs);
 
     return zt_arch_restore_regs_and_code(pid, ops, saved_regs, stub_pc, saved_code, sizeof(saved_code));
+
+restore_and_fail:
+    zt_arch_restore_regs_and_code(pid, ops, saved_regs, stub_pc, saved_code, sizeof(saved_code));
+    return -1;
 }
 
 typedef struct {

@@ -149,9 +149,7 @@ static void zt_thread_clear(zt_thread_info_t *thread) {
         return;
     }
 
-    thread->tid = 0;
-    thread->stopped = 0;
-    thread->resume_signal = 0;
+    memset(thread, 0, sizeof(*thread));
 }
 
 static void zt_thread_mark_running(zt_thread_info_t *thread) {
@@ -1213,10 +1211,8 @@ static zt_probe_info_t *zt_probe_alloc(zt_injector_session_t *session,
         }
 
         session->probes[i].target = *target;
-        session->probes[i].trampoline_addr = 0;
         session->probes[i].trampoline_slot = -1;
         session->probes[i].call_action_slot = -1;
-        session->probes[i].orig_len = 0;
         session->probes[i].state = ZT_PROBE_RESOLVED;
         ++session->probe_count;
         return &session->probes[i];

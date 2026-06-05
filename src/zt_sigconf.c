@@ -476,7 +476,7 @@ static int zt_read_remote_buf_preview(const zt_injector_session_t *session,
     }
     buffer[offset++] = '"';
 
-    len = zt_min_size(len, sizeof(bytes));
+    len = zt_cap_preview_len(len);
     if (zt_read_remote_bytes_with_fallback(session, remote_addr, bytes, len) != 0) {
         return -1;
     }
@@ -571,21 +571,29 @@ static int zt_find_format_param_index(const zt_func_sig_t *sig) {
     return -1;
 }
 
-static int zt_count_fixed_params(const zt_func_sig_t *sig, int want_fp) {
+static void zt_count_fixed_param_regs(const zt_func_sig_t *sig,
+                                      int *gp_count_out,
+                                      int *fp_count_out) {
     int i;
-    int count = 0;
+    int gp_count = 0;
+    int fp_count = 0;
 
-    if (sig == NULL) {
-        return 0;
-    }
-
-    for (i = 0; i < sig->param_count; ++i) {
-        if (zt_sig_type_is_fp(sig->params[i].type) == want_fp) {
-            ++count;
+    if (sig != NULL) {
+        for (i = 0; i < sig->param_count; ++i) {
+            if (zt_sig_type_is_fp(sig->params[i].type)) {
+                ++fp_count;
+            } else {
+                ++gp_count;
+            }
         }
     }
 
-    return count;
+    if (gp_count_out != NULL) {
+        *gp_count_out = gp_count;
+    }
+    if (fp_count_out != NULL) {
+        *fp_count_out = fp_count;
+    }
 }
 
 static void zt_skip_format_flags(const char **cursor, int *arg_index) {
@@ -701,8 +709,7 @@ static int zt_append_variadic_args(char *out,
         return zt_append_raw(out, out_size, offset, ", ...");
     }
 
-    gp_index = zt_count_fixed_params(sig, 0);
-    fp_index = zt_count_fixed_params(sig, 1);
+    zt_count_fixed_param_regs(sig, &gp_index, &fp_index);
     p = fmt;
     while (*p != '\0') {
         if (*p++ != '%') {
