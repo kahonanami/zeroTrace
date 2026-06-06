@@ -22,7 +22,7 @@ ARCH_EXPECTED = {
             "src/isa/x86_64/trampoline_manager.c",
         ],
         "ARCH_SRC_S": ["src/isa/x86_64/stub.S"],
-        "TEST_C": ["src/test/test_trampoline_builder.c"],
+        "TEST_C": ["src/test/cases/test_trampoline_builder.c"],
     },
     "aarch64": {
         "ARCH_SRC_C": [
@@ -30,7 +30,7 @@ ARCH_EXPECTED = {
             "src/isa/aarch64/trampoline_manager.c",
         ],
         "ARCH_SRC_S": ["src/isa/aarch64/stub.S"],
-        "TEST_C": ["src/test/test_trampoline_builder_aarch64.c"],
+        "TEST_C": ["src/test/cases/test_trampoline_builder_aarch64.c"],
     },
 }
 

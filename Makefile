@@ -12,6 +12,11 @@ ISA_COMMON_DIR := $(ISA_DIR)/common
 ISA_X86_64_DIR := $(ISA_DIR)/x86_64
 ISA_AARCH64_DIR := $(ISA_DIR)/aarch64
 TEST_DIR := src/test
+TEST_CASE_DIR := $(TEST_DIR)/cases
+TEST_TARGET_DIR := $(TEST_DIR)/targets
+TEST_BENCHMARK_DIR := $(TEST_DIR)/benchmark
+TEST_MANUAL_DIR := $(TEST_DIR)/manual
+TEST_COMMON_DIR := $(TEST_DIR)/common
 BUILD_DIR := build
 BIN_DIR := bin
 TEST_BIN_DIR := $(BIN_DIR)/tests
@@ -39,12 +44,17 @@ SRC_S := $(ARCH_SRC_S)
 OBJ_CORE := $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRC_C)) \
             $(patsubst $(SRC_DIR)/%.S,$(BUILD_DIR)/%.o,$(SRC_S))
 
-TEST_C_ALL := $(wildcard $(TEST_DIR)/*.c)
+TEST_CFLAGS := $(CFLAGS) -I$(TEST_COMMON_DIR)
+TEST_CASE_C_ALL := $(wildcard $(TEST_CASE_DIR)/*.c)
 ifeq ($(ARCH),aarch64)
-TEST_C := $(filter-out $(TEST_DIR)/test_trampoline_builder.c,$(TEST_C_ALL))
+TEST_CASE_C := $(filter-out $(TEST_CASE_DIR)/test_trampoline_builder.c,$(TEST_CASE_C_ALL))
 else
-TEST_C := $(filter-out $(TEST_DIR)/test_trampoline_builder_aarch64.c,$(TEST_C_ALL))
+TEST_CASE_C := $(filter-out $(TEST_CASE_DIR)/test_trampoline_builder_aarch64.c,$(TEST_CASE_C_ALL))
 endif
+TEST_TARGET_C := $(wildcard $(TEST_TARGET_DIR)/*.c)
+TEST_BENCHMARK_C := $(wildcard $(TEST_BENCHMARK_DIR)/*.c)
+TEST_MANUAL_C := $(wildcard $(TEST_MANUAL_DIR)/*.c)
+TEST_C := $(TEST_CASE_C) $(TEST_TARGET_C) $(TEST_BENCHMARK_C) $(TEST_MANUAL_C)
 TEST_S := $(wildcard $(TEST_DIR)/*.S)
 
 OBJ_TEST_HELPERS := $(patsubst $(TEST_DIR)/%.S, $(BUILD_DIR)/%.o, $(TEST_S))
@@ -52,14 +62,13 @@ PAYLOAD_SO := $(BIN_DIR)/libzt_payload.so
 PAYLOAD_PIC_OBJ := $(BUILD_DIR)/zt_payload.pic.o $(patsubst $(SRC_DIR)/%.S,$(BUILD_DIR)/%.pic.o,$(ARCH_SRC_S))
 .PRECIOUS: $(BUILD_DIR)/%.o
 
-TEST_BINS := $(patsubst $(TEST_DIR)/%.c, $(TEST_BIN_DIR)/%, $(TEST_C))
+CORE_TEST_BINS := $(addprefix $(TEST_BIN_DIR)/,$(basename $(notdir $(TEST_CASE_C))))
 
 # Fixture binaries are launched by automated tests or scripts; run-tests skips
 # them directly because they need a controlling harness.
 TEST_FIXTURE_BINS := \
 	$(TEST_BIN_DIR)/test_libc_io_loop \
 	$(TEST_BIN_DIR)/test_context_target \
-	$(TEST_BIN_DIR)/test_benchmark_target \
 	$(TEST_BIN_DIR)/test_many_probes_target \
 	$(TEST_BIN_DIR)/test_hot_update_target \
 	$(TEST_BIN_DIR)/test_exit_race_target \
@@ -74,10 +83,11 @@ BENCHMARK_BINS := \
 	$(TEST_BIN_DIR)/test_benchmark_target \
 	$(TEST_BIN_DIR)/test_benchmark_runner \
 	$(TEST_BIN_DIR)/test_benchmark_latency
+BENCHMARK_TARGET_BIN := $(TEST_BIN_DIR)/test_benchmark_target
+BENCHMARK_HELPER_BINS := $(filter-out $(BENCHMARK_TARGET_BIN),$(BENCHMARK_BINS))
 STANDALONE_TEST_BINS := $(TEST_FIXTURE_BINS) $(THREAD_FIXTURE_BINS) $(MANUAL_TEST_BINS)
-RUN_TEST_SKIP_BINS := $(STANDALONE_TEST_BINS) $(BENCHMARK_BINS)
-CORE_TEST_BINS := $(filter-out $(STANDALONE_TEST_BINS), $(TEST_BINS))
-AUTO_TEST_BINS := $(filter-out $(RUN_TEST_SKIP_BINS), $(TEST_BINS))
+TEST_BINS := $(CORE_TEST_BINS) $(STANDALONE_TEST_BINS) $(BENCHMARK_BINS)
+AUTO_TEST_BINS := $(CORE_TEST_BINS)
 APP_TARGET := $(BIN_DIR)/ztrace
 
 .PHONY: all clean directories test run-tests benchmark print-arch-config
@@ -123,17 +133,29 @@ $(PAYLOAD_SO): $(PAYLOAD_PIC_OBJ)
 	$(CC) $(LDFLAGS_SO) -o $@ $^
 	@echo "[✓] Built payload shared library: $@"
 
-$(CORE_TEST_BINS): $(TEST_BIN_DIR)/%: $(TEST_DIR)/%.c $(OBJ_CORE) $(OBJ_TEST_HELPERS)
-	$(CC) $(CFLAGS) $< $(OBJ_CORE) $(OBJ_TEST_HELPERS) -o $@ $(LDLIBS)
+$(CORE_TEST_BINS): $(TEST_BIN_DIR)/%: $(TEST_CASE_DIR)/%.c $(OBJ_CORE) $(OBJ_TEST_HELPERS)
+	$(CC) $(TEST_CFLAGS) $< $(OBJ_CORE) $(OBJ_TEST_HELPERS) -o $@ $(LDLIBS)
 	@echo "[✓] Built test: $@"
 
-$(TEST_FIXTURE_BINS) $(MANUAL_TEST_BINS): $(TEST_BIN_DIR)/%: $(TEST_DIR)/%.c
-	$(CC) $(CFLAGS) $< -o $@
+$(TEST_FIXTURE_BINS): $(TEST_BIN_DIR)/%: $(TEST_TARGET_DIR)/%.c
+	$(CC) $(TEST_CFLAGS) $< -o $@
 	@echo "[✓] Built standalone test: $@"
 
-$(THREAD_FIXTURE_BINS): $(TEST_BIN_DIR)/%: $(TEST_DIR)/%.c
-	$(CC) $(CFLAGS) $< -o $@ -lpthread
+$(THREAD_FIXTURE_BINS): $(TEST_BIN_DIR)/%: $(TEST_TARGET_DIR)/%.c
+	$(CC) $(TEST_CFLAGS) $< -o $@ -lpthread
 	@echo "[✓] Built threaded standalone test: $@"
+
+$(MANUAL_TEST_BINS): $(TEST_BIN_DIR)/%: $(TEST_MANUAL_DIR)/%.c
+	$(CC) $(TEST_CFLAGS) $< -o $@
+	@echo "[✓] Built standalone test: $@"
+
+$(BENCHMARK_TARGET_BIN): $(TEST_BIN_DIR)/%: $(TEST_BENCHMARK_DIR)/%.c
+	$(CC) $(TEST_CFLAGS) $< -o $@
+	@echo "[✓] Built standalone test: $@"
+
+$(BENCHMARK_HELPER_BINS): $(TEST_BIN_DIR)/%: $(TEST_BENCHMARK_DIR)/%.c $(OBJ_CORE) $(OBJ_TEST_HELPERS)
+	$(CC) $(TEST_CFLAGS) $< $(OBJ_CORE) $(OBJ_TEST_HELPERS) -o $@ $(LDLIBS)
+	@echo "[✓] Built test: $@"
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c
 	$(CC) $(CFLAGS) -c $< -o $@
