@@ -13,3 +13,14 @@ look like the same kind of test.
 Fixtures under `targets/` normally wait for a runner signal or pipe protocol and
 are skipped by `make run-tests`; running them directly is only useful when
 debugging that specific fixture.
+
+Coverage boundaries:
+
+- `test_probe_lifecycle` owns basic install/trace/remove coverage, 16-probe
+  coexistence, conditional install, call-action argument forwarding, and cleanup
+  checks.
+- `test_probe_hot_update` owns dynamic filter/call-action updates and
+  enable/disable transitions. Do not duplicate those scenarios in lifecycle
+  tests unless the update path itself changes.
+- `test_thread_group_control` owns ptrace stop/resume coverage; `test_thread_safety`
+  owns traced multi-thread runtime behavior.
