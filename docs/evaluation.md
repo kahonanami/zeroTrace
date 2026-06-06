@@ -371,19 +371,21 @@ python3 scripts/check_arch_config.py
 
 ```bash
 bin/tests/test_probe_lifecycle
+bin/tests/test_probe_hot_update
 ```
 
 验证方法：
 
 - 子测试 `run_conditional_probe` 使用 `arg0 >= 10 && arg0 < 20`。
-- 子测试 `run_probe_filter_update` 使用 `arg0 >= 15 && (arg0 < 20 || arg0 == 99)`。
 - 子测试 `run_filter_short_circuit_semantics` 使用 synthetic event 验证 `&&` / `||` 短路语义，特别覆盖 `arg0 == 0 || 10 / arg0 > 1` 这类右侧除零应被短路保护的表达式，并覆盖 `0x10` 十六进制常量解析。
+- `test_probe_hot_update` 在目标运行过程中把 filter 从 false filter 热替换为 A/B/final 三组参数范围。
 
 关键断言：
 
 - 条件探针必须精确输出 `10` 条 entry。
-- 更新后的 filter 必须精确输出 `5` 条 entry。
-- 不满足条件的 `arg0=0xe` 不得出现，满足条件的 `arg0=0xf` 必须出现。
+- 热更新后的 A 阶段必须精确输出 `10..39` 共 `30` 条参数命中。
+- 热更新后的 B 阶段必须精确输出 `40..79` 共 `40` 条参数命中。
+- false filter 阶段 `0..9` 和 disabled 阶段 `80..94` 均不得泄漏日志。
 
 结论：
 
@@ -550,7 +552,7 @@ uninstall latency avg : 76822 ns (0.077 ms) over 1000 rounds
 | F6 | 同一进程至少 16 个并发探针 | probe 表容量 32，trampoline pool 按 slot 管理 | `test_probe_lifecycle` 同进程安装 `probe_fn01..probe_fn16` 并校验日志 |
 | F7 | 多线程安全，不崩溃不死锁 | 线程组级 seize/interrupt/continue/detach；运行态刷新新线程；TLS shadow stack 按线程配对 return | `test_thread_safety`、`test_thread_group_control` |
 | A1 | x86_64 + aarch64 多架构 | Makefile 按 `ARCH` 选择 ISA 后端；两套 patch/trampoline/stub 实现 | x86_64 `make test`；`scripts/check_arch_config.py` 覆盖 `ARCH=x86_64/aarch64` 配置选择；aarch64 runtime 证据应以目标 aarch64 机器上的 `make ARCH=aarch64 test` 输出为准 |
-| A2 | 条件探针 | `zt_filter` 解析 `if` 后完整布尔表达式，tracer 侧按 entry event 过滤并同步吞掉 return | `test_probe_lifecycle` conditional/filter update 子测试 |
+| A2 | 条件探针 | `zt_filter` 解析 `if` 后完整布尔表达式，tracer 侧按 entry event 过滤并同步吞掉 return | `test_probe_lifecycle` conditional 子测试；`test_probe_hot_update` filter 热替换阶段 |
 | A3 | perf/ftrace 事件流合流 | 日志输出 `comm-pid/tid [cpu] timestamp: ztrace:event`，timestamp 使用目标命中时 `CLOCK_MONOTONIC` | `scripts/merge_trace_events.py --self-test` 由 `make test` 自动执行 |
 | A4 | 探针内调用目标进程函数 | tracer 写远程 `call_actions` 表；payload entry handler 在目标进程内调用 callee 并写 `ZT_TRACE_EVENT_CALL` | `test_probe_lifecycle` 无参 / 带参 / slot 碰撞测试；`test_probe_hot_update` call action 热切换 |
 | A5 | 探针热更新 | filter、call action、enable/disable 状态均可在目标进程运行中更新 | `test_probe_hot_update` 五阶段 staged 测试和 live call action 子测试 |
