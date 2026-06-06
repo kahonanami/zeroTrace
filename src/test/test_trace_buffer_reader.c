@@ -12,6 +12,12 @@
 #include "zt_trace_runner.h"
 #include "test_trace_utils.h"
 
+enum {
+    LOG_PATH_SIZE = 256,
+    TARGET_STARTUP_WAIT_US = 50000,
+    TRACE_DRAIN_WAIT_US = 150000,
+};
+
 static pid_t start_trace_buffer_target(void) {
     pid_t child = fork();
 
@@ -47,7 +53,7 @@ static int reap_child(pid_t child) {
 
 int main(void) {
     zt_injector_session_t session;
-    char log_path[256];
+    char log_path[LOG_PATH_SIZE];
     char *log_text = NULL;
     pid_t child = -1;
     int attached = 0;
@@ -65,7 +71,7 @@ int main(void) {
         goto out;
     }
 
-    usleep(50000);
+    usleep(TARGET_STARTUP_WAIT_US);
     if (zt_injector_attach(&session, child) != 0) {
         fprintf(stderr, "failed to attach trace-buffer target\n");
         goto out;
@@ -83,7 +89,7 @@ int main(void) {
     }
     target_released = 1;
 
-    usleep(150000);
+    usleep(TRACE_DRAIN_WAIT_US);
     if (zt_trace_poll() < 0) {
         fprintf(stderr, "zt_trace_poll failed during trace-buffer overflow test\n");
         goto out;
