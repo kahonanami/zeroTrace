@@ -50,8 +50,8 @@ static int zt_emit_mov_abs(uint8_t *buf,
     }
 
     /*
-     * Materialize a 64-bit immediate with MOVZ/MOVK pairs; this is the common
-     * building block for absolute branches and relocated ADR/ADRP.
+     * Materialize a 64-bit immediate with MOVZ/MOVK pairs. MOVZ clears the
+     * whole register, so zero high halfwords do not need matching MOVK writes.
      */
     for (hw = 0; hw < 4; ++hw) {
         uint32_t imm16 = (uint32_t)((value >> (hw * 16)) & 0xffffu);
@@ -60,12 +60,29 @@ static int zt_emit_mov_abs(uint8_t *buf,
                         (imm16 << 5) |
                         rd;
 
+        if (hw != 0 && imm16 == 0) {
+            continue;
+        }
+
         if (zt_emit_u32(buf, buf_size, offset, insn) != 0) {
             return -1;
         }
     }
 
     return 0;
+}
+
+static size_t zt_mov_abs_size(uint64_t value) {
+    size_t count = 1;
+    unsigned int hw;
+
+    for (hw = 1; hw < 4; ++hw) {
+        if (((value >> (hw * 16)) & 0xffffu) != 0) {
+            ++count;
+        }
+    }
+
+    return count * ZT_AARCH64_INSN_SIZE;
 }
 
 static void zt_fill_nops(uint8_t *buf, size_t buf_size) {
@@ -160,15 +177,19 @@ static int zt_emit_cond_abs_branch(uint8_t *buf,
                                    unsigned int cond,
                                    uint64_t target_addr) {
     unsigned int inverse;
+    int32_t skip_bytes;
 
     if (zt_aarch64_inverse_cond(cond, &inverse) != 0) {
         return -1;
     }
 
+    skip_bytes = (int32_t)(ZT_AARCH64_INSN_SIZE +
+                           zt_mov_abs_size(target_addr) +
+                           ZT_AARCH64_INSN_SIZE);
     if (zt_emit_u32(buf,
                     buf_size,
                     offset,
-                    zt_aarch64_encode_b_cond(inverse, 24)) != 0) {
+                    zt_aarch64_encode_b_cond(inverse, skip_bytes)) != 0) {
         return -1;
     }
 
@@ -189,7 +210,10 @@ static int zt_emit_cb_abs_branch(uint8_t *buf,
     rewritten = zt_read_u32(insn->bytes);
     rewritten ^= (1u << 24);       /* cbz <-> cbnz */
     rewritten &= ~(0x7ffffu << 5); /* imm19 */
-    rewritten |= (6u << 5);        /* skip over mov_abs + br */
+    rewritten |= (uint32_t)(((ZT_AARCH64_INSN_SIZE +
+                              zt_mov_abs_size(target_addr) +
+                              ZT_AARCH64_INSN_SIZE) /
+                             ZT_AARCH64_INSN_SIZE) << 5);
 
     if (zt_emit_u32(buf, buf_size, offset, rewritten) != 0) {
         return -1;
@@ -212,7 +236,10 @@ static int zt_emit_tb_abs_branch(uint8_t *buf,
     rewritten = zt_read_u32(insn->bytes);
     rewritten ^= (1u << 24);       /* tbz <-> tbnz */
     rewritten &= ~(0x3fffu << 5);  /* imm14 */
-    rewritten |= (6u << 5);        /* skip over mov_abs + br */
+    rewritten |= (uint32_t)(((ZT_AARCH64_INSN_SIZE +
+                              zt_mov_abs_size(target_addr) +
+                              ZT_AARCH64_INSN_SIZE) /
+                             ZT_AARCH64_INSN_SIZE) << 5);
 
     if (zt_emit_u32(buf, buf_size, offset, rewritten) != 0) {
         return -1;
