@@ -1,7 +1,8 @@
 CC ?= gcc
+PAYLOAD_OPTFLAGS ?= -O2
 CFLAGS := -Wall -Wextra -g -Iinclude
 ASMFLAGS := -g -Wa,--noexecstack
-PIC_CFLAGS := $(CFLAGS) -fPIC
+PIC_CFLAGS := $(CFLAGS) $(PAYLOAD_OPTFLAGS) -fPIC
 PIC_ASMFLAGS := $(ASMFLAGS) -fPIC
 LDFLAGS_SO := -shared
 LDLIBS := -lcapstone -ldl -lreadline

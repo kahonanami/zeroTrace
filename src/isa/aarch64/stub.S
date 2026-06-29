@@ -43,7 +43,27 @@
 .equ ZT_FRAME_FP_OFF, 512
 .equ ZT_FRAME_SIZE, 640
 
-.macro SAVE_GPRS
+.macro SAVE_ENTRY_GPRS
+    stp x6, x7, [sp, #(ZT_FRAME_REGS_OFF + 0)]
+    stp x8, x18, [sp, #(ZT_FRAME_REGS_OFF + 16)]
+    stp x19, x20, [sp, #(ZT_FRAME_REGS_OFF + 32)]
+    stp x29, x30, [sp, #(ZT_FRAME_REGS_OFF + 48)]
+.endm
+
+.macro RESTORE_ENTRY_GPRS
+    ldr x0, [x19, #ZT_CTX_GP_ARG0_OFF]
+    ldr x1, [x19, #ZT_CTX_GP_ARG1_OFF]
+    ldr x2, [x19, #ZT_CTX_GP_ARG2_OFF]
+    ldr x3, [x19, #ZT_CTX_GP_ARG3_OFF]
+    ldr x4, [x19, #ZT_CTX_GP_ARG4_OFF]
+    ldr x5, [x19, #ZT_CTX_GP_ARG5_OFF]
+    ldp x6, x7, [sp, #(ZT_FRAME_REGS_OFF + 0)]
+    ldp x8, x18, [sp, #(ZT_FRAME_REGS_OFF + 16)]
+    ldp x19, x20, [sp, #(ZT_FRAME_REGS_OFF + 32)]
+    ldp x29, x30, [sp, #(ZT_FRAME_REGS_OFF + 48)]
+.endm
+
+.macro SAVE_RETURN_GPRS
     stp x0, x1, [sp, #(ZT_FRAME_REGS_OFF + 0)]
     stp x2, x3, [sp, #(ZT_FRAME_REGS_OFF + 16)]
     stp x4, x5, [sp, #(ZT_FRAME_REGS_OFF + 32)]
@@ -53,7 +73,7 @@
     stp x29, x30, [sp, #(ZT_FRAME_REGS_OFF + 96)]
 .endm
 
-.macro RESTORE_GPRS
+.macro RESTORE_RETURN_GPRS
     ldp x0, x1, [sp, #(ZT_FRAME_REGS_OFF + 0)]
     ldp x2, x3, [sp, #(ZT_FRAME_REGS_OFF + 16)]
     ldp x4, x5, [sp, #(ZT_FRAME_REGS_OFF + 32)]
@@ -88,7 +108,7 @@
 
 entry_stub:
     sub sp, sp, #ZT_FRAME_SIZE
-    SAVE_GPRS
+    SAVE_ENTRY_GPRS
     SAVE_FP_SNAPSHOT
 
     add x19, sp, #ZT_FRAME_CTX_OFF
@@ -115,7 +135,7 @@ entry_stub:
     RESTORE_FP_SNAPSHOT
     ldr x20, [x19, #ZT_CTX_STATUS_FLAGS_OFF]
     msr nzcv, x20
-    RESTORE_GPRS
+    RESTORE_ENTRY_GPRS
     /* Replace LR with exit_stub; the real LR is kept in the TLS shadow stack. */
     adrp x15, exit_stub
     add x15, x15, :lo12:exit_stub
@@ -124,7 +144,7 @@ entry_stub:
 
 exit_stub:
     sub sp, sp, #ZT_FRAME_SIZE
-    SAVE_GPRS
+    SAVE_RETURN_GPRS
     SAVE_FP_SNAPSHOT
 
     add x19, sp, #ZT_FRAME_CTX_OFF
@@ -145,7 +165,7 @@ exit_stub:
     RESTORE_FP_SNAPSHOT
     ldr x20, [x19, #ZT_CTX_STATUS_FLAGS_OFF]
     msr nzcv, x20
-    RESTORE_GPRS
+    RESTORE_RETURN_GPRS
     ldr x30, [sp, #ZT_FRAME_RETADDR_OFF]
     add sp, sp, #ZT_FRAME_SIZE
     ret
