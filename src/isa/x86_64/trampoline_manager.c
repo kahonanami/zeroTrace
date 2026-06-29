@@ -1,12 +1,17 @@
-#include <stdio.h>
-
-#include <limits.h>
 #include <string.h>
 
 #include <capstone/capstone.h>
 
 #include "../../../include/zt_trampoline_manager.h"
 
+/*
+ * x86_64 trampoline builder.
+ *
+ * A trampoline first calls entry_stub, then replays the overwritten prologue,
+ * then jumps back to the original function after the patch. PC-relative control
+ * flow and RIP-relative memory operands are rewritten so copied instructions
+ * keep their original meaning from the new address.
+ */
 static const uint8_t ZT_TRAMPOLINE_TEMPLATE_PREFIX[] = {
     0x68, 0x00, 0x00, 0x00, 0x00,       /* push imm32 */
     0xFF, 0x15, 0x00, 0x00, 0x00, 0x00, /* call qword ptr [rip + disp32] */
@@ -138,6 +143,10 @@ static int zt_rewrite_rel_call(uint8_t *buf,
     static const uint8_t k_call_r11[] = {0x41, 0xFF, 0xD3};
     static const uint8_t k_pop_r11[] = {0x41, 0x5B};
 
+    /*
+     * Preserve r11 around relocated calls. The copied prologue should behave as
+     * if it still lived at the original address, including caller-saved scratch.
+     */
     if (zt_emit_bytes(buf, buf_size, offset, k_push_r11, sizeof(k_push_r11)) != 0 ||
         zt_emit_bytes(buf, buf_size, offset, k_movabs_r11, sizeof(k_movabs_r11)) != 0 ||
         zt_emit_bytes(buf, buf_size, offset, &target_addr, sizeof(target_addr)) != 0 ||
@@ -221,7 +230,6 @@ static int zt_emit_relocated_orig_code(const zt_probe_info_t *probe,
     for (i = 0; i < count; ++i) {
         const cs_insn *cur = &insn[i];
         const cs_x86 *x86 = &cur->detail->x86;
-        int handled = 0;
         uint8_t op_index;
 
         if (zt_is_rel_call(cur)) {
@@ -269,6 +277,7 @@ static int zt_emit_relocated_orig_code(const zt_probe_info_t *probe,
             for (op_index = 0; op_index < x86->op_count; ++op_index) {
                 if (x86->operands[op_index].type == X86_OP_MEM &&
                     x86->operands[op_index].mem.base == X86_REG_RIP) {
+                    /* Rebase RIP-relative memory references onto the trampoline copy. */
                     uint64_t old_next = cur->address + cur->size;
                     int64_t old_disp = x86->disp;
                     uint64_t old_target = (uint64_t)((int64_t)old_next + old_disp);
@@ -282,12 +291,9 @@ static int zt_emit_relocated_orig_code(const zt_probe_info_t *probe,
                                         new_disp) != 0) {
                         goto fail;
                     }
-                    handled = 1;
                     break;
                 }
             }
-
-            (void)handled;
         }
     }
 
@@ -303,11 +309,11 @@ fail:
 }
 
 int zt_build_trampoline(const zt_probe_info_t *probe,
-                   uint64_t entry_stub_addr,
-                   uint64_t trampoline_addr,
-                   uint8_t *trampoline_buf,
-                   size_t trampoline_buf_size,
-                   size_t *trampoline_size_out) {
+                        uint64_t entry_stub_addr,
+                        uint64_t trampoline_addr,
+                        uint8_t *trampoline_buf,
+                        size_t trampoline_buf_size,
+                        size_t *trampoline_size_out) {
     size_t offset;
     size_t needed_size;
     size_t relocated_size;
@@ -317,7 +323,8 @@ int zt_build_trampoline(const zt_probe_info_t *probe,
     int32_t call_disp;
     int32_t jmp_disp;
 
-    if (probe == NULL || trampoline_buf == NULL || trampoline_size_out == NULL || trampoline_addr == 0) {
+    if (probe == NULL || trampoline_buf == NULL || trampoline_size_out == NULL ||
+        trampoline_addr == 0 || entry_stub_addr == 0) {
         return -1;
     }
 

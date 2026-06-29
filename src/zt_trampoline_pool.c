@@ -2,14 +2,21 @@
 #include <string.h>
 #include <sys/mman.h>
 
-#include "../include/zt_trampoline_manager.h"
+#include "zt_trampoline_manager.h"
+
+/*
+ * Common remote trampoline pool.
+ *
+ * Allocating one executable mapping per probe is slow and noisy. Instead we
+ * mmap one fixed-size pool in the target and hand out slots that can be reused
+ * after `untrace`/disable cleanup.
+ */
+static int zt_trampoline_pool_slot_valid(int slot) {
+    return slot >= 0 && slot < ZT_TRAMPOLINE_POOL_SLOTS;
+}
 
 static int zt_trampoline_pool_all_free(const zt_trampoline_pool_t *pool) {
     int i;
-
-    if (pool == NULL) {
-        return 1;
-    }
 
     for (i = 0; i < ZT_TRAMPOLINE_POOL_SLOTS; ++i) {
         if (pool->slot_used[i]) {
@@ -22,11 +29,56 @@ static int zt_trampoline_pool_all_free(const zt_trampoline_pool_t *pool) {
 
 static uint64_t zt_trampoline_pool_slot_addr(const zt_trampoline_pool_t *pool, int slot) {
     if (pool == NULL || pool->remote_addr == 0 ||
-        slot < 0 || slot >= ZT_TRAMPOLINE_POOL_SLOTS) {
+        !zt_trampoline_pool_slot_valid(slot)) {
         return 0;
     }
 
     return pool->remote_addr + ((uint64_t)slot * ZT_TRAMPOLINE_POOL_SLOT_SIZE);
+}
+
+static int zt_trampoline_pool_slot_belongs_to_probe(const zt_trampoline_pool_t *pool,
+                                                    const zt_probe_info_t *probe,
+                                                    int slot) {
+    uint64_t addr;
+
+    if (pool == NULL || probe == NULL || !zt_trampoline_pool_slot_valid(slot)) {
+        return 0;
+    }
+
+    addr = zt_trampoline_pool_slot_addr(pool, slot);
+    return addr != 0 && probe->trampoline_addr == addr;
+}
+
+static int zt_trampoline_pool_assign_slot(zt_trampoline_pool_t *pool,
+                                          zt_probe_info_t *probe,
+                                          int slot,
+                                          uint64_t *trampoline_addr_out) {
+    uint64_t addr;
+
+    if (pool == NULL || probe == NULL || trampoline_addr_out == NULL ||
+        !zt_trampoline_pool_slot_valid(slot)) {
+        return -1;
+    }
+
+    addr = zt_trampoline_pool_slot_addr(pool, slot);
+    if (addr == 0) {
+        return -1;
+    }
+
+    pool->slot_used[slot] = 1;
+    probe->trampoline_slot = slot;
+    probe->trampoline_addr = addr;
+    *trampoline_addr_out = addr;
+    return 0;
+}
+
+static void zt_trampoline_pool_clear_probe_slot(zt_probe_info_t *probe) {
+    if (probe == NULL) {
+        return;
+    }
+
+    probe->trampoline_slot = -1;
+    probe->trampoline_addr = 0;
 }
 
 static int zt_trampoline_pool_ensure(zt_injector_session_t *session, zt_trampoline_pool_t *pool) {
@@ -63,22 +115,26 @@ void zt_trampoline_pool_reset(zt_trampoline_pool_t *pool) {
 }
 
 int zt_trampoline_pool_alloc(zt_injector_session_t *session,
-                        zt_trampoline_pool_t *pool,
-                        zt_probe_info_t *probe,
-                        uint64_t *trampoline_addr_out) {
+                             zt_trampoline_pool_t *pool,
+                             zt_probe_info_t *probe,
+                             uint64_t *trampoline_addr_out) {
     int slot;
 
     if (session == NULL || pool == NULL || probe == NULL || trampoline_addr_out == NULL) {
         return -1;
     }
 
-    if (probe->trampoline_slot >= 0 &&
-        probe->trampoline_slot < ZT_TRAMPOLINE_POOL_SLOTS &&
+    if (zt_trampoline_pool_slot_valid(probe->trampoline_slot) &&
         pool->remote_addr != 0) {
-        pool->slot_used[probe->trampoline_slot] = 1;
-        probe->trampoline_addr = zt_trampoline_pool_slot_addr(pool, probe->trampoline_slot);
-        *trampoline_addr_out = probe->trampoline_addr;
-        return 0;
+        if (pool->slot_used[probe->trampoline_slot] &&
+            !zt_trampoline_pool_slot_belongs_to_probe(pool, probe, probe->trampoline_slot)) {
+            return -1;
+        }
+
+        return zt_trampoline_pool_assign_slot(pool,
+                                              probe,
+                                              probe->trampoline_slot,
+                                              trampoline_addr_out);
     }
 
     if (zt_trampoline_pool_ensure(session, pool) != 0) {
@@ -90,32 +146,40 @@ int zt_trampoline_pool_alloc(zt_injector_session_t *session,
             continue;
         }
 
-        pool->slot_used[slot] = 1;
-        probe->trampoline_slot = slot;
-        probe->trampoline_addr = zt_trampoline_pool_slot_addr(pool, slot);
-        *trampoline_addr_out = probe->trampoline_addr;
-        return 0;
+        return zt_trampoline_pool_assign_slot(pool, probe, slot, trampoline_addr_out);
     }
 
     return -1;
 }
 
 void zt_trampoline_pool_release(zt_injector_session_t *session,
-                           zt_trampoline_pool_t *pool,
-                           zt_probe_info_t *probe) {
+                                zt_trampoline_pool_t *pool,
+                                zt_probe_info_t *probe) {
+    int slot;
+
     if (session == NULL || pool == NULL || probe == NULL) {
         return;
     }
 
-    if (probe->trampoline_slot < 0 || probe->trampoline_slot >= ZT_TRAMPOLINE_POOL_SLOTS) {
+    slot = probe->trampoline_slot;
+    if (!zt_trampoline_pool_slot_valid(slot)) {
         return;
     }
 
-    pool->slot_used[probe->trampoline_slot] = 0;
-    probe->trampoline_slot = -1;
-    probe->trampoline_addr = 0;
+    if (pool->remote_addr != 0 && pool->slot_used[slot] &&
+        !zt_trampoline_pool_slot_belongs_to_probe(pool, probe, slot)) {
+        return;
+    }
+
+    pool->slot_used[slot] = 0;
+    zt_trampoline_pool_clear_probe_slot(probe);
 
     if (pool->remote_addr != 0 && zt_trampoline_pool_all_free(pool)) {
+        /*
+         * Releasing the whole pool is conservative: a failed munmap only leaks
+         * the remote page until detach, while keeping stale metadata would be
+         * more dangerous.
+         */
         if (zt_remote_munmap(session->pid, pool->remote_addr, pool->remote_size) == 0) {
             zt_trampoline_pool_reset(pool);
         }

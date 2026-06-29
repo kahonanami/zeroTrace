@@ -12,9 +12,11 @@
 #include "../../../include/zt_injector.h"
 #include "../common/zt_remote_exec.h"
 
+/* AArch64-specific instruction patching and remote syscall/call glue. */
 enum {
     ZT_AARCH64_INSN_SIZE = 4,
     ZT_AARCH64_PATCH_LEN = 16,
+    ZT_AARCH64_REMOTE_SYSCALL_CODE_SIZE = 8,
     ZT_AARCH64_REMOTE_CALL_CODE_SIZE = 24,
 };
 
@@ -120,7 +122,7 @@ static int zt_build_syscall_stub(uint8_t *stub_code,
                                  const uint8_t *saved_code) {
     (void)saved_code;
 
-    if (stub_size != 8) {
+    if (stub_code == NULL || stub_size != ZT_AARCH64_REMOTE_SYSCALL_CODE_SIZE) {
         return -1;
     }
 
@@ -135,7 +137,7 @@ static int zt_build_call_stub(uint8_t *stub_code,
                               uint64_t func_addr) {
     (void)saved_code;
 
-    if (stub_size != ZT_AARCH64_REMOTE_CALL_CODE_SIZE) {
+    if (stub_code == NULL || stub_size != ZT_AARCH64_REMOTE_CALL_CODE_SIZE) {
         return -1;
     }
 
@@ -156,16 +158,19 @@ static const zt_arch_remote_exec_ops_t kRemoteExecOps = {
     .get_retval = zt_get_retval,
 };
 
-zt_arch_kind_t zt_arch_current(void) {
-    return ZT_ARCH_AARCH64;
-}
+int zt_arch_get_pc(pid_t pid, uint64_t *pc_out) {
+    struct user_pt_regs regs;
 
-const char *zt_arch_name(void) {
-    return "aarch64";
-}
+    if (pc_out == NULL) {
+        return -1;
+    }
 
-int zt_arch_is_supported(void) {
-    return 1;
+    if (zt_get_regs(pid, &regs) != 0) {
+        return -1;
+    }
+
+    *pc_out = zt_get_pc(&regs);
+    return 0;
 }
 
 size_t zt_arch_probe_patch_len(void) {
@@ -200,6 +205,10 @@ int zt_arch_install_jump(pid_t pid,
         return -1;
     }
 
+    /*
+     * AArch64 has no single-instruction absolute branch. Use an inline literal
+     * loaded into x16/ip0, the standard scratch register for veneers.
+     */
     memset(patch, 0, sizeof(patch));
     zt_store_u32(patch, 0, 0x58000050u); /* ldr x16, #8 */
     zt_store_u32(patch, 4, 0xD61F0200u); /* br x16 */
@@ -229,7 +238,7 @@ int zt_arch_remote_syscall6(pid_t pid,
 
     return zt_arch_execute_syscall6(pid,
                                     &kRemoteExecOps,
-                                    8,
+                                    ZT_AARCH64_REMOTE_SYSCALL_CODE_SIZE,
                                     zt_remote_stub_pc,
                                     zt_prepare_syscall_regs,
                                     zt_build_syscall_stub,

@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+/* Small manual target for trying CLI tracing of integer, FP, and printf calls. */
 #include <stdio.h>
 #include <sys/prctl.h>
 #include <unistd.h>

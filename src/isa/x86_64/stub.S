@@ -13,6 +13,7 @@
 .extern zt_handle_return
 .extern get_ret_addr_c
 
+/* Save caller-visible integer state before entering C payload code. */
 .macro PUSH_ALL
     pushfq
     push rax
@@ -53,13 +54,28 @@
 .endm
 
 .macro SAVE_FP
-    sub rsp, 512
-    and rsp, 0xFFFFFFFFFFFFFFF0
-    fxsave64 [rsp]
+    /* Compact ABI snapshot: xmm0-xmm7 are enough for argument/return display. */
+    sub rsp, 143
+    and rsp, -16
+    movdqu [rsp + 0x00], xmm0
+    movdqu [rsp + 0x10], xmm1
+    movdqu [rsp + 0x20], xmm2
+    movdqu [rsp + 0x30], xmm3
+    movdqu [rsp + 0x40], xmm4
+    movdqu [rsp + 0x50], xmm5
+    movdqu [rsp + 0x60], xmm6
+    movdqu [rsp + 0x70], xmm7
 .endm
 
 .macro RESTORE_FP
-    fxrstor64 [rsp]
+    movdqu xmm0, [rsp + 0x00]
+    movdqu xmm1, [rsp + 0x10]
+    movdqu xmm2, [rsp + 0x20]
+    movdqu xmm3, [rsp + 0x30]
+    movdqu xmm4, [rsp + 0x40]
+    movdqu xmm5, [rsp + 0x50]
+    movdqu xmm6, [rsp + 0x60]
+    movdqu xmm7, [rsp + 0x70]
 .endm
 
 entry_stub:
@@ -67,6 +83,7 @@ entry_stub:
 
     mov r12, rsp
     SAVE_FP
+    /* r12 points to ctx_t-compatible pushed GPR layout; rsp points to FP slots. */
     mov rdi, r12
     mov rsi, rsp
 
@@ -76,6 +93,7 @@ entry_stub:
     mov rsi, [r12 + 0x88]
     call save_probe_frame_c
 
+    /* Hijack the original return address so the function returns through exit_stub. */
     lea rax, [rip + exit_stub]
     mov [r12 + 0x90], rax
 
@@ -86,6 +104,7 @@ entry_stub:
 
 
 exit_stub:
+    /* Reserve two stack slots so the pushed layout still matches ctx_t offsets. */
     push 0
     push 0
     PUSH_ALL

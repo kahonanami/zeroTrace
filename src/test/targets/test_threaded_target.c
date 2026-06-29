@@ -1,14 +1,16 @@
 #define _GNU_SOURCE
 
+/* Multi-threaded target that hammers traced functions from many threads. */
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <unistd.h>
 
 static volatile int g_sink;
-static const int k_thread_count = 8;
-static const int k_thread_iters = 120000;
+static const int k_thread_count = 12;
+static const int k_thread_iters = 2000;
 
 static void wait_for_start(void) {
     sigset_t set;
@@ -30,16 +32,33 @@ int thread_mix(int a, int b) {
     return (a ^ b) + (a & 7);
 }
 
+__attribute__((noinline))
+int thread_pair(int a, int b) {
+    return (a * 31) + b;
+}
+
+__attribute__((noinline))
+int thread_stable(int a, int b) {
+    return (a + 17) * (b + 3);
+}
+
 static void *worker(void *arg) {
     intptr_t base = (intptr_t)arg;
     int i;
 
     for (i = 0; i < k_thread_iters; ++i) {
-        g_sink += thread_add((int)base, i);
-        g_sink ^= thread_mix(i, (int)base);
-        if ((i & 1023) == 0) {
+        __sync_fetch_and_add(&g_sink, thread_add((int)base, i));
+        __sync_fetch_and_xor(&g_sink, thread_mix(i, (int)base));
+        if ((i % 10) == 0) {
+            __sync_fetch_and_add(&g_sink, thread_stable((int)base, i));
+        }
+        if ((i % 50) == 0) {
+            __sync_fetch_and_add(&g_sink, thread_pair((int)base, i));
+        }
+        if ((i & 31) == 0) {
             sched_yield();
         }
+        usleep(100);
     }
 
     return NULL;
@@ -51,7 +70,15 @@ int main(void) {
 
     wait_for_start();
 
-    for (i = 0; i < k_thread_count; ++i) {
+    for (i = 0; i < k_thread_count / 2; ++i) {
+        if (pthread_create(&threads[i], NULL, worker, (void *)(i + 1)) != 0) {
+            return 1;
+        }
+    }
+
+    usleep(50000);
+
+    for (; i < k_thread_count; ++i) {
         if (pthread_create(&threads[i], NULL, worker, (void *)(i + 1)) != 0) {
             return 1;
         }
@@ -59,6 +86,10 @@ int main(void) {
 
     for (i = 0; i < k_thread_count; ++i) {
         pthread_join(threads[i], NULL);
+    }
+
+    for (;;) {
+        pause();
     }
 
     return g_sink == 0xdead ? 1 : 0;

@@ -1,11 +1,8 @@
 #define _GNU_SOURCE
 
-#include <errno.h>
-#include <signal.h>
 #include <string.h>
 #include <sys/ptrace.h>
 #include <sys/user.h>
-#include <sys/wait.h>
 
 #include <capstone/capstone.h>
 
@@ -13,6 +10,7 @@
 #include "../../../include/zt_injector.h"
 #include "../common/zt_remote_exec.h"
 
+/* x86_64-specific instruction patching and remote syscall/call glue. */
 enum {
     ZT_X86_64_PATCH_LEN = 14,
     ZT_X86_64_REMOTE_SYSCALL_CODE_SIZE = 8,
@@ -69,11 +67,17 @@ static void zt_prepare_call_regs(void *regs_out,
 static int zt_build_syscall_stub(uint8_t *stub_code,
                                  size_t stub_size,
                                  const uint8_t *saved_code) {
-    if (stub_size != ZT_X86_64_REMOTE_SYSCALL_CODE_SIZE || saved_code == NULL) {
+    if (stub_code == NULL ||
+        stub_size != ZT_X86_64_REMOTE_SYSCALL_CODE_SIZE ||
+        saved_code == NULL) {
         return -1;
     }
 
     memcpy(stub_code, saved_code, stub_size);
+    /*
+     * Replace the stopped instruction stream with `syscall; int3`. The int3 is
+     * the synchronization point used by common remote_exec to regain control.
+     */
     stub_code[0] = 0x0f; /* syscall */
     stub_code[1] = 0x05;
     stub_code[2] = 0xcc; /* int3 */
@@ -84,7 +88,9 @@ static int zt_build_call_stub(uint8_t *stub_code,
                               size_t stub_size,
                               const uint8_t *saved_code,
                               uint64_t func_addr) {
-    if (stub_size != ZT_X86_64_REMOTE_CALL_CODE_SIZE || saved_code == NULL) {
+    if (stub_code == NULL ||
+        stub_size != ZT_X86_64_REMOTE_CALL_CODE_SIZE ||
+        saved_code == NULL) {
         return -1;
     }
 
@@ -106,16 +112,19 @@ static const zt_arch_remote_exec_ops_t kRemoteExecOps = {
     .get_retval = zt_get_retval,
 };
 
-zt_arch_kind_t zt_arch_current(void) {
-    return ZT_ARCH_X86_64;
-}
+int zt_arch_get_pc(pid_t pid, uint64_t *pc_out) {
+    struct user_regs_struct regs;
 
-const char *zt_arch_name(void) {
-    return "x86_64";
-}
+    if (pc_out == NULL) {
+        return -1;
+    }
 
-int zt_arch_is_supported(void) {
-    return 1;
+    if (zt_get_regs(pid, &regs) != 0) {
+        return -1;
+    }
+
+    *pc_out = zt_get_pc(&regs);
+    return 0;
 }
 
 size_t zt_arch_probe_patch_len(void) {
@@ -132,7 +141,7 @@ int zt_arch_calc_patch_span(const uint8_t *code,
     size_t total_len;
     size_t i;
 
-    if (code == NULL || patch_len_out == NULL) {
+    if (code == NULL || patch_len_out == NULL || code_size < min_len) {
         return -1;
     }
 
@@ -174,6 +183,11 @@ int zt_arch_install_jump(pid_t pid,
         return -1;
     }
 
+    /*
+     * Absolute jump without clobbering general registers:
+     *   jmp qword ptr [rip + 0]
+     *   .quad target_addr
+     */
     patch[0] = 0xFF; /* jmp qword ptr [rip + 0] */
     patch[1] = 0x25;
     memset(patch + 2, 0, 4);

@@ -1,11 +1,17 @@
 #include <stdio.h>
-
 #include <string.h>
 
 #include <capstone/capstone.h>
 
 #include "../../../include/zt_trampoline_manager.h"
 
+/*
+ * AArch64 trampoline builder.
+ *
+ * A trampoline calls entry_stub, restores x30, replays relocated prologue
+ * instructions, then branches back to the original function. PC-relative ADR,
+ * branches, and call instructions are expanded into absolute sequences.
+ */
 enum {
     ZT_AARCH64_INSN_SIZE = 4,
 };
@@ -43,6 +49,10 @@ static int zt_emit_mov_abs(uint8_t *buf,
         return -1;
     }
 
+    /*
+     * Materialize a 64-bit immediate with MOVZ/MOVK pairs. MOVZ clears the
+     * whole register, so zero high halfwords do not need matching MOVK writes.
+     */
     for (hw = 0; hw < 4; ++hw) {
         uint32_t imm16 = (uint32_t)((value >> (hw * 16)) & 0xffffu);
         uint32_t insn = (hw == 0 ? 0xD2800000u : 0xF2800000u) |
@@ -50,12 +60,29 @@ static int zt_emit_mov_abs(uint8_t *buf,
                         (imm16 << 5) |
                         rd;
 
+        if (hw != 0 && imm16 == 0) {
+            continue;
+        }
+
         if (zt_emit_u32(buf, buf_size, offset, insn) != 0) {
             return -1;
         }
     }
 
     return 0;
+}
+
+static size_t zt_mov_abs_size(uint64_t value) {
+    size_t count = 1;
+    unsigned int hw;
+
+    for (hw = 1; hw < 4; ++hw) {
+        if (((value >> (hw * 16)) & 0xffffu) != 0) {
+            ++count;
+        }
+    }
+
+    return count * ZT_AARCH64_INSN_SIZE;
 }
 
 static void zt_fill_nops(uint8_t *buf, size_t buf_size) {
@@ -150,15 +177,19 @@ static int zt_emit_cond_abs_branch(uint8_t *buf,
                                    unsigned int cond,
                                    uint64_t target_addr) {
     unsigned int inverse;
+    int32_t skip_bytes;
 
     if (zt_aarch64_inverse_cond(cond, &inverse) != 0) {
         return -1;
     }
 
+    skip_bytes = (int32_t)(ZT_AARCH64_INSN_SIZE +
+                           zt_mov_abs_size(target_addr) +
+                           ZT_AARCH64_INSN_SIZE);
     if (zt_emit_u32(buf,
                     buf_size,
                     offset,
-                    zt_aarch64_encode_b_cond(inverse, 24)) != 0) {
+                    zt_aarch64_encode_b_cond(inverse, skip_bytes)) != 0) {
         return -1;
     }
 
@@ -179,7 +210,10 @@ static int zt_emit_cb_abs_branch(uint8_t *buf,
     rewritten = zt_read_u32(insn->bytes);
     rewritten ^= (1u << 24);       /* cbz <-> cbnz */
     rewritten &= ~(0x7ffffu << 5); /* imm19 */
-    rewritten |= (6u << 5);        /* skip over mov_abs + br */
+    rewritten |= (uint32_t)(((ZT_AARCH64_INSN_SIZE +
+                              zt_mov_abs_size(target_addr) +
+                              ZT_AARCH64_INSN_SIZE) /
+                             ZT_AARCH64_INSN_SIZE) << 5);
 
     if (zt_emit_u32(buf, buf_size, offset, rewritten) != 0) {
         return -1;
@@ -202,7 +236,10 @@ static int zt_emit_tb_abs_branch(uint8_t *buf,
     rewritten = zt_read_u32(insn->bytes);
     rewritten ^= (1u << 24);       /* tbz <-> tbnz */
     rewritten &= ~(0x3fffu << 5);  /* imm14 */
-    rewritten |= (6u << 5);        /* skip over mov_abs + br */
+    rewritten |= (uint32_t)(((ZT_AARCH64_INSN_SIZE +
+                              zt_mov_abs_size(target_addr) +
+                              ZT_AARCH64_INSN_SIZE) /
+                             ZT_AARCH64_INSN_SIZE) << 5);
 
     if (zt_emit_u32(buf, buf_size, offset, rewritten) != 0) {
         return -1;
@@ -222,6 +259,7 @@ static int zt_emit_adr_like(uint8_t *buf,
         return -1;
     }
 
+    /* Preserve the value computed by ADR/ADRP without depending on new PC. */
     rd = zt_read_u32(insn->bytes) & 0x1fu;
     return zt_emit_mov_abs(buf, buf_size, offset, rd, target_addr);
 }
@@ -344,11 +382,11 @@ fail:
 }
 
 int zt_build_trampoline(const zt_probe_info_t *probe,
-                   uint64_t entry_stub_addr,
-                   uint64_t trampoline_addr,
-                   uint8_t *trampoline_buf,
-                   size_t trampoline_buf_size,
-                   size_t *trampoline_size_out) {
+                        uint64_t entry_stub_addr,
+                        uint64_t trampoline_addr,
+                        uint8_t *trampoline_buf,
+                        size_t trampoline_buf_size,
+                        size_t *trampoline_size_out) {
     size_t offset = 0;
     size_t relocated_size;
     uint64_t continue_addr;
@@ -372,6 +410,7 @@ int zt_build_trampoline(const zt_probe_info_t *probe,
         return -1;
     }
 
+    /* entry_stub returns with x15 holding exit_stub; restore the original LR. */
     if (zt_emit_u32(trampoline_buf, trampoline_buf_size, &offset, 0xAA0F03FEu) != 0) { /* mov x30, x15 */
         return -1;
     }

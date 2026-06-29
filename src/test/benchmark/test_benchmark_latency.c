@@ -1,13 +1,20 @@
+/* Measures average probe install/uninstall latency against an already running target. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
 
-#include "../../include/zt_injector.h"
-#include "../../include/zt_trace_runner.h"
+#include "zt_injector.h"
+#include "zt_trace_runner.h"
+
+enum {
+    NSEC_PER_SEC = 1000000000LL,
+    DEFAULT_LATENCY_ROUNDS = 20,
+    MAX_LATENCY_ROUNDS = 100000,
+};
 
 static long long diff_ns(const struct timespec *start, const struct timespec *end) {
-    return ((long long)(end->tv_sec - start->tv_sec) * 1000000000LL) +
+    return ((long long)(end->tv_sec - start->tv_sec) * NSEC_PER_SEC) +
            ((long long)end->tv_nsec - (long long)start->tv_nsec);
 }
 
@@ -36,10 +43,13 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    rounds = 20;
+    rounds = DEFAULT_LATENCY_ROUNDS;
     if (argc == 5) {
         rounds_long = strtol(argv[4], &endptr, 10);
-        if (argv[4] == endptr || *endptr != '\0' || rounds_long <= 0 || rounds_long > 100000) {
+        if (argv[4] == endptr ||
+            *endptr != '\0' ||
+            rounds_long <= 0 ||
+            rounds_long > MAX_LATENCY_ROUNDS) {
             fprintf(stderr, "invalid rounds: %s\n", argv[4]);
             return 1;
         }

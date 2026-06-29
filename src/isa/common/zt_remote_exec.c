@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+#include <errno.h>
 #include <signal.h>
 #include <string.h>
 #include <sys/ptrace.h>
@@ -7,6 +8,46 @@
 
 #include "../../../include/zt_injector.h"
 #include "zt_remote_exec.h"
+
+/*
+ * Execute a tiny syscall/call stub in the target without permanently modifying
+ * its code. The caller must have stopped the target thread group first.
+ */
+static int zt_arch_restore_regs_and_code(pid_t pid,
+                                         const zt_arch_remote_exec_ops_t *ops,
+                                         const void *saved_regs,
+                                         uint64_t stub_pc,
+                                         const uint8_t *saved_code,
+                                         size_t saved_code_size) {
+    int ret = 0;
+
+    if (ops->set_regs(pid, saved_regs) != 0) {
+        ret = -1;
+    }
+    if (zt_write_remote_memory(pid, stub_pc, saved_code, saved_code_size) != 0) {
+        ret = -1;
+    }
+    return ret;
+}
+
+static int zt_arch_wait_for_stub_stop(pid_t pid, int *status_out) {
+    int status;
+
+    if (status_out == NULL) {
+        return -1;
+    }
+
+    for (;;) {
+        if (waitpid(pid, &status, 0) == pid) {
+            *status_out = status;
+            return 0;
+        }
+
+        if (errno != EINTR) {
+            return -1;
+        }
+    }
+}
 
 static int zt_arch_execute_remote_stub(pid_t pid,
                                        const zt_arch_remote_exec_ops_t *ops,
@@ -22,19 +63,22 @@ static int zt_arch_execute_remote_stub(pid_t pid,
                                                          const void *args),
                                        const void *args,
                                        uint64_t *ret_out) {
-    uint8_t saved_regs[ops->regs_size];
-    uint8_t regs[ops->regs_size];
-    uint8_t saved_code[stub_size];
-    uint8_t stub_code[stub_size];
     uint64_t current_pc;
     uint64_t stub_pc;
     int status;
 
-    if (pid <= 0 || ops == NULL || ops->get_regs == NULL || ops->set_regs == NULL ||
-        ops->get_pc == NULL || ops->get_retval == NULL || prepare_regs == NULL ||
-        build_stub == NULL || args == NULL || ret_out == NULL || stub_size == 0) {
+    if (pid <= 0 || ops == NULL || ops->regs_size == 0 ||
+        ops->get_regs == NULL || ops->set_regs == NULL ||
+        ops->get_pc == NULL || ops->get_retval == NULL ||
+        prepare_regs == NULL || build_stub == NULL ||
+        args == NULL || ret_out == NULL || stub_size == 0) {
         return -1;
     }
+
+    uint8_t saved_regs[ops->regs_size];
+    uint8_t regs[ops->regs_size];
+    uint8_t saved_code[stub_size];
+    uint8_t stub_code[stub_size];
 
     if (ops->get_regs(pid, saved_regs) != 0) {
         return -1;
@@ -58,6 +102,10 @@ static int zt_arch_execute_remote_stub(pid_t pid,
         return -1;
     }
 
+    /*
+     * From this point until restore, target code and registers are borrowed by
+     * the injector. Every failure path must put both back before returning.
+     */
     memcpy(regs, saved_regs, sizeof(regs));
     prepare_regs(regs, saved_regs, args, stub_pc);
     if (ops->set_regs(pid, regs) != 0) {
@@ -66,37 +114,28 @@ static int zt_arch_execute_remote_stub(pid_t pid,
     }
 
     if (ptrace(PTRACE_CONT, pid, NULL, NULL) != 0) {
-        ops->set_regs(pid, saved_regs);
-        zt_write_remote_memory(pid, stub_pc, saved_code, sizeof(saved_code));
-        return -1;
+        goto restore_and_fail;
     }
 
-    if (waitpid(pid, &status, 0) < 0) {
-        ops->set_regs(pid, saved_regs);
-        zt_write_remote_memory(pid, stub_pc, saved_code, sizeof(saved_code));
-        return -1;
+    if (zt_arch_wait_for_stub_stop(pid, &status) != 0) {
+        goto restore_and_fail;
     }
 
     if (!WIFSTOPPED(status) || WSTOPSIG(status) != SIGTRAP) {
-        ops->set_regs(pid, saved_regs);
-        zt_write_remote_memory(pid, stub_pc, saved_code, sizeof(saved_code));
-        return -1;
+        goto restore_and_fail;
     }
 
     if (ops->get_regs(pid, regs) != 0) {
-        ops->set_regs(pid, saved_regs);
-        zt_write_remote_memory(pid, stub_pc, saved_code, sizeof(saved_code));
-        return -1;
+        goto restore_and_fail;
     }
 
     *ret_out = ops->get_retval(regs);
 
-    if (zt_write_remote_memory(pid, stub_pc, saved_code, sizeof(saved_code)) != 0) {
-        ops->set_regs(pid, saved_regs);
-        return -1;
-    }
+    return zt_arch_restore_regs_and_code(pid, ops, saved_regs, stub_pc, saved_code, sizeof(saved_code));
 
-    return ops->set_regs(pid, saved_regs);
+restore_and_fail:
+    zt_arch_restore_regs_and_code(pid, ops, saved_regs, stub_pc, saved_code, sizeof(saved_code));
+    return -1;
 }
 
 typedef struct {

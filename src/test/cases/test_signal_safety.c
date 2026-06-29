@@ -1,19 +1,32 @@
 #define _GNU_SOURCE
 
+/*
+ * Runs tracing while the target receives frequent signals. This guards against
+ * deadlocks or corrupted return handling when async stops interleave with probes.
+ */
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-#include "../../include/zt_injector.h"
-#include "../../include/zt_trace_runner.h"
+#include "zt_injector.h"
+#include "zt_trace_runner.h"
 #include "test_trace_utils.h"
+
+enum {
+    LOG_PATH_SIZE = 256,
+    TARGET_STARTUP_WAIT_US = 100000,
+    TARGET_EXIT_POLL_ATTEMPTS = 80,
+    TARGET_EXIT_POLL_INTERVAL_US = 5000,
+    TRACE_DONE_TIMEOUT_MS = 20000,
+    MIN_SIGNAL_EVENTS_PER_KIND = 16,
+};
 
 int main(void) {
     zt_injector_session_t session;
     char *log_text = NULL;
-    char log_path[256];
+    char log_path[LOG_PATH_SIZE];
     pid_t child;
     int entry_count;
     int return_count;
@@ -39,7 +52,7 @@ int main(void) {
         _exit(1);
     }
 
-    usleep(100000);
+    usleep(TARGET_STARTUP_WAIT_US);
 
     if (zt_injector_attach(&session, child) != 0) {
         fprintf(stderr, "attach failed\n");
@@ -56,7 +69,7 @@ int main(void) {
         goto cleanup_trace;
     }
 
-    for (i = 0; i < 80; ++i) {
+    for (i = 0; i < TARGET_EXIT_POLL_ATTEMPTS; ++i) {
         if (zt_test_process_gone(child)) {
             break;
         }
@@ -66,10 +79,10 @@ int main(void) {
             goto cleanup_trace;
         }
 
-        usleep(5000);
+        usleep(TARGET_EXIT_POLL_INTERVAL_US);
     }
 
-    if (zt_test_wait_trace_done(20000) != 0) {
+    if (zt_test_wait_trace_done(TRACE_DONE_TIMEOUT_MS) != 0) {
         fprintf(stderr, "trace polling timed out for signal target\n");
         goto cleanup_trace;
     }
@@ -82,7 +95,8 @@ int main(void) {
 
     entry_count = zt_test_count_substring(log_text, "ztrace:entry: signal_work");
     return_count = zt_test_count_substring(log_text, "ztrace:return: signal_work");
-    if (entry_count < 16 || return_count < 16) {
+    if (entry_count < MIN_SIGNAL_EVENTS_PER_KIND ||
+        return_count < MIN_SIGNAL_EVENTS_PER_KIND) {
         fprintf(stderr,
                 "signal trace log too sparse: entry=%d return=%d\n",
                 entry_count,

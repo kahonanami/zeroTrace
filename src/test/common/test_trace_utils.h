@@ -1,5 +1,6 @@
 #pragma once
 
+/* Shared helpers for integration tests: temp logs, process cleanup, and polling. */
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -9,8 +10,16 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "../../include/zt_injector.h"
-#include "../../include/zt_trace_runner.h"
+#include "zt_injector.h"
+#include "zt_trace_runner.h"
+
+#define ZT_TEST_ARRAY_LEN(x) ((int)(sizeof(x) / sizeof((x)[0])))
+
+enum {
+    ZT_TEST_MSEC_PER_SEC = 1000,
+    ZT_TEST_NSEC_PER_MSEC = 1000000,
+    ZT_TEST_TRACE_POLL_INTERVAL_US = 10000,
+};
 
 static int zt_test_make_log_path(char *path, size_t size, const char *name) {
     struct timespec ts;
@@ -35,7 +44,7 @@ static int zt_test_make_log_path(char *path, size_t size, const char *name) {
     return 0;
 }
 
-static char *zt_test_read_file(const char *path) {
+static __attribute__((unused)) char *zt_test_read_file(const char *path) {
     FILE *fp;
     long size;
     char *buffer;
@@ -90,9 +99,19 @@ static __attribute__((unused)) int zt_test_count_substring(const char *text, con
     return count;
 }
 
-static int zt_test_wait_trace_done(unsigned int timeout_ms) {
-    struct timespec start;
+static __attribute__((unused)) long zt_test_elapsed_ms_since(const struct timespec *start) {
     struct timespec now;
+
+    if (start == NULL || clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        return -1;
+    }
+
+    return (now.tv_sec - start->tv_sec) * ZT_TEST_MSEC_PER_SEC +
+           (now.tv_nsec - start->tv_nsec) / ZT_TEST_NSEC_PER_MSEC;
+}
+
+static __attribute__((unused)) int zt_test_wait_trace_done(unsigned int timeout_ms) {
+    struct timespec start;
 
     if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) {
         return -1;
@@ -105,25 +124,16 @@ static int zt_test_wait_trace_done(unsigned int timeout_ms) {
             return -1;
         }
 
-        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        if (zt_test_elapsed_ms_since(&start) > (long)timeout_ms) {
             return -1;
         }
 
-        if (((now.tv_sec - start.tv_sec) * 1000) +
-            ((now.tv_nsec - start.tv_nsec) / 1000000) > (long)timeout_ms) {
-            return -1;
-        }
-
-        usleep(10000);
+        usleep(ZT_TEST_TRACE_POLL_INTERVAL_US);
     }
 
     return 0;
 }
 
-static int zt_test_process_gone(pid_t pid) {
-    if (kill(pid, 0) == 0) {
-        return 0;
-    }
-
-    return 1;
+static __attribute__((unused)) int zt_test_process_gone(pid_t pid) {
+    return zt_process_is_exited(pid);
 }

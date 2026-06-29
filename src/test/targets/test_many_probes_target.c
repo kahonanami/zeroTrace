@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+/* Target exposing many stable noinline functions for lifecycle and 16-probe tests. */
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -14,6 +15,20 @@ static void wait_for_start(void) {
     sigaddset(&set, SIGUSR1);
     sigprocmask(SIG_BLOCK, &set, NULL);
     sigwait(&set, &sig);
+}
+
+static volatile int g_call_marker_count;
+
+__attribute__((noinline))
+int call_marker(void) {
+    ++g_call_marker_count;
+    return 0x5a00 + g_call_marker_count;
+}
+
+__attribute__((noinline))
+uint64_t call_marker_args(uint64_t a, uint64_t b, uint64_t c) {
+    ++g_call_marker_count;
+    return 0x6b0000ULL + (a << 8) + b + c;
 }
 
 #define DEFINE_PROBE_FUNC(N, OFFSET) \

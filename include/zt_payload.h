@@ -2,14 +2,19 @@
 
 #include <stdint.h>
 
-#define MAX_SAVED_RET_ADDR 256
-#define ZT_TRACE_EVENT_CAPACITY 1024
+#define ZT_TRACE_EVENT_CAPACITY 4096
 #define ZT_TRACE_BUFFER_MAGIC 0x5a54425546464552ULL
 #define ZT_PROBE_FILTER_EXPR_MAX 128
 #define ZT_PROBE_FILTER_TOKEN_CAP 64
 #define ZT_TRACE_GP_ARG_COUNT 6
 #define ZT_TRACE_FP_ARG_COUNT 8
+#define ZT_PAYLOAD_PROBE_ACTION_CAP 32
+#define ZT_CALL_ACTION_ARG_CAP ZT_TRACE_GP_ARG_COUNT
 
+/*
+ * Filter bytecode shared with the payload/ring buffer. The CLI compiles text
+ * into this compact token stream so hot-path evaluation does not parse strings.
+ */
 typedef enum {
     ZT_PROBE_FILTER_TOK_END = 0,
     ZT_PROBE_FILTER_TOK_ARG,
@@ -46,6 +51,12 @@ typedef struct {
     zt_probe_filter_token_t tokens[ZT_PROBE_FILTER_TOKEN_CAP];
 } zt_probe_filter_t;
 
+/*
+ * ISA-neutral context passed from assembly stubs to the payload.
+ *
+ * Field names are ABI roles rather than physical registers. x86_64 and
+ * aarch64 stubs both map their first six integer arguments into gp_arg0..5.
+ */
 typedef struct {
     uint64_t r15;
     uint64_t r14;
@@ -70,8 +81,13 @@ typedef struct {
 typedef enum {
     ZT_TRACE_EVENT_ENTRY = 0,
     ZT_TRACE_EVENT_RETURN = 1,
+    ZT_TRACE_EVENT_CALL = 2,
 } zt_trace_event_type_t;
 
+/*
+ * One ring-buffer event. committed_seq is the publication flag: the payload
+ * writes all fields first, then stores this sequence with release ordering.
+ */
 typedef struct {
     uint64_t committed_seq;
     uint64_t probe_id;
@@ -89,6 +105,11 @@ typedef struct {
             uint64_t value4;
             uint64_t value5;
         };
+        struct {
+            uint64_t call_callee_addr;
+            uint64_t call_retval;
+            uint64_t call_arg_count;
+        };
         uint64_t args[ZT_TRACE_GP_ARG_COUNT];
     };
     union {
@@ -103,25 +124,46 @@ typedef struct {
             uint64_t fp7;
         };
         uint64_t fp_args[ZT_TRACE_FP_ARG_COUNT];
+        uint64_t call_args[ZT_CALL_ACTION_ARG_CAP];
     };
 } zt_trace_event_t;
+
+/* Optional A4 call action configured by the tracer and executed in payload. */
+typedef enum {
+    ZT_CALL_ACTION_ARG_CONST = 1,
+    ZT_CALL_ACTION_ARG_ENTRY_ARG = 2,
+} zt_call_action_arg_kind_t;
+
+typedef struct {
+    uint64_t kind;
+    uint64_t value;
+} zt_call_action_arg_t;
+
+typedef struct {
+    uint64_t enabled;
+    uint64_t probe_id;
+    uint64_t callee_addr;
+    uint64_t arg_count;
+    zt_call_action_arg_t args[ZT_CALL_ACTION_ARG_CAP];
+} zt_probe_call_action_t;
 
 typedef struct {
     uint64_t magic;
     uint64_t write_seq;
+    uint64_t call_action_count;
+    zt_probe_call_action_t call_actions[ZT_PAYLOAD_PROBE_ACTION_CAP];
     zt_trace_event_t events[ZT_TRACE_EVENT_CAPACITY];
 } zt_trace_buffer_t;
 
+/* Runtime configuration copied into the target before zt_payload_init(). */
 typedef struct {
     uint64_t shared_buffer_addr;
     uint64_t shared_buffer_size;
 } zt_payload_config_t;
 
 int zt_payload_init(const zt_payload_config_t *config);
-void *zt_payload_get_entry_stub_addr(void);
 void zt_handle_entry(ctx_t *context, const void *fp_state_area);
 void zt_handle_return(ctx_t *context, const void *fp_state_area);
 uint64_t save_probe_frame_c(uint64_t ret_addr, uint64_t func_id);
 uint64_t peek_probe_id_c(void);
-uint64_t peek_call_id_c(void);
 uint64_t get_ret_addr_c(void);

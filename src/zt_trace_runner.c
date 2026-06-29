@@ -4,19 +4,28 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include <stddef.h>
 #include <unistd.h>
 #include <dlfcn.h>
-#include <errno.h>
 #include <sys/mman.h>
-#include <sys/ptrace.h>
-#include <sys/wait.h>
+#include <sys/uio.h>
 
-#include "../include/zt_injector.h"
-#include "../include/zt_filter.h"
-#include "../include/zt_payload.h"
-#include "../include/zt_sigconf.h"
-#include "../include/zt_trampoline_manager.h"
-#include "../include/zt_trace_runner.h"
+#include "zt_injector.h"
+#include "zt_filter.h"
+#include "zt_payload.h"
+#include "zt_sigconf.h"
+#include "zt_trampoline_manager.h"
+#include "zt_trace_runner.h"
+
+/*
+ * Trace orchestration layer.
+ *
+ * This file wires together injection, payload setup, trampoline installation,
+ * ring-buffer polling, conditional filtering, call actions, and log formatting.
+ * It is intentionally above ptrace details and below the interactive CLI.
+ */
+_Static_assert(ZT_PAYLOAD_PROBE_ACTION_CAP == ZT_PROBES_CAPACITY,
+               "call action table must cover every probe slot");
 
 typedef struct {
     char payload_so_path[PATH_MAX];
@@ -28,6 +37,17 @@ typedef struct {
     uint64_t remote_payload_config_addr;
     zt_trampoline_pool_t trampoline_pool;
 } zt_runtime_state_t;
+
+typedef struct {
+    uint64_t addr;
+    char symbol[ZT_PROBE_SYMBOL_MAX];
+} zt_call_symbol_cache_entry_t;
+
+enum {
+    ZT_TRACE_CALL_SYMBOL_CACHE_CAP = ZT_PAYLOAD_PROBE_ACTION_CAP * 2,
+};
+
+static const uint64_t NSEC_PER_SEC = 1000000000ULL;
 
 typedef enum {
     ZT_TRACE_RUNTIME_INACTIVE = 0,
@@ -41,9 +61,10 @@ typedef struct {
     FILE *log_fp;
     uint64_t last_seq;
     zt_trace_runtime_status_t state;
+    zt_call_symbol_cache_entry_t call_symbols[ZT_TRACE_CALL_SYMBOL_CACHE_CAP];
+    int call_symbol_count;
+    uint64_t call_action_epoch;
 } zt_active_trace_t;
-
-static zt_active_trace_t g_active_trace;
 
 typedef struct {
     uint64_t call_id;
@@ -51,28 +72,419 @@ typedef struct {
     int suppressed;
 } zt_entry_cache_slot_t;
 
+typedef struct {
+    uint64_t magic;
+    uint64_t write_seq;
+} zt_trace_buffer_header_t;
+
+typedef enum {
+    ZT_TRACE_SLOT_READY = 0,
+    ZT_TRACE_SLOT_PENDING,
+    ZT_TRACE_SLOT_OVERWRITTEN,
+    ZT_TRACE_SLOT_READ_ERROR,
+} zt_trace_slot_status_t;
+
+static zt_active_trace_t g_active_trace;
+static int g_trace_exit_observed;
 static zt_entry_cache_slot_t g_entry_cache[ZT_TRACE_EVENT_CAPACITY];
+
+/* Local reader snapshots for one poll range; formatting never reads a slot
+ * directly from the remote ring while the payload may still be writing it. */
+static zt_trace_event_t g_event_snapshot[ZT_TRACE_EVENT_CAPACITY];
+static uint64_t g_commit_before[ZT_TRACE_EVENT_CAPACITY];
+static uint64_t g_commit_after[ZT_TRACE_EVENT_CAPACITY];
+
+enum {
+    ZT_TRACE_READ_IOV_MAX = 256,
+};
+
+static void zt_trace_reset_active(int exit_observed) {
+    if (g_active_trace.log_fp != NULL) {
+        fclose(g_active_trace.log_fp);
+    }
+    memset(&g_active_trace, 0, sizeof(g_active_trace));
+    memset(g_entry_cache, 0, sizeof(g_entry_cache));
+    g_trace_exit_observed = exit_observed;
+}
+
+static void zt_trace_mark_target_exited(void) {
+    zt_trace_reset_active(1);
+}
+
+static int zt_trace_munmap_region(zt_injector_session_t *session,
+                                  uint64_t *remote_addr,
+                                  size_t size) {
+    if (session == NULL || remote_addr == NULL || *remote_addr == 0) {
+        return 0;
+    }
+
+    if (zt_remote_munmap(session->pid, *remote_addr, size) != 0) {
+        return -1;
+    }
+
+    *remote_addr = 0;
+    return 0;
+}
+
+static int zt_trace_cleanup_runtime(zt_injector_session_t *session,
+                                    zt_runtime_state_t *runtime) {
+    int ret = 0;
+    size_t payload_path_size;
+
+    if (session == NULL || runtime == NULL) {
+        return 0;
+    }
+
+    payload_path_size = strlen(runtime->payload_so_path) + 1;
+    if (zt_trace_munmap_region(session,
+                               &runtime->remote_payload_path_addr,
+                               payload_path_size) != 0) {
+        ret = -1;
+    }
+
+    if (zt_trace_munmap_region(session,
+                               &runtime->remote_payload_config_addr,
+                               sizeof(zt_payload_config_t)) != 0) {
+        ret = -1;
+    }
+
+    if (zt_trace_munmap_region(session,
+                               &runtime->remote_trace_buffer_addr,
+                               sizeof(zt_trace_buffer_t)) != 0) {
+        ret = -1;
+    }
+
+    return ret;
+}
+
+static int zt_trace_is_exit_window(pid_t pid, uint64_t remote_addr) {
+    int attempt;
+
+    for (attempt = 0; attempt < 50; ++attempt) {
+        if (zt_process_is_exited(pid)) {
+            return 1;
+        }
+
+        if (!zt_remote_addr_is_mapped(pid, remote_addr)) {
+            return 1;
+        }
+
+        usleep(1000);
+    }
+
+    return zt_process_is_exited(pid) ||
+           !zt_remote_addr_is_mapped(pid, remote_addr);
+}
+
+static int zt_trace_mark_exit_window_if_needed(pid_t pid, uint64_t trace_buffer_addr) {
+    if (zt_trace_is_exit_window(pid, trace_buffer_addr)) {
+        zt_trace_mark_target_exited();
+        return 1;
+    }
+
+    return 0;
+}
+
+static int zt_trace_call_action_slot_valid(int slot) {
+    return slot >= 0 && slot < ZT_PAYLOAD_PROBE_ACTION_CAP;
+}
+
+static int zt_trace_write_call_action(zt_injector_session_t *session,
+                                      zt_runtime_state_t *runtime,
+                                      const zt_probe_info_t *probe) {
+    uint64_t action_addr;
+    uint64_t enabled_addr;
+    uint64_t enabled;
+    zt_probe_call_action_t staged_action;
+    size_t slot;
+
+    if (session == NULL || runtime == NULL || probe == NULL ||
+        runtime->remote_trace_buffer_addr == 0 || probe->probe_id == 0 ||
+        !zt_trace_call_action_slot_valid(probe->call_action_slot)) {
+        return -1;
+    }
+
+    slot = (size_t)probe->call_action_slot;
+    action_addr = runtime->remote_trace_buffer_addr +
+                  offsetof(zt_trace_buffer_t, call_actions) +
+                  (slot * sizeof(zt_probe_call_action_t));
+    enabled_addr = action_addr + offsetof(zt_probe_call_action_t, enabled);
+
+    enabled = 0;
+    if (zt_write_remote_memory(session->pid,
+                               enabled_addr,
+                               &enabled,
+                               sizeof(enabled)) != 0) {
+        return -1;
+    }
+
+    /*
+     * Publish action updates with a disabled -> data -> enabled sequence. The
+     * payload snapshots and re-checks enabled, so it never executes mixed fields.
+     */
+    staged_action = probe->call_action;
+    staged_action.enabled = 0;
+    if (zt_write_remote_memory(session->pid,
+                               action_addr,
+                               &staged_action,
+                               sizeof(staged_action)) != 0) {
+        return -1;
+    }
+
+    if (!probe->call_action.enabled) {
+        return 0;
+    }
+
+    enabled = probe->call_action.enabled;
+    return zt_write_remote_memory(session->pid,
+                                  enabled_addr,
+                                  &enabled,
+                                  sizeof(enabled));
+}
+
+static uint64_t zt_trace_count_call_actions(const zt_injector_session_t *session) {
+    uint64_t count = 0;
+    int i;
+
+    if (session == NULL) {
+        return 0;
+    }
+
+    for (i = 0; i < ZT_PROBES_CAPACITY; ++i) {
+        if (session->probes[i].probe_id != 0 &&
+            session->probes[i].call_action.enabled) {
+            ++count;
+        }
+    }
+
+    return count;
+}
+
+static uint64_t zt_trace_next_call_action_epoch(void) {
+    ++g_active_trace.call_action_epoch;
+    if (g_active_trace.call_action_epoch == 0) {
+        g_active_trace.call_action_epoch = 1;
+    }
+
+    return g_active_trace.call_action_epoch;
+}
+
+static int zt_trace_write_call_action_count(zt_injector_session_t *session,
+                                            zt_runtime_state_t *runtime) {
+    uint64_t count;
+    uint64_t count_addr;
+
+    if (session == NULL || runtime == NULL || runtime->remote_trace_buffer_addr == 0) {
+        return -1;
+    }
+
+    count = zt_trace_count_call_actions(session);
+    count_addr = runtime->remote_trace_buffer_addr +
+                 offsetof(zt_trace_buffer_t, call_action_count);
+
+    return zt_write_remote_memory(session->pid, count_addr, &count, sizeof(count));
+}
+
+static void zt_trace_set_call_symbol_entry(zt_call_symbol_cache_entry_t *entry,
+                                           uint64_t addr,
+                                           const char *symbol) {
+    if (entry == NULL || symbol == NULL) {
+        return;
+    }
+
+    entry->addr = addr;
+    snprintf(entry->symbol, sizeof(entry->symbol), "%s", symbol);
+}
+
+static void zt_trace_remember_call_symbol(uint64_t addr, const char *symbol) {
+    int i;
+
+    if (addr == 0 || symbol == NULL || symbol[0] == '\0') {
+        return;
+    }
+
+    for (i = 0; i < g_active_trace.call_symbol_count; ++i) {
+        if (g_active_trace.call_symbols[i].addr == addr) {
+            zt_trace_set_call_symbol_entry(&g_active_trace.call_symbols[i], addr, symbol);
+            return;
+        }
+    }
+
+    if (g_active_trace.call_symbol_count >= ZT_TRACE_CALL_SYMBOL_CACHE_CAP) {
+        return;
+    }
+
+    zt_trace_set_call_symbol_entry(&g_active_trace.call_symbols[g_active_trace.call_symbol_count],
+                                   addr,
+                                   symbol);
+    ++g_active_trace.call_symbol_count;
+}
+
+static const char *zt_trace_find_call_symbol(uint64_t addr) {
+    int i;
+
+    if (addr == 0) {
+        return NULL;
+    }
+
+    for (i = 0; i < g_active_trace.call_symbol_count; ++i) {
+        if (g_active_trace.call_symbols[i].addr == addr) {
+            return g_active_trace.call_symbols[i].symbol;
+        }
+    }
+
+    return NULL;
+}
+
+static int zt_trace_probe_uses_call_slot(const zt_injector_session_t *session,
+                                         const zt_probe_info_t *owner,
+                                         int slot) {
+    int i;
+
+    if (session == NULL || owner == NULL || slot < 0) {
+        return 0;
+    }
+
+    for (i = 0; i < ZT_PROBES_CAPACITY; ++i) {
+        const zt_probe_info_t *probe = &session->probes[i];
+
+        if (probe == owner || probe->probe_id == 0) {
+            continue;
+        }
+
+        if (probe->call_action.enabled && probe->call_action_slot == slot) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int zt_trace_assign_call_action_slot(const zt_injector_session_t *session,
+                                            zt_probe_info_t *probe) {
+    size_t home_slot;
+    size_t offset;
+
+    if (session == NULL || probe == NULL || probe->probe_id == 0) {
+        return -1;
+    }
+
+    if (zt_trace_call_action_slot_valid(probe->call_action_slot)) {
+        if (!zt_trace_probe_uses_call_slot(session, probe, probe->call_action_slot)) {
+            return 0;
+        }
+        probe->call_action_slot = -1;
+    }
+
+    home_slot = (size_t)(probe->probe_id % ZT_PAYLOAD_PROBE_ACTION_CAP);
+    for (offset = 0; offset < ZT_PAYLOAD_PROBE_ACTION_CAP; ++offset) {
+        int slot = (int)((home_slot + offset) % ZT_PAYLOAD_PROBE_ACTION_CAP);
+
+        if (!zt_trace_probe_uses_call_slot(session, probe, slot)) {
+            probe->call_action_slot = slot;
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
+static void zt_trace_set_probe_filter(zt_probe_info_t *probe,
+                                      const zt_probe_filter_t *filter) {
+    if (probe == NULL) {
+        return;
+    }
+
+    if (filter != NULL) {
+        probe->filter = *filter;
+    } else {
+        memset(&probe->filter, 0, sizeof(probe->filter));
+    }
+    probe->filter.probe_id = probe->probe_id;
+}
+
+typedef struct {
+    int existed;
+    zt_probe_state_t state;
+    uint64_t trampoline_addr;
+    int trampoline_slot;
+    uint8_t orig_code[ZT_PROBE_ORIG_CODE_MAX];
+    uint8_t orig_len;
+    zt_probe_filter_t filter;
+} zt_probe_install_snapshot_t;
+
+static void zt_trace_capture_probe_install_snapshot(
+    const zt_probe_info_t *probe,
+    int existed,
+    zt_probe_install_snapshot_t *snapshot) {
+    if (probe == NULL || snapshot == NULL) {
+        return;
+    }
+
+    memset(snapshot, 0, sizeof(*snapshot));
+    snapshot->existed = existed;
+    snapshot->state = probe->state;
+    snapshot->trampoline_addr = probe->trampoline_addr;
+    snapshot->trampoline_slot = probe->trampoline_slot;
+    memcpy(snapshot->orig_code, probe->orig_code, sizeof(snapshot->orig_code));
+    snapshot->orig_len = probe->orig_len;
+    snapshot->filter = probe->filter;
+}
+
+static void zt_trace_rollback_probe_install(zt_injector_session_t *session,
+                                            zt_runtime_state_t *runtime,
+                                            zt_probe_info_t *probe,
+                                            const zt_probe_install_snapshot_t *snapshot) {
+    uint64_t allocated_addr;
+    uint64_t probe_id;
+
+    if (session == NULL || runtime == NULL || probe == NULL || snapshot == NULL) {
+        return;
+    }
+
+    allocated_addr = probe->trampoline_addr;
+    probe_id = probe->probe_id;
+
+    if (allocated_addr != 0 && allocated_addr != snapshot->trampoline_addr) {
+        zt_trampoline_pool_release(session, &runtime->trampoline_pool, probe);
+    }
+
+    if (!snapshot->existed) {
+        zt_unregister_probe(session, probe_id);
+        return;
+    }
+
+    probe->state = snapshot->state;
+    probe->trampoline_addr = snapshot->trampoline_addr;
+    probe->trampoline_slot = snapshot->trampoline_slot;
+    memcpy(probe->orig_code, snapshot->orig_code, sizeof(probe->orig_code));
+    probe->orig_len = snapshot->orig_len;
+    probe->filter = snapshot->filter;
+}
 
 static int zt_trace_install_probe(zt_injector_session_t *session,
                                   zt_runtime_state_t *runtime,
                                   const char *symbol,
                                   const zt_probe_filter_t *filter,
                                   zt_probe_info_t **probe_out) {
+    zt_probe_install_snapshot_t snapshot;
+    zt_probe_info_t *existing_probe;
     zt_probe_info_t *probe;
     uint8_t trampoline_buf[ZT_TRAMPOLINE_MAX_SIZE];
     size_t trampoline_size;
     uint64_t remote_trampoline_addr;
 
+    existing_probe = zt_probe_find_by_symbol(session, symbol);
     probe = zt_register_probe(session, symbol);
     if (probe == NULL) {
         fprintf(stderr, "Failed to register probe for symbol %s\n", symbol);
         return -1;
     }
+    zt_trace_capture_probe_install_snapshot(probe, existing_probe != NULL, &snapshot);
 
     if (probe->state == ZT_PROBE_INSTALLED) {
         if (filter != NULL) {
-            probe->filter = *filter;
-            probe->filter.probe_id = probe->probe_id;
+            zt_trace_set_probe_filter(probe, filter);
         }
 
         if (probe_out != NULL) {
@@ -81,21 +493,21 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
         return 0;
     }
 
-    printf("Registered probe: id=%lu, symbol=%s, addr=0x%lX\n",
+    printf("%s probe: id=%lu, symbol=%s, addr=0x%lX\n",
+           snapshot.existed ? "Reusing" : "Registered",
            probe->probe_id,
            probe->target.symbol,
            probe->target.remote_addr);
 
-    if (filter != NULL) {
-        probe->filter = *filter;
-        probe->filter.probe_id = probe->probe_id;
-    } else {
-        memset(&probe->filter, 0, sizeof(probe->filter));
-        probe->filter.probe_id = probe->probe_id;
-    }
+    zt_trace_set_probe_filter(probe, filter);
 
+    /*
+     * zt_enable_probe prepares original bytes and patch length only. The actual
+     * branch patch is installed after the remote trampoline bytes are written.
+     */
     if (zt_enable_probe(session, probe->probe_id) != 0) {
         printf("zt_enable_probe failed for probe %lu\n", probe->probe_id);
+        zt_trace_rollback_probe_install(session, runtime, probe, &snapshot);
         return -1;
     }
 
@@ -105,6 +517,7 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
 
     if (zt_trampoline_pool_alloc(session, &runtime->trampoline_pool, probe, &remote_trampoline_addr) != 0) {
         printf("Failed to allocate remote trampoline slot\n");
+        zt_trace_rollback_probe_install(session, runtime, probe, &snapshot);
         return -1;
     }
     printf("Remote trampoline slot %d addr: 0x%llx\n",
@@ -112,15 +525,13 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
            (unsigned long long)remote_trampoline_addr);
 
     if (zt_build_trampoline(probe,
-                       runtime->remote_entry_stub_addr,
-                       remote_trampoline_addr,
-                       trampoline_buf,
-                       sizeof(trampoline_buf),
-                       &trampoline_size) != 0) {
+                            runtime->remote_entry_stub_addr,
+                            remote_trampoline_addr,
+                            trampoline_buf,
+                            sizeof(trampoline_buf),
+                            &trampoline_size) != 0) {
         printf("zt_build_trampoline failed for probe %lu\n", probe->probe_id);
-        if (probe->state != ZT_PROBE_INSTALLED) {
-            zt_trampoline_pool_release(session, &runtime->trampoline_pool, probe);
-        }
+        zt_trace_rollback_probe_install(session, runtime, probe, &snapshot);
         return -1;
     }
 
@@ -130,17 +541,13 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
                                trampoline_size) != 0) {
         printf("failed to write trampoline to 0x%llx\n",
                (unsigned long long)remote_trampoline_addr);
-        if (probe->state != ZT_PROBE_INSTALLED) {
-            zt_trampoline_pool_release(session, &runtime->trampoline_pool, probe);
-        }
+        zt_trace_rollback_probe_install(session, runtime, probe, &snapshot);
         return -1;
     }
 
     if (zt_install_probe_patch(session, probe->probe_id, remote_trampoline_addr) != 0) {
         printf("failed to install probe patch for probe %lu\n", probe->probe_id);
-        if (probe->state != ZT_PROBE_INSTALLED) {
-            zt_trampoline_pool_release(session, &runtime->trampoline_pool, probe);
-        }
+        zt_trace_rollback_probe_install(session, runtime, probe, &snapshot);
         return -1;
     }
 
@@ -153,25 +560,6 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
     }
 
     return 0;
-}
-
-static int zt_wait_for_tracee_stop(pid_t pid) {
-    int status;
-
-    for (;;) {
-        if (waitpid(pid, &status, 0) > 0) {
-            if (WIFSTOPPED(status)) {
-                return 0;
-            }
-            return -1;
-        }
-
-        if (errno == EINTR) {
-            continue;
-        }
-
-        return -1;
-    }
 }
 
 static int zt_trace_event_is_suppressed(const zt_probe_info_t *probe,
@@ -190,139 +578,491 @@ static int zt_trace_event_is_suppressed(const zt_probe_info_t *probe,
     return !zt_probe_filter_eval(filter, event);
 }
 
-static void zt_dump_trace_events_since(zt_injector_session_t *session,
-                                       const zt_trace_buffer_t *buffer,
-                                       uint64_t *last_seq,
-                                       FILE *out) {
-    const char *comm;
-    uint64_t write_seq;
-    uint64_t start_seq;
-    uint64_t seq;
+static void zt_format_call_args(const zt_trace_event_t *event,
+                                char *buffer,
+                                size_t buffer_size) {
+    size_t used = 0;
+    uint64_t count;
+    uint64_t i;
 
-    if (session == NULL || buffer == NULL || last_seq == NULL || out == NULL) {
+    if (buffer == NULL || buffer_size == 0) {
         return;
+    }
+
+    buffer[0] = '\0';
+    if (event == NULL) {
+        return;
+    }
+
+    count = event->call_arg_count;
+    if (count > ZT_CALL_ACTION_ARG_CAP) {
+        count = ZT_CALL_ACTION_ARG_CAP;
+    }
+
+    for (i = 0; i < count; ++i) {
+        int written;
+
+        written = snprintf(buffer + used,
+                           buffer_size - used,
+                           "%s0x%llx",
+                           i == 0 ? "" : ", ",
+                           (unsigned long long)event->call_args[i]);
+        if (written < 0) {
+            buffer[0] = '\0';
+            return;
+        }
+        if ((size_t)written >= buffer_size - used) {
+            buffer[buffer_size - 1] = '\0';
+            return;
+        }
+        used += (size_t)written;
+    }
+}
+
+static void zt_trace_print_event_prefix(FILE *out,
+                                        const char *comm,
+                                        pid_t pid,
+                                        const zt_trace_event_t *event,
+                                        const char *kind) {
+    unsigned long long ts_sec;
+    unsigned long long ts_nsec;
+
+    if (out == NULL || comm == NULL || event == NULL || kind == NULL) {
+        return;
+    }
+
+    ts_sec = (unsigned long long)(event->timestamp_ns / NSEC_PER_SEC);
+    ts_nsec = (unsigned long long)(event->timestamp_ns % NSEC_PER_SEC);
+    fprintf(out,
+            "%s-%d/%llu [%03llu] %5llu.%09llu: ztrace:%s: ",
+            comm,
+            pid,
+            (unsigned long long)event->tid,
+            (unsigned long long)event->cpu_id,
+            ts_sec,
+            ts_nsec,
+            kind);
+}
+
+static void zt_dump_one_trace_event(zt_injector_session_t *session,
+                                    const char *comm,
+                                    const zt_trace_event_t *event,
+                                    uint64_t seq,
+                                    FILE *out) {
+    const zt_trace_event_t *matched_entry = NULL;
+    const zt_probe_info_t *probe;
+    const char *symbol_name;
+    char formatted[512];
+    const char *phase;
+
+    if (session == NULL || comm == NULL || event == NULL || out == NULL) {
+        return;
+    }
+
+    probe = zt_probe_find_by_id(session, event->probe_id);
+    symbol_name = probe != NULL ? probe->target.symbol : "<unknown>";
+    phase = event->event_type == ZT_TRACE_EVENT_RETURN ? "return" : "entry";
+
+    if (event->event_type == ZT_TRACE_EVENT_CALL) {
+        const char *callee_name;
+        char call_args[160];
+
+        callee_name = zt_trace_find_call_symbol(event->args[0]);
+        if (callee_name == NULL &&
+            probe != NULL &&
+            probe->call_action.enabled &&
+            probe->call_action.callee_addr == event->args[0] &&
+            probe->call_symbol[0] != '\0') {
+            callee_name = probe->call_symbol;
+        }
+        if (callee_name == NULL) {
+            callee_name = "<unknown>";
+        }
+        zt_format_call_args(event, call_args, sizeof(call_args));
+
+        zt_trace_print_event_prefix(out, comm, session->pid, event, "call");
+        fprintf(out,
+                "%s => %s(%s) -> 0x%llx callee=0x%llx\n",
+                symbol_name,
+                callee_name,
+                call_args,
+                (unsigned long long)event->args[1],
+                (unsigned long long)event->args[0]);
+        return;
+    }
+
+    if (event->event_type == ZT_TRACE_EVENT_ENTRY && event->call_id != 0) {
+        zt_entry_cache_slot_t *slot = &g_entry_cache[event->call_id % ZT_TRACE_EVENT_CAPACITY];
+        slot->call_id = event->call_id;
+        slot->event = *event;
+        slot->suppressed = zt_trace_event_is_suppressed(probe, event);
+        if (slot->suppressed) {
+            return;
+        }
+    } else if (event->event_type == ZT_TRACE_EVENT_RETURN && event->call_id != 0) {
+        zt_entry_cache_slot_t *slot = &g_entry_cache[event->call_id % ZT_TRACE_EVENT_CAPACITY];
+        if (slot->call_id == event->call_id) {
+            /*
+             * Return events need the matching entry event for typed formatting
+             * and for applying the same filter decision to the pair.
+             */
+            matched_entry = &slot->event;
+            if (slot->suppressed) {
+                slot->call_id = 0;
+                slot->suppressed = 0;
+                return;
+            }
+            slot->call_id = 0;
+            slot->suppressed = 0;
+        }
+    }
+
+    if (probe != NULL &&
+        zt_format_trace_event_with_sig(session, probe, matched_entry, event, formatted, sizeof(formatted)) == 0) {
+        zt_trace_print_event_prefix(out, comm, session->pid, event, phase);
+        fputs(formatted, out);
+        return;
+    }
+
+    if (event->event_type == ZT_TRACE_EVENT_ENTRY) {
+        zt_trace_print_event_prefix(out, comm, session->pid, event, "entry");
+        fprintf(out,
+                "%s(arg0=0x%llx, arg1=0x%llx, arg2=0x%llx, arg3=0x%llx, arg4=0x%llx, arg5=0x%llx)\n",
+                symbol_name,
+                (unsigned long long)event->value0,
+                (unsigned long long)event->value1,
+                (unsigned long long)event->value2,
+                (unsigned long long)event->value3,
+                (unsigned long long)event->value4,
+                (unsigned long long)event->value5);
+    } else if (event->event_type == ZT_TRACE_EVENT_RETURN) {
+        zt_trace_print_event_prefix(out, comm, session->pid, event, "return");
+        fprintf(out,
+                "%s -> 0x%llx\n",
+                symbol_name,
+                (unsigned long long)event->value0);
+    } else {
+        zt_trace_print_event_prefix(out, comm, session->pid, event, "event");
+        fprintf(out,
+                "%s type=%llu seq=%zu\n",
+                symbol_name,
+                (unsigned long long)event->event_type,
+                (size_t)seq);
+    }
+}
+
+static uint64_t zt_trace_event_slot_addr(const zt_runtime_state_t *runtime,
+                                         uint64_t seq) {
+    uint64_t slot;
+
+    if (runtime == NULL || seq == 0) {
+        return 0;
+    }
+
+    slot = (seq - 1) % ZT_TRACE_EVENT_CAPACITY;
+    return runtime->remote_trace_buffer_addr +
+           offsetof(zt_trace_buffer_t, events) +
+           (slot * sizeof(zt_trace_event_t));
+}
+
+static const char *zt_trace_session_comm(const zt_injector_session_t *session) {
+    const char *comm;
+
+    if (session == NULL) {
+        return "<unknown>";
     }
 
     comm = strrchr(session->exe_path, '/');
-    comm = comm != NULL ? comm + 1 : session->exe_path;
+    return comm != NULL ? comm + 1 : session->exe_path;
+}
 
-    if (buffer->magic != ZT_TRACE_BUFFER_MAGIC) {
+static int zt_trace_read_buffer_header(zt_injector_session_t *session,
+                                       const zt_runtime_state_t *runtime,
+                                       zt_trace_buffer_header_t *header) {
+    if (session == NULL || runtime == NULL || header == NULL ||
+        runtime->remote_trace_buffer_addr == 0) {
+        return -1;
+    }
+
+    return zt_read_remote_memory(session->pid,
+                                 runtime->remote_trace_buffer_addr,
+                                 header,
+                                 sizeof(*header));
+}
+
+static void zt_trace_log_lost_events(const zt_injector_session_t *session,
+                                     FILE *out,
+                                     uint64_t first_lost,
+                                     uint64_t lost_count,
+                                     uint64_t write_seq) {
+    if (session == NULL || out == NULL || lost_count == 0) {
+        return;
+    }
+
+    fprintf(out,
+            "%s-%d [---] ztrace:lost: dropped %llu events starting at seq=%llu (write_seq=%llu capacity=%u)\n",
+            zt_trace_session_comm(session),
+            session->pid,
+            (unsigned long long)lost_count,
+            (unsigned long long)first_lost,
+            (unsigned long long)write_seq,
+            ZT_TRACE_EVENT_CAPACITY);
+}
+
+static int zt_trace_read_commit_snapshot(zt_injector_session_t *session,
+                                         const zt_runtime_state_t *runtime,
+                                         uint64_t start_seq,
+                                         uint64_t count,
+                                         uint64_t commits[ZT_TRACE_EVENT_CAPACITY]) {
+    uint64_t offset;
+
+    if (session == NULL || runtime == NULL || commits == NULL ||
+        start_seq == 0 || count > ZT_TRACE_EVENT_CAPACITY) {
+        return -1;
+    }
+
+    for (offset = 0; offset < count; offset += ZT_TRACE_READ_IOV_MAX) {
+        struct iovec local_iov[ZT_TRACE_READ_IOV_MAX];
+        struct iovec remote_iov[ZT_TRACE_READ_IOV_MAX];
+        size_t batch_count = (size_t)(count - offset);
+        size_t i;
+        size_t batch_bytes;
+
+        if (batch_count > ZT_TRACE_READ_IOV_MAX) {
+            batch_count = ZT_TRACE_READ_IOV_MAX;
+        }
+
+        for (i = 0; i < batch_count; ++i) {
+            uint64_t seq_for_slot = start_seq + offset + i;
+            uint64_t slot = (seq_for_slot - 1) % ZT_TRACE_EVENT_CAPACITY;
+            uint64_t event_addr = zt_trace_event_slot_addr(runtime, seq_for_slot);
+
+            local_iov[i].iov_base = &commits[slot];
+            local_iov[i].iov_len = sizeof(commits[slot]);
+            remote_iov[i].iov_base =
+                (void *)(uintptr_t)(event_addr + offsetof(zt_trace_event_t, committed_seq));
+            remote_iov[i].iov_len = sizeof(commits[slot]);
+        }
+
+        batch_bytes = batch_count * sizeof(uint64_t);
+        if (zt_read_remote_iov(session->pid,
+                               local_iov,
+                               remote_iov,
+                               batch_count,
+                               batch_bytes) != 0) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+static int zt_trace_read_event_snapshot(zt_injector_session_t *session,
+                                        const zt_runtime_state_t *runtime,
+                                        uint64_t start_seq,
+                                        uint64_t count) {
+    uint64_t seq;
+    uint64_t remaining;
+
+    if (session == NULL || runtime == NULL ||
+        start_seq == 0 || count > ZT_TRACE_EVENT_CAPACITY) {
+        return -1;
+    }
+
+    seq = start_seq;
+    remaining = count;
+    while (remaining > 0) {
+        uint64_t slot = (seq - 1) % ZT_TRACE_EVENT_CAPACITY;
+        uint64_t run = ZT_TRACE_EVENT_CAPACITY - slot;
+        uint64_t remote_addr;
+
+        if (run > remaining) {
+            run = remaining;
+        }
+
+        remote_addr = zt_trace_event_slot_addr(runtime, seq);
+        if (zt_read_remote_memory(session->pid,
+                                  remote_addr,
+                                  &g_event_snapshot[slot],
+                                  (size_t)run * sizeof(zt_trace_event_t)) != 0) {
+            return -1;
+        }
+
+        seq += run;
+        remaining -= run;
+    }
+
+    return 0;
+}
+
+static int zt_trace_refresh_event_snapshots(zt_injector_session_t *session,
+                                            const zt_runtime_state_t *runtime,
+                                            uint64_t start_seq,
+                                            uint64_t count) {
+    if (count == 0) {
+        return 0;
+    }
+
+    /*
+     * Double-read committed_seq around the event copy. If either value changes
+     * or does not match the requested sequence, the slot was still pending or
+     * overwritten by the producer and must not be formatted.
+     */
+    if (zt_trace_read_commit_snapshot(session,
+                                      runtime,
+                                      start_seq,
+                                      count,
+                                      g_commit_before) != 0) {
+        return -1;
+    }
+
+    if (zt_trace_read_event_snapshot(session, runtime, start_seq, count) != 0) {
+        return -1;
+    }
+
+    return zt_trace_read_commit_snapshot(session,
+                                         runtime,
+                                         start_seq,
+                                         count,
+                                         g_commit_after);
+}
+
+static zt_trace_slot_status_t zt_trace_snapshot_slot(uint64_t seq,
+                                                     zt_trace_event_t *event_out) {
+    uint64_t slot;
+    const zt_trace_event_t *event;
+    uint64_t before;
+    uint64_t after;
+
+    if (event_out == NULL || seq == 0) {
+        return ZT_TRACE_SLOT_READ_ERROR;
+    }
+
+    slot = (seq - 1) % ZT_TRACE_EVENT_CAPACITY;
+    event = &g_event_snapshot[slot];
+    before = g_commit_before[slot];
+    after = g_commit_after[slot];
+
+    if (before == seq && event->committed_seq == seq && after == seq) {
+        *event_out = *event;
+        return ZT_TRACE_SLOT_READY;
+    }
+
+    if (before > seq || event->committed_seq > seq || after > seq) {
+        return ZT_TRACE_SLOT_OVERWRITTEN;
+    }
+
+    return ZT_TRACE_SLOT_PENDING;
+}
+
+static int zt_dump_trace_events_since(zt_injector_session_t *session,
+                                      const zt_runtime_state_t *runtime,
+                                      uint64_t *last_seq,
+                                      FILE *out) {
+    zt_trace_buffer_header_t header;
+    const char *comm;
+    uint64_t write_seq;
+    uint64_t seq;
+    uint64_t snapshot_count;
+    int did_output = 0;
+
+    if (session == NULL || runtime == NULL || last_seq == NULL || out == NULL) {
+        return -1;
+    }
+
+    if (zt_trace_read_buffer_header(session, runtime, &header) != 0) {
+        return -1;
+    }
+
+    if (header.magic != ZT_TRACE_BUFFER_MAGIC) {
         fprintf(out, "trace buffer magic mismatch\n");
         fflush(out);
-        return;
+        return -1;
     }
 
-    write_seq = buffer->write_seq;
+    write_seq = header.write_seq;
     if (write_seq == 0 || write_seq <= *last_seq) {
-        return;
+        return 0;
     }
 
-    start_seq = *last_seq + 1;
+    comm = zt_trace_session_comm(session);
+    seq = *last_seq + 1;
+
     if (write_seq - *last_seq > ZT_TRACE_EVENT_CAPACITY) {
-        start_seq = write_seq - ZT_TRACE_EVENT_CAPACITY + 1;
+        /* The producer lapped the reader; emit an explicit loss marker. */
+        uint64_t start_seq = write_seq - ZT_TRACE_EVENT_CAPACITY + 1;
+        zt_trace_log_lost_events(session,
+                                 out,
+                                 seq,
+                                 start_seq - seq,
+                                 write_seq);
+        *last_seq = start_seq - 1;
+        seq = start_seq;
+        did_output = 1;
     }
 
-    for (seq = start_seq; seq <= write_seq; ++seq) {
-        const zt_trace_event_t *event = &buffer->events[(seq - 1) % ZT_TRACE_EVENT_CAPACITY];
-        const zt_trace_event_t *matched_entry = NULL;
-        const zt_probe_info_t *probe;
-        const char *symbol_name;
-        char formatted[512];
-        const char *phase;
-        unsigned long long ts_sec;
-        unsigned long long ts_nsec;
+    snapshot_count = write_seq - seq + 1;
+    if (zt_trace_refresh_event_snapshots(session, runtime, seq, snapshot_count) != 0) {
+        return -1;
+    }
 
-        if (event->committed_seq != seq) {
+    while (seq <= write_seq) {
+        zt_trace_event_t event;
+        zt_trace_slot_status_t status;
+
+        status = zt_trace_snapshot_slot(seq, &event);
+        if (status == ZT_TRACE_SLOT_READY) {
+            zt_dump_one_trace_event(session, comm, &event, seq, out);
+            *last_seq = seq;
+            ++seq;
+            did_output = 1;
             continue;
         }
 
-        probe = zt_probe_find_by_id(session, event->probe_id);
-        symbol_name = probe != NULL ? probe->target.symbol : "<unknown>";
-        phase = event->event_type == ZT_TRACE_EVENT_RETURN ? "return" : "entry";
-        ts_sec = (unsigned long long)(event->timestamp_ns / 1000000000ULL);
-        ts_nsec = (unsigned long long)(event->timestamp_ns % 1000000000ULL);
+        if (status == ZT_TRACE_SLOT_PENDING) {
+            break;
+        }
 
-        if (event->event_type == ZT_TRACE_EVENT_ENTRY && event->call_id != 0) {
-            zt_entry_cache_slot_t *slot = &g_entry_cache[event->call_id % ZT_TRACE_EVENT_CAPACITY];
-            slot->call_id = event->call_id;
-            slot->event = *event;
-            slot->suppressed = zt_trace_event_is_suppressed(probe, event);
-            if (slot->suppressed) {
+        if (status == ZT_TRACE_SLOT_OVERWRITTEN) {
+            zt_trace_buffer_header_t fresh_header;
+
+            if (zt_trace_read_buffer_header(session, runtime, &fresh_header) != 0 ||
+                fresh_header.magic != ZT_TRACE_BUFFER_MAGIC) {
+                return -1;
+            }
+
+            if (fresh_header.write_seq >= seq &&
+                fresh_header.write_seq - seq >= ZT_TRACE_EVENT_CAPACITY) {
+                uint64_t start_seq = fresh_header.write_seq - ZT_TRACE_EVENT_CAPACITY + 1;
+                zt_trace_log_lost_events(session,
+                                         out,
+                                         seq,
+                                         start_seq - seq,
+                                         fresh_header.write_seq);
+                *last_seq = start_seq - 1;
+                seq = start_seq;
+                write_seq = fresh_header.write_seq;
+                snapshot_count = write_seq - seq + 1;
+                if (zt_trace_refresh_event_snapshots(session,
+                                                     runtime,
+                                                     seq,
+                                                     snapshot_count) != 0) {
+                    return -1;
+                }
+                did_output = 1;
                 continue;
             }
-        } else if (event->event_type == ZT_TRACE_EVENT_RETURN && event->call_id != 0) {
-            zt_entry_cache_slot_t *slot = &g_entry_cache[event->call_id % ZT_TRACE_EVENT_CAPACITY];
-            if (slot->call_id == event->call_id) {
-                matched_entry = &slot->event;
-                if (slot->suppressed) {
-                    slot->call_id = 0;
-                    slot->suppressed = 0;
-                    continue;
-                }
-                slot->call_id = 0;
-                slot->suppressed = 0;
-            }
+            break;
         }
 
-        if (probe != NULL &&
-            zt_format_trace_event_with_sig(session, probe, matched_entry, event, formatted, sizeof(formatted)) == 0) {
-            fprintf(out,
-                    "%s-%d/%llu [%03llu] %5llu.%09llu: ztrace:%s: %s",
-                    comm,
-                    session->pid,
-                    (unsigned long long)event->tid,
-                    (unsigned long long)event->cpu_id,
-                    ts_sec,
-                    ts_nsec,
-                    phase,
-                    formatted);
-            continue;
-        }
-
-        if (event->event_type == ZT_TRACE_EVENT_ENTRY) {
-            fprintf(out,
-                    "%s-%d/%llu [%03llu] %5llu.%09llu: ztrace:entry: %s(arg0=0x%llx, arg1=0x%llx, arg2=0x%llx, arg3=0x%llx, arg4=0x%llx, arg5=0x%llx)\n",
-                    comm,
-                    session->pid,
-                    (unsigned long long)event->tid,
-                    (unsigned long long)event->cpu_id,
-                    ts_sec,
-                    ts_nsec,
-                    symbol_name,
-                    (unsigned long long)event->value0,
-                    (unsigned long long)event->value1,
-                    (unsigned long long)event->value2,
-                    (unsigned long long)event->value3,
-                    (unsigned long long)event->value4,
-                    (unsigned long long)event->value5);
-        } else if (event->event_type == ZT_TRACE_EVENT_RETURN) {
-            fprintf(out,
-                    "%s-%d/%llu [%03llu] %5llu.%09llu: ztrace:return: %s -> 0x%llx\n",
-                    comm,
-                    session->pid,
-                    (unsigned long long)event->tid,
-                    (unsigned long long)event->cpu_id,
-                    ts_sec,
-                    ts_nsec,
-                    symbol_name,
-                    (unsigned long long)event->value0);
-        } else {
-            fprintf(out,
-                    "%s-%d/%llu [%03llu] %5llu.%09llu: ztrace:event: %s type=%llu seq=%zu\n",
-                    comm,
-                    session->pid,
-                    (unsigned long long)event->tid,
-                    (unsigned long long)event->cpu_id,
-                    ts_sec,
-                    ts_nsec,
-                    symbol_name,
-                    (unsigned long long)event->event_type,
-                    (size_t)seq);
-        }
+        return -1;
     }
 
-    fflush(out);
-    *last_seq = write_seq;
+    if (did_output) {
+        fflush(out);
+    }
+
+    return 0;
 }
 
 static int zt_setup_remote_payload(zt_injector_session_t *session,
@@ -436,9 +1176,10 @@ static int zt_setup_remote_payload(zt_injector_session_t *session,
         }
     }
 
-    if (zt_remote_call1(session->pid,
+    if (zt_remote_call2(session->pid,
                         runtime->remote_payload_init_addr,
                         runtime->remote_payload_config_addr,
+                        0,
                         &remote_call_ret) != 0) {
         printf("Failed to call remote zt_payload_init\n");
         return -1;
@@ -449,26 +1190,14 @@ static int zt_setup_remote_payload(zt_injector_session_t *session,
     return 0;
 }
 
-static int zt_stop_target(zt_injector_session_t *session) {
-    if (session == NULL) {
-        return -1;
-    }
-
-    if (kill(session->pid, SIGSTOP) != 0) {
-        return -1;
-    }
-
-    if (zt_wait_for_tracee_stop(session->pid) != 0) {
-        return -1;
-    }
-
-    return 0;
+static int zt_trace_session_is_active(const zt_injector_session_t *session) {
+    return session != NULL &&
+           g_active_trace.state != ZT_TRACE_RUNTIME_INACTIVE &&
+           g_active_trace.session == session;
 }
 
 static int zt_trace_ensure_stopped(zt_injector_session_t *session) {
-    if (session == NULL ||
-        g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE ||
-        g_active_trace.session != session) {
+    if (!zt_trace_session_is_active(session)) {
         return -1;
     }
 
@@ -476,7 +1205,7 @@ static int zt_trace_ensure_stopped(zt_injector_session_t *session) {
         return 0;
     }
 
-    if (zt_stop_target(session) != 0) {
+    if (zt_injector_interrupt_all(session) != 0) {
         return -1;
     }
 
@@ -485,9 +1214,7 @@ static int zt_trace_ensure_stopped(zt_injector_session_t *session) {
 }
 
 static int zt_trace_ensure_running(zt_injector_session_t *session) {
-    if (session == NULL ||
-        g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE ||
-        g_active_trace.session != session) {
+    if (!zt_trace_session_is_active(session)) {
         return -1;
     }
 
@@ -495,7 +1222,7 @@ static int zt_trace_ensure_running(zt_injector_session_t *session) {
         return 0;
     }
 
-    if (ptrace(PTRACE_CONT, session->pid, NULL, NULL) != 0) {
+    if (zt_injector_continue_all(session) != 0) {
         return -1;
     }
 
@@ -503,48 +1230,74 @@ static int zt_trace_ensure_running(zt_injector_session_t *session) {
     return 0;
 }
 
+static int zt_trace_install_active_probe(zt_injector_session_t *session,
+                                         const char *symbol,
+                                         const zt_probe_filter_t *filter) {
+    if (zt_trace_ensure_stopped(session) != 0) {
+        return -1;
+    }
+
+    if (zt_trace_install_probe(session,
+                               &g_active_trace.runtime,
+                               symbol,
+                               filter,
+                               NULL) != 0) {
+        return -1;
+    }
+
+    return zt_trace_ensure_running(session);
+}
+
 static int zt_trace_check_exit_event(void) {
-    int status;
-    int stop_sig;
-    pid_t pid;
+    int target_exited;
 
     if (g_active_trace.state != ZT_TRACE_RUNTIME_RUNNING ||
         g_active_trace.session == NULL) {
         return 0;
     }
 
-    pid = waitpid(g_active_trace.session->pid, &status, WNOHANG);
-    if (pid <= 0) {
-        return 0;
+    if (zt_injector_poll_events(g_active_trace.session, &target_exited) != 0) {
+        pid_t pid = g_active_trace.session->pid;
+        uint64_t trace_buffer_addr = g_active_trace.runtime.remote_trace_buffer_addr;
+
+        if (zt_trace_mark_exit_window_if_needed(pid, trace_buffer_addr)) {
+            return 1;
+        }
+        return -1;
     }
 
-    if (WIFEXITED(status) || WIFSIGNALED(status)) {
-        if (g_active_trace.log_fp != NULL) {
-            fclose(g_active_trace.log_fp);
-        }
-        memset(&g_active_trace, 0, sizeof(g_active_trace));
+    if (target_exited) {
+        zt_trace_mark_target_exited();
         return 1;
-    }
-
-    if (WIFSTOPPED(status)) {
-        stop_sig = WSTOPSIG(status);
-        if (ptrace(PTRACE_CONT,
-                   g_active_trace.session->pid,
-                   NULL,
-                   (void *)(uintptr_t)stop_sig) != 0) {
-            return -1;
-        }
-        g_active_trace.state = ZT_TRACE_RUNTIME_RUNNING;
     }
 
     return 0;
 }
 
-int zt_trace_poll(void) {
-    zt_trace_buffer_t trace_buffer;
+static int zt_trace_handle_read_failure(pid_t pid, uint64_t trace_buffer_addr) {
+    int exit_status = zt_trace_check_exit_event();
 
-    if (g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE) {
+    if (exit_status < 0) {
+        if (zt_trace_mark_exit_window_if_needed(pid, trace_buffer_addr)) {
+            return 1;
+        }
         return -1;
+    }
+
+    if (exit_status > 0) {
+        return 1;
+    }
+
+    if (zt_trace_mark_exit_window_if_needed(pid, trace_buffer_addr)) {
+        return 1;
+    }
+
+    return -1;
+}
+
+int zt_trace_poll(void) {
+    if (g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE) {
+        return g_trace_exit_observed ? 1 : -1;
     }
 
     if (g_active_trace.state != ZT_TRACE_RUNTIME_RUNNING) {
@@ -565,17 +1318,15 @@ int zt_trace_poll(void) {
         return 0;
     }
 
-    if (zt_read_remote_memory(g_active_trace.session->pid,
-                              g_active_trace.runtime.remote_trace_buffer_addr,
-                              &trace_buffer,
-                              sizeof(trace_buffer)) != 0) {
-        return -1;
-    }
+    if (zt_dump_trace_events_since(g_active_trace.session,
+                                   &g_active_trace.runtime,
+                                   &g_active_trace.last_seq,
+                                   g_active_trace.log_fp) != 0) {
+        pid_t pid = g_active_trace.session->pid;
+        uint64_t trace_buffer_addr = g_active_trace.runtime.remote_trace_buffer_addr;
 
-    zt_dump_trace_events_since(g_active_trace.session,
-                               &trace_buffer,
-                               &g_active_trace.last_seq,
-                               g_active_trace.log_fp);
+        return zt_trace_handle_read_failure(pid, trace_buffer_addr);
+    }
 
     return 0;
 }
@@ -583,9 +1334,7 @@ int zt_trace_poll(void) {
 int zt_trace_disable_probe(zt_injector_session_t *session, uint64_t probe_id) {
     zt_probe_info_t *probe;
 
-    if (session == NULL || probe_id == 0 ||
-        g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE ||
-        g_active_trace.session != session) {
+    if (probe_id == 0 || !zt_trace_session_is_active(session)) {
         return -1;
     }
 
@@ -610,9 +1359,7 @@ int zt_trace_update_probe_filter(zt_injector_session_t *session,
                                  const zt_probe_filter_t *filter) {
     zt_probe_info_t *probe;
 
-    if (session == NULL || probe_id == 0 ||
-        g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE ||
-        g_active_trace.session != session) {
+    if (probe_id == 0 || !zt_trace_session_is_active(session)) {
         return -1;
     }
 
@@ -621,23 +1368,124 @@ int zt_trace_update_probe_filter(zt_injector_session_t *session,
         return -1;
     }
 
-    if (filter != NULL) {
-        probe->filter = *filter;
-        probe->filter.probe_id = probe->probe_id;
-    } else {
-        memset(&probe->filter, 0, sizeof(probe->filter));
-        probe->filter.probe_id = probe->probe_id;
+    zt_trace_set_probe_filter(probe, filter);
+
+    return 0;
+}
+
+static int zt_trace_validate_call_action_args(const zt_call_action_arg_t *args,
+                                              uint64_t arg_count) {
+    uint64_t i;
+
+    if (arg_count > ZT_CALL_ACTION_ARG_CAP ||
+        (arg_count > 0 && args == NULL)) {
+        return -1;
+    }
+
+    for (i = 0; i < arg_count; ++i) {
+        if (args[i].kind != ZT_CALL_ACTION_ARG_CONST &&
+            args[i].kind != ZT_CALL_ACTION_ARG_ENTRY_ARG) {
+            return -1;
+        }
+
+        if (args[i].kind == ZT_CALL_ACTION_ARG_ENTRY_ARG &&
+            args[i].value >= ZT_TRACE_GP_ARG_COUNT) {
+            return -1;
+        }
     }
 
     return 0;
 }
 
+int zt_trace_update_probe_call_action_args(zt_injector_session_t *session,
+                                           uint64_t probe_id,
+                                           const char *callee_symbol,
+                                           const zt_call_action_arg_t *args,
+                                           uint64_t arg_count) {
+    zt_probe_info_t *probe;
+    zt_symbol_target_t target;
+    uint64_t i;
+
+    if (probe_id == 0 || callee_symbol == NULL ||
+        !zt_trace_session_is_active(session) ||
+        zt_trace_validate_call_action_args(args, arg_count) != 0) {
+        return -1;
+    }
+
+    probe = zt_probe_find_by_id(session, probe_id);
+    if (probe == NULL) {
+        return -1;
+    }
+
+    if (zt_resolve_symbol_target(session, callee_symbol, &target) != 0) {
+        return -1;
+    }
+
+    if (zt_trace_assign_call_action_slot(session, probe) != 0) {
+        return -1;
+    }
+
+    memset(&probe->call_action, 0, sizeof(probe->call_action));
+    probe->call_action.enabled = zt_trace_next_call_action_epoch();
+    probe->call_action.probe_id = probe->probe_id;
+    probe->call_action.callee_addr = target.remote_addr;
+    probe->call_action.arg_count = arg_count;
+    for (i = 0; i < arg_count; ++i) {
+        probe->call_action.args[i] = args[i];
+    }
+    snprintf(probe->call_symbol, sizeof(probe->call_symbol), "%s", callee_symbol);
+    zt_trace_remember_call_symbol(target.remote_addr, callee_symbol);
+
+    if (zt_trace_write_call_action(session, &g_active_trace.runtime, probe) != 0) {
+        return -1;
+    }
+
+    return zt_trace_write_call_action_count(session, &g_active_trace.runtime);
+}
+
+int zt_trace_update_probe_call_action(zt_injector_session_t *session,
+                                      uint64_t probe_id,
+                                      const char *callee_symbol) {
+    return zt_trace_update_probe_call_action_args(session,
+                                                  probe_id,
+                                                  callee_symbol,
+                                                  NULL,
+                                                  0);
+}
+
+int zt_trace_clear_probe_call_action(zt_injector_session_t *session,
+                                     uint64_t probe_id) {
+    zt_probe_info_t *probe;
+    int old_slot;
+
+    if (probe_id == 0 || !zt_trace_session_is_active(session)) {
+        return -1;
+    }
+
+    probe = zt_probe_find_by_id(session, probe_id);
+    if (probe == NULL) {
+        return -1;
+    }
+
+    old_slot = probe->call_action_slot;
+    memset(&probe->call_action, 0, sizeof(probe->call_action));
+    probe->call_symbol[0] = '\0';
+
+    if (old_slot >= 0) {
+        probe->call_action_slot = old_slot;
+        if (zt_trace_write_call_action(session, &g_active_trace.runtime, probe) != 0) {
+            return -1;
+        }
+    }
+
+    probe->call_action_slot = -1;
+    return zt_trace_write_call_action_count(session, &g_active_trace.runtime);
+}
+
 int zt_trace_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
     zt_probe_info_t *probe;
 
-    if (session == NULL || probe_id == 0 ||
-        g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE ||
-        g_active_trace.session != session) {
+    if (probe_id == 0 || !zt_trace_session_is_active(session)) {
         return -1;
     }
 
@@ -650,15 +1498,7 @@ int zt_trace_enable_probe(zt_injector_session_t *session, uint64_t probe_id) {
         return 0;
     }
 
-    if (zt_trace_ensure_stopped(session) != 0) {
-        return -1;
-    }
-
-    if (zt_trace_install_probe(session, &g_active_trace.runtime, probe->target.symbol, &probe->filter, NULL) != 0) {
-        return -1;
-    }
-
-    return zt_trace_ensure_running(session);
+    return zt_trace_install_active_probe(session, probe->target.symbol, &probe->filter);
 }
 
 int zt_trace_pause(zt_injector_session_t *session) {
@@ -698,12 +1538,11 @@ static int zt_trace_stop(void) {
         zt_unregister_probe(g_active_trace.session, probe->probe_id);
     }
 
-    if (g_active_trace.log_fp != NULL) {
-        fclose(g_active_trace.log_fp);
+    if (zt_trace_cleanup_runtime(g_active_trace.session, &g_active_trace.runtime) != 0) {
+        ret = -1;
     }
 
-    memset(&g_active_trace, 0, sizeof(g_active_trace));
-    memset(g_entry_cache, 0, sizeof(g_entry_cache));
+    zt_trace_reset_active(0);
     return ret;
 }
 
@@ -713,6 +1552,7 @@ int zt_trace_is_active(void) {
 
 int zt_trace_shutdown(void) {
     if (g_active_trace.state == ZT_TRACE_RUNTIME_INACTIVE) {
+        g_trace_exit_observed = 0;
         return 0;
     }
 
@@ -729,7 +1569,6 @@ int zt_trace_start_filtered_in_session(zt_injector_session_t *session,
                                        const char *symbol,
                                        const char *log_path,
                                        const zt_probe_filter_t *filter) {
-    zt_probe_info_t *probe;
     FILE *log_fp;
 
     if (session == NULL || symbol == NULL || log_path == NULL) {
@@ -737,19 +1576,11 @@ int zt_trace_start_filtered_in_session(zt_injector_session_t *session,
     }
 
     if (g_active_trace.state != ZT_TRACE_RUNTIME_INACTIVE) {
-        if (g_active_trace.session != session) {
+        if (!zt_trace_session_is_active(session)) {
             return -1;
         }
 
-        if (zt_trace_ensure_stopped(session) != 0) {
-            return -1;
-        }
-
-        if (zt_trace_install_probe(session, &g_active_trace.runtime, symbol, filter, &probe) != 0) {
-            return -1;
-        }
-
-        return zt_trace_ensure_running(session);
+        return zt_trace_install_active_probe(session, symbol, filter);
     }
 
     log_fp = fopen(log_path, "w");
@@ -759,8 +1590,7 @@ int zt_trace_start_filtered_in_session(zt_injector_session_t *session,
 
     zt_sigconf_load_default();
 
-    memset(&g_active_trace, 0, sizeof(g_active_trace));
-    memset(g_entry_cache, 0, sizeof(g_entry_cache));
+    zt_trace_reset_active(0);
     printf("Tracing target PID %d, %s, is_pie: %d, image_base: 0x%lX\n",
            session->pid,
            session->exe_path,
@@ -768,11 +1598,13 @@ int zt_trace_start_filtered_in_session(zt_injector_session_t *session,
            session->image_base);
 
     if (zt_setup_remote_payload(session, &g_active_trace.runtime) != 0) {
+        zt_trace_cleanup_runtime(session, &g_active_trace.runtime);
         fclose(log_fp);
         return -1;
     }
 
-    if (zt_trace_install_probe(session, &g_active_trace.runtime, symbol, filter, &probe) != 0) {
+    if (zt_trace_install_probe(session, &g_active_trace.runtime, symbol, filter, NULL) != 0) {
+        zt_trace_cleanup_runtime(session, &g_active_trace.runtime);
         fclose(log_fp);
         return -1;
     }
@@ -805,7 +1637,7 @@ int zt_trace_remove_probe(zt_injector_session_t *session, uint64_t probe_id) {
         return zt_unregister_probe(session, probe_id);
     }
 
-    if (g_active_trace.session != session) {
+    if (!zt_trace_session_is_active(session)) {
         return -1;
     }
 
@@ -818,6 +1650,10 @@ int zt_trace_remove_probe(zt_injector_session_t *session, uint64_t probe_id) {
         return -1;
     }
 
+    if (probe->call_action.enabled) {
+        (void)zt_trace_clear_probe_call_action(session, probe_id);
+    }
+
     zt_trampoline_pool_release(session, &g_active_trace.runtime.trampoline_pool, probe);
 
     if (zt_unregister_probe(session, probe_id) != 0) {
@@ -825,11 +1661,9 @@ int zt_trace_remove_probe(zt_injector_session_t *session, uint64_t probe_id) {
     }
 
     if (session->probe_count == 0) {
-        if (g_active_trace.log_fp != NULL) {
-            fclose(g_active_trace.log_fp);
-        }
-        memset(&g_active_trace, 0, sizeof(g_active_trace));
-        return 0;
+        int cleanup_ret = zt_trace_cleanup_runtime(session, &g_active_trace.runtime);
+        zt_trace_reset_active(0);
+        return cleanup_ret;
     }
 
     return zt_trace_ensure_running(session);

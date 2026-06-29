@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+/* Target that repeatedly calls libc I/O wrappers for signature-format tests. */
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>

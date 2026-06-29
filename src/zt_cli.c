@@ -3,21 +3,24 @@
 #include <string.h>
 #include <stdbool.h>
 #include <errno.h>
-#include <signal.h>
 #include <limits.h>
+#include <stdint.h>
 #include <time.h>
 #include <unistd.h>
-#include <sys/ptrace.h>
-#include <sys/wait.h>
 
 #include <readline/readline.h>
 #include <readline/history.h>
 
-#include "../include/zt_cli.h"
-#include "../include/zt_filter.h"
-#include "../include/zt_injector.h"
-#include "../include/zt_trace_runner.h"
+#include "zt_filter.h"
+#include "zt_injector.h"
+#include "zt_trace_runner.h"
 
+/*
+ * Interactive shell layer.
+ *
+ * Command handlers translate user input into injector/trace_runner operations;
+ * they should not duplicate low-level ptrace, trampoline, or payload logic.
+ */
 static int cmd_help(char *args);
 static int cmd_exit(char *args);
 static int cmd_attach(char *args);
@@ -31,11 +34,13 @@ static int cmd_untrace(char *args);
 static int cmd_info(char *args);
 static int cmd_continue(char *args);
 
-static struct {
+typedef struct {
     const char *name;
     const char *description;
     int (*handler)(char *);
-} cmd_table[] = {
+} zt_cli_command_t;
+
+static const zt_cli_command_t cmd_table[] = {
     {"help", "Show help message", cmd_help},
     {"exit", "Exit the CLI", cmd_exit},
     {"quit", "Exit the CLI", cmd_exit},
@@ -45,35 +50,46 @@ static struct {
     {"stop", "Stop the target process and keep probes unchanged", cmd_stop},
     {"enable", "Enable a probe again: enable <symbol|id>", cmd_enable},
     {"disable", "Disable probe(s): disable <symbol|id|all>", cmd_disable},
-    {"update", "Update probe filter: update <symbol|id> if <expr> | clear", cmd_update},
+    {"update", "Update probe behavior: update <symbol|id> if <expr> | clear | call <symbol|clear> [arg0|...|arg5|0x...]", cmd_update},
     {"untrace", "Remove a probe: untrace <symbol|id>", cmd_untrace},
     {"info", "Show info: info target | info probes", cmd_info},
     {"continue", "Continue the stopped target process", cmd_continue},
 };
 
+static const char kTraceUsage[] = "Usage: trace <symbol> [if <expr>]";
+static const char kUpdateUsage[] =
+    "Usage: update <symbol|id> if <expr> | clear | call <symbol|clear> [arg0|...|arg5|0x...]";
+static const char kUpdateCallUsage[] =
+    "Usage: update <symbol|id> call <symbol|clear> [arg0|...|arg5|0x...]";
+
+enum {
+    ZT_CLI_COMMAND_COUNT = sizeof(cmd_table) / sizeof(cmd_table[0]),
+};
+
+static const uint64_t NSEC_PER_SEC = 1000000000ULL;
+static const uint64_t CLI_LOG_POLL_INTERVAL_NS = 50000000ULL;
+
 static zt_injector_session_t g_cli_session;
 static bool g_cli_attached;
 static char g_cli_log_path[PATH_MAX];
 static long g_cli_log_offset;
-static time_t g_cli_last_poll;
+static uint64_t g_cli_last_poll_ns;
 
-static int zt_cli_wait_for_stop(pid_t pid) {
-    int status;
+/* Log tailing is best-effort UI feedback; the durable trace output is the file. */
+static void zt_cli_reset_log_state(void) {
+    g_cli_log_path[0] = '\0';
+    g_cli_log_offset = 0;
+    g_cli_last_poll_ns = 0;
+}
 
-    for (;;) {
-        if (waitpid(pid, &status, 0) > 0) {
-            if (WIFSTOPPED(status)) {
-                return 0;
-            }
-            return -1;
-        }
+static uint64_t zt_cli_monotonic_ns(void) {
+    struct timespec ts;
 
-        if (errno == EINTR) {
-            continue;
-        }
-
-        return -1;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+        return 0;
     }
+
+    return (uint64_t)ts.tv_sec * NSEC_PER_SEC + (uint64_t)ts.tv_nsec;
 }
 
 static int zt_cli_stop_target(void) {
@@ -81,14 +97,44 @@ static int zt_cli_stop_target(void) {
         return -1;
     }
 
-    if (kill(g_cli_session.pid, SIGSTOP) != 0) {
-        return -1;
-    }
-
-    return zt_cli_wait_for_stop(g_cli_session.pid);
+    return zt_injector_interrupt_all(&g_cli_session);
 }
 
-static zt_probe_info_t *zt_cli_find_probe(char *target, uint64_t *probe_id_out) {
+static int zt_cli_set_target_running(bool running) {
+    if (zt_trace_is_active()) {
+        return running ?
+               zt_trace_resume(&g_cli_session) :
+               zt_trace_pause(&g_cli_session);
+    }
+
+    return running ?
+           zt_injector_continue_all(&g_cli_session) :
+           zt_cli_stop_target();
+}
+
+static int zt_cli_require_attached(void) {
+    if (!g_cli_attached) {
+        printf("No target attached\n");
+        return 0;
+    }
+
+    return 1;
+}
+
+static int zt_cli_require_active_trace(void) {
+    if (!zt_cli_require_attached()) {
+        return 0;
+    }
+
+    if (!zt_trace_is_active()) {
+        printf("No active trace\n");
+        return 0;
+    }
+
+    return 1;
+}
+
+static zt_probe_info_t *zt_cli_find_probe(const char *target, uint64_t *probe_id_out) {
     char *endptr;
     long probe_id;
     zt_probe_info_t *probe;
@@ -117,16 +163,106 @@ static zt_probe_info_t *zt_cli_find_probe(char *target, uint64_t *probe_id_out) 
     return probe;
 }
 
-static char *zt_next_arg(char *args) {
-    (void)args;
+static zt_probe_info_t *zt_cli_require_probe_target(const char *target,
+                                                    uint64_t *probe_id_out) {
+    zt_probe_info_t *probe = zt_cli_find_probe(target, probe_id_out);
 
-    char *arg = strtok(NULL, " ");
-    return arg;
+    if (probe == NULL) {
+        printf("Probe not found: %s\n", target);
+    }
+
+    return probe;
+}
+
+static int zt_cli_parse_call_arg(const char *text, zt_call_action_arg_t *arg_out) {
+    char *endptr;
+    unsigned long entry_arg;
+    unsigned long long value;
+
+    if (text == NULL || arg_out == NULL) {
+        return -1;
+    }
+
+    if (strncmp(text, "arg", 3) == 0) {
+        /* `argN` forwards the probed function's Nth integer argument. */
+        errno = 0;
+        entry_arg = strtoul(text + 3, &endptr, 10);
+        if (errno == 0 && text + 3 != endptr && *endptr == '\0' &&
+            entry_arg < ZT_TRACE_GP_ARG_COUNT) {
+            arg_out->kind = ZT_CALL_ACTION_ARG_ENTRY_ARG;
+            arg_out->value = (uint64_t)entry_arg;
+            return 0;
+        }
+        return -1;
+    }
+
+    errno = 0;
+    value = strtoull(text, &endptr, 0);
+    if (errno != 0 || text == endptr || *endptr != '\0') {
+        return -1;
+    }
+
+    arg_out->kind = ZT_CALL_ACTION_ARG_CONST;
+    arg_out->value = (uint64_t)value;
+    return 0;
+}
+
+static void zt_cli_format_call_args(const zt_probe_call_action_t *action,
+                                    char *buffer,
+                                    size_t buffer_size) {
+    size_t used = 0;
+    uint64_t i;
+
+    if (buffer == NULL || buffer_size == 0) {
+        return;
+    }
+
+    buffer[0] = '\0';
+    if (action == NULL) {
+        return;
+    }
+
+    for (i = 0; i < action->arg_count && i < ZT_CALL_ACTION_ARG_CAP; ++i) {
+        const zt_call_action_arg_t *arg = &action->args[i];
+        const char *separator = i == 0 ? "" : ", ";
+        int written;
+
+        if (arg->kind == ZT_CALL_ACTION_ARG_ENTRY_ARG) {
+            written = snprintf(buffer + used,
+                               buffer_size - used,
+                               "%sarg%llu",
+                               separator,
+                               (unsigned long long)arg->value);
+        } else {
+            written = snprintf(buffer + used,
+                               buffer_size - used,
+                               "%s0x%llx",
+                               separator,
+                               (unsigned long long)arg->value);
+        }
+
+        if (written < 0) {
+            buffer[0] = '\0';
+            return;
+        }
+        if ((size_t)written >= buffer_size - used) {
+            buffer[buffer_size - 1] = '\0';
+            return;
+        }
+        used += (size_t)written;
+    }
+}
+
+static char *zt_next_arg(char *args) {
+    return strtok(args, " ");
+}
+
+static int zt_cli_compile_remaining_filter(zt_probe_filter_t *filter) {
+    return zt_probe_filter_compile(strtok(NULL, "\n"), filter);
 }
 
 static int zt_cli_parse_trace_filter(zt_probe_filter_t *filter) {
     char *maybe_if;
-    char *expr;
 
     if (filter == NULL) {
         return -1;
@@ -143,8 +279,7 @@ static int zt_cli_parse_trace_filter(zt_probe_filter_t *filter) {
         return -1;
     }
 
-    expr = strtok(NULL, "\n");
-    return zt_probe_filter_compile(expr, filter);
+    return zt_cli_compile_remaining_filter(filter);
 }
 
 static char *rl_gets(void) {
@@ -197,7 +332,7 @@ static void zt_cli_print_log_updates(void) {
         fputs(line, stdout);
     }
 
-    offset = ftell(fp);
+    offset = ferror(fp) ? -1 : ftell(fp);
     fclose(fp);
 
     if (offset >= 0) {
@@ -216,18 +351,20 @@ static void zt_cli_print_log_updates(void) {
 }
 
 static int zt_cli_event_hook(void) {
-    time_t now;
+    uint64_t now;
 
     if (!zt_trace_is_active()) {
         return 0;
     }
 
-    now = time(NULL);
-    if (now == g_cli_last_poll) {
+    now = zt_cli_monotonic_ns();
+    if (now != 0 &&
+        g_cli_last_poll_ns != 0 &&
+        now - g_cli_last_poll_ns < CLI_LOG_POLL_INTERVAL_NS) {
         return 0;
     }
 
-    g_cli_last_poll = now;
+    g_cli_last_poll_ns = now;
     if (zt_trace_poll() == 0) {
         zt_cli_print_log_updates();
     }
@@ -241,13 +378,13 @@ static int cmd_help(char *args) {
 
     arg = zt_next_arg(args);
     if (arg == NULL) {
-        for (i = 0; i < sizeof(cmd_table) / sizeof(cmd_table[0]); ++i) {
+        for (i = 0; i < ZT_CLI_COMMAND_COUNT; ++i) {
             printf("  %-10s %s\n", cmd_table[i].name, cmd_table[i].description);
         }
         return 0;
     }
 
-    for (i = 0; i < sizeof(cmd_table) / sizeof(cmd_table[0]); ++i) {
+    for (i = 0; i < ZT_CLI_COMMAND_COUNT; ++i) {
         if (strcmp(arg, cmd_table[i].name) == 0) {
             printf("  %-10s %s\n", cmd_table[i].name, cmd_table[i].description);
             return 0;
@@ -296,7 +433,7 @@ static int cmd_attach(char *args) {
         return 0;
     }
 
-    if (ptrace(PTRACE_CONT, g_cli_session.pid, NULL, NULL) != 0) {
+    if (zt_injector_continue_all(&g_cli_session) != 0) {
         printf("Attached to pid %d but failed to continue it\n", g_cli_session.pid);
         zt_injector_detach(&g_cli_session);
         g_cli_attached = false;
@@ -311,8 +448,7 @@ static int cmd_attach(char *args) {
 static int cmd_detach(char *args) {
     (void)args;
 
-    if (!g_cli_attached) {
-        printf("No target attached\n");
+    if (!zt_cli_require_attached()) {
         return 0;
     }
 
@@ -327,19 +463,18 @@ static int cmd_trace(char *args) {
     char cwd[PATH_MAX];
     zt_probe_filter_t filter;
 
-    if (!g_cli_attached) {
-        printf("No target attached\n");
+    if (!zt_cli_require_attached()) {
         return 0;
     }
 
     symbol = zt_next_arg(args);
     if (symbol == NULL) {
-        printf("Usage: trace <symbol> [if <expr>]\n");
+        printf("%s\n", kTraceUsage);
         return 0;
     }
 
     if (zt_cli_parse_trace_filter(&filter) != 0) {
-        printf("Usage: trace <symbol> [if <expr>]\n");
+        printf("%s\n", kTraceUsage);
         printf("Example: trace write if arg0 == 1 && arg2 > 0\n");
         return 0;
     }
@@ -361,7 +496,7 @@ static int cmd_trace(char *args) {
         }
 
         g_cli_log_offset = 0;
-        g_cli_last_poll = 0;
+        g_cli_last_poll_ns = 0;
     }
 
     if (zt_trace_start_filtered_in_session(&g_cli_session,
@@ -370,9 +505,7 @@ static int cmd_trace(char *args) {
                                            filter.enabled ? &filter : NULL) != 0) {
         printf("Failed to trace %s\n", symbol);
         if (!zt_trace_is_active()) {
-            g_cli_log_path[0] = '\0';
-            g_cli_log_offset = 0;
-            g_cli_last_poll = 0;
+            zt_cli_reset_log_state();
         }
         return 0;
     }
@@ -389,23 +522,18 @@ static int cmd_trace(char *args) {
 }
 
 static int cmd_stop(char *args) {
+    int ret;
+
     (void)args;
 
-    if (!g_cli_attached) {
-        printf("No target attached\n");
+    if (!zt_cli_require_attached()) {
         return 0;
     }
 
-    if (zt_trace_is_active()) {
-        if (zt_trace_pause(&g_cli_session) != 0) {
-            printf("Failed to stop pid %d\n", g_cli_session.pid);
-            return 0;
-        }
-    } else {
-        if (zt_cli_stop_target() != 0) {
-            printf("Failed to stop pid %d\n", g_cli_session.pid);
-            return 0;
-        }
+    ret = zt_cli_set_target_running(false);
+    if (ret != 0) {
+        printf("Failed to stop pid %d\n", g_cli_session.pid);
+        return 0;
     }
 
     printf("Pid %d stopped\n", g_cli_session.pid);
@@ -414,16 +542,9 @@ static int cmd_stop(char *args) {
 
 static int cmd_enable(char *args) {
     char *target;
-    zt_probe_info_t *probe;
     uint64_t probe_id;
 
-    if (!g_cli_attached) {
-        printf("No target attached\n");
-        return 0;
-    }
-
-    if (!zt_trace_is_active()) {
-        printf("No active trace\n");
+    if (!zt_cli_require_active_trace()) {
         return 0;
     }
 
@@ -433,9 +554,7 @@ static int cmd_enable(char *args) {
         return 0;
     }
 
-    probe = zt_cli_find_probe(target, &probe_id);
-    if (probe == NULL) {
-        printf("Probe not found: %s\n", target);
+    if (zt_cli_require_probe_target(target, &probe_id) == NULL) {
         return 0;
     }
 
@@ -456,13 +575,7 @@ static int cmd_disable(char *args) {
     int disabled_count;
     int failed_count;
 
-    if (!g_cli_attached) {
-        printf("No target attached\n");
-        return 0;
-    }
-
-    if (!zt_trace_is_active()) {
-        printf("No active trace\n");
+    if (!zt_cli_require_active_trace()) {
         return 0;
     }
 
@@ -505,9 +618,8 @@ static int cmd_disable(char *args) {
         return 0;
     }
 
-    probe = zt_cli_find_probe(target, &probe_id);
+    probe = zt_cli_require_probe_target(target, &probe_id);
     if (probe == NULL) {
-        printf("Probe not found: %s\n", target);
         return 0;
     }
 
@@ -523,30 +635,21 @@ static int cmd_disable(char *args) {
 static int cmd_update(char *args) {
     char *target;
     char *mode;
-    zt_probe_info_t *probe;
     zt_probe_filter_t filter;
     uint64_t probe_id;
 
-    if (!g_cli_attached) {
-        printf("No target attached\n");
-        return 0;
-    }
-
-    if (!zt_trace_is_active()) {
-        printf("No active trace\n");
+    if (!zt_cli_require_active_trace()) {
         return 0;
     }
 
     target = zt_next_arg(args);
     mode = zt_next_arg(NULL);
     if (target == NULL || mode == NULL) {
-        printf("Usage: update <symbol|id> if <expr> | clear\n");
+        printf("%s\n", kUpdateUsage);
         return 0;
     }
 
-    probe = zt_cli_find_probe(target, &probe_id);
-    if (probe == NULL) {
-        printf("Probe not found: %s\n", target);
+    if (zt_cli_require_probe_target(target, &probe_id) == NULL) {
         return 0;
     }
 
@@ -565,9 +668,57 @@ static int cmd_update(char *args) {
         return 0;
     }
 
+    if (strcmp(mode, "call") == 0) {
+        char *callee = zt_next_arg(NULL);
+        zt_call_action_arg_t call_args[ZT_CALL_ACTION_ARG_CAP];
+        uint64_t arg_count = 0;
+        char *arg_text;
+
+        if (callee == NULL) {
+            printf("%s\n", kUpdateCallUsage);
+            return 0;
+        }
+
+        while ((arg_text = zt_next_arg(NULL)) != NULL) {
+            if (arg_count >= ZT_CALL_ACTION_ARG_CAP ||
+                zt_cli_parse_call_arg(arg_text, &call_args[arg_count]) != 0) {
+                printf("%s\n", kUpdateCallUsage);
+                return 0;
+            }
+            ++arg_count;
+        }
+
+        if (strcmp(callee, "clear") == 0) {
+            if (arg_count != 0) {
+                printf("Usage: update <symbol|id> call clear\n");
+                return 0;
+            }
+
+            if (zt_trace_clear_probe_call_action(&g_cli_session, probe_id) != 0) {
+                printf("Failed to clear call action for probe %s\n", target);
+                return 0;
+            }
+
+            printf("Cleared call action for probe %s\n", target);
+            return 0;
+        }
+
+        if (zt_trace_update_probe_call_action_args(&g_cli_session,
+                                                   probe_id,
+                                                   callee,
+                                                   arg_count > 0 ? call_args : NULL,
+                                                   arg_count) != 0) {
+            printf("Failed to update probe %s call action to %s\n", target, callee);
+            return 0;
+        }
+
+        printf("Updated probe %s call action to %s\n", target, callee);
+        return 0;
+    }
+
     if (strcmp(mode, "if") != 0 ||
-        zt_probe_filter_compile(strtok(NULL, "\n"), &filter) != 0) {
-        printf("Usage: update <symbol|id> if <expr> | clear\n");
+        zt_cli_compile_remaining_filter(&filter) != 0) {
+        printf("%s\n", kUpdateUsage);
         return 0;
     }
 
@@ -584,11 +735,9 @@ static int cmd_update(char *args) {
 
 static int cmd_untrace(char *args) {
     char *target;
-    zt_probe_info_t *probe;
     uint64_t probe_id;
 
-    if (!g_cli_attached) {
-        printf("No target attached\n");
+    if (!zt_cli_require_attached()) {
         return 0;
     }
 
@@ -598,9 +747,7 @@ static int cmd_untrace(char *args) {
         return 0;
     }
 
-    probe = zt_cli_find_probe(target, &probe_id);
-    if (probe == NULL) {
-        printf("Probe not found: %s\n", target);
+    if (zt_cli_require_probe_target(target, &probe_id) == NULL) {
         return 0;
     }
 
@@ -610,9 +757,7 @@ static int cmd_untrace(char *args) {
     }
 
     if (!zt_trace_is_active()) {
-        g_cli_log_path[0] = '\0';
-        g_cli_log_offset = 0;
-        g_cli_last_poll = 0;
+        zt_cli_reset_log_state();
     }
     printf("Removed probe %s\n", target);
     return 0;
@@ -622,8 +767,7 @@ static int cmd_info(char *args) {
     char *subcmd;
     int i;
 
-    if (!g_cli_attached) {
-        printf("No target attached\n");
+    if (!zt_cli_require_attached()) {
         return 0;
     }
 
@@ -663,6 +807,7 @@ static int cmd_info(char *args) {
         for (i = 0; i < ZT_PROBES_CAPACITY; ++i) {
             zt_probe_info_t *probe = &g_cli_session.probes[i];
             const char *filter_desc = NULL;
+            const char *call_desc = NULL;
 
             if (probe->probe_id == 0) {
                 continue;
@@ -670,6 +815,9 @@ static int cmd_info(char *args) {
 
             if (probe->filter.enabled && probe->filter.expr[0] != '\0') {
                 filter_desc = probe->filter.expr;
+            }
+            if (probe->call_action.enabled && probe->call_symbol[0] != '\0') {
+                call_desc = probe->call_symbol;
             }
 
             printf("%-4lu %-20.20s %-10s %-5u 0x%016lx %s\n",
@@ -682,6 +830,12 @@ static int cmd_info(char *args) {
             if (filter_desc != NULL) {
                 printf("     filter: %s\n", filter_desc);
             }
+            if (call_desc != NULL) {
+                char call_args[160];
+
+                zt_cli_format_call_args(&probe->call_action, call_args, sizeof(call_args));
+                printf("       call: %s(%s)\n", call_desc, call_args);
+            }
         }
         return 0;
     }
@@ -691,30 +845,25 @@ static int cmd_info(char *args) {
 }
 
 static int cmd_continue(char *args) {
+    int ret;
+
     (void)args;
 
-    if (!g_cli_attached) {
-        printf("No target attached\n");
+    if (!zt_cli_require_attached()) {
         return 0;
     }
 
-    if (zt_trace_is_active()) {
-        if (zt_trace_resume(&g_cli_session) != 0) {
-            printf("Failed to continue pid %d\n", g_cli_session.pid);
-            return 0;
-        }
-    } else {
-        if (ptrace(PTRACE_CONT, g_cli_session.pid, NULL, NULL) != 0) {
-            printf("Failed to continue pid %d\n", g_cli_session.pid);
-            return 0;
-        }
+    ret = zt_cli_set_target_running(true);
+    if (ret != 0) {
+        printf("Failed to continue pid %d\n", g_cli_session.pid);
+        return 0;
     }
 
     printf("Continued pid %d\n", g_cli_session.pid);
     return 0;
 }
 
-void zt_cli_main_loop(void) {
+static void zt_cli_main_loop(void) {
     char *input;
 
     rl_event_hook = zt_cli_event_hook;
@@ -736,7 +885,7 @@ void zt_cli_main_loop(void) {
             args = NULL;
         }
 
-        for (i = 0; i < sizeof(cmd_table) / sizeof(cmd_table[0]); ++i) {
+        for (i = 0; i < ZT_CLI_COMMAND_COUNT; ++i) {
             if (strcmp(cmd, cmd_table[i].name) == 0) {
                 if (cmd_table[i].handler(args) != 0) {
                     return;
@@ -745,7 +894,7 @@ void zt_cli_main_loop(void) {
             }
         }
 
-        if (i == sizeof(cmd_table) / sizeof(cmd_table[0])) {
+        if (i == ZT_CLI_COMMAND_COUNT) {
             printf("Unknown command: %s\n", cmd);
         }
     }
