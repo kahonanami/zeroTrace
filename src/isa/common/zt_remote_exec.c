@@ -9,6 +9,10 @@
 #include "../../../include/zt_injector.h"
 #include "zt_remote_exec.h"
 
+/*
+ * Execute a tiny syscall/call stub in the target without permanently modifying
+ * its code. The caller must have stopped the target thread group first.
+ */
 static int zt_arch_restore_regs_and_code(pid_t pid,
                                          const zt_arch_remote_exec_ops_t *ops,
                                          const void *saved_regs,
@@ -98,6 +102,10 @@ static int zt_arch_execute_remote_stub(pid_t pid,
         return -1;
     }
 
+    /*
+     * From this point until restore, target code and registers are borrowed by
+     * the injector. Every failure path must put both back before returning.
+     */
     memcpy(regs, saved_regs, sizeof(regs));
     prepare_regs(regs, saved_regs, args, stub_pc);
     if (ops->set_regs(pid, regs) != 0) {

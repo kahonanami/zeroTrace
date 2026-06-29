@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+/* Thread churn target for validating ptrace thread-group stop/resume control. */
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>

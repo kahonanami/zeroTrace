@@ -1,3 +1,4 @@
+/* Measures average probe install/uninstall latency against an already running target. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>

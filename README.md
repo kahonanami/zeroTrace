@@ -1,6 +1,6 @@
 # zeroTrace: A Lightweight Dynamic Probe for User Space
 
-> proj40 题目要求见 [project-requirements.md](./docs/project-requirements.md)
+> proj40 原始赛题材料见 [docs/2026年全国大学生计算机系统能力大赛操作系统设计赛全国赛-技术方案.pdf](./docs/2026年全国大学生计算机系统能力大赛操作系统设计赛全国赛-技术方案.pdf)，项目设计方案见 [docs/zeroTrace-设计方案.pdf](./docs/zeroTrace-设计方案.pdf)。
 
 `zeroTrace` 是一个基于 `ptrace` 的用户态函数追踪工具。它会通过远程 `dlopen` 把 `libzt_payload.so` 注入到目标进程，搜索符号表给指定函数安装探针，并在 CLI 与日志文件中持续输出函数入口参数和返回值。
 
@@ -54,7 +54,7 @@ make ARCH=aarch64 CC=aarch64-linux-gnu-gcc
 - `bin/tests/test_loop`
   手动验证目标程序
 
-其余 `bin/tests/` 产物由 `make test` 和 `make benchmark` 自动调用，详细覆盖关系见 [docs/evaluation.md](./docs/evaluation.md)。
+其余 `bin/tests/` 产物由 `make test` 和 `make benchmark` 自动调用，详细覆盖关系见 [zeroTrace-设计方案.pdf](./docs/zeroTrace-设计方案.pdf)。
 
 清理构建产物：
 
@@ -254,7 +254,7 @@ make test
 - trace buffer wrap/lost event 处理和 perf/ftrace 风格合流脚本
 - x86_64 runtime 回归与 x86_64/aarch64 后端配置 self-test
 
-install/uninstall latency 由 `make benchmark` 中的 probe lifecycle latency 子项测量。逐项实验入口、关键断言和 F1-F7 / A1-A5 覆盖矩阵见 [docs/evaluation.md](./docs/evaluation.md)。
+install/uninstall latency 由 `make benchmark` 中的 probe lifecycle latency 子项测量。逐项实验入口、关键断言和 F1-F7 / A1-A5 覆盖矩阵见 [zeroTrace-设计方案.pdf](./docs/zeroTrace-设计方案.pdf)。
 
 ## Benchmark
 
@@ -279,57 +279,56 @@ make benchmark
 ZT_BENCH_ITERATIONS=1000000 ZT_BENCH_REPEATS=5 make benchmark
 ```
 
-benchmark 目标函数是 `bench_getpid()`，它是测试程序中的一个 `noinline` wrapper，内部调用 `syscall(SYS_getpid)`，这样可以避免 libc/vDSO 细节干扰测量。
+benchmark 目标函数是 `bench_getpid()`，它是测试程序中的一个 `noinline` wrapper，内部调用 `syscall(SYS_getpid)`，这样可以减少 libc/vDSO 细节对测量的影响。
 
-运行完成后，结果会写到被忽略的 `benchmark/` 目录中；`benchmark/report.txt` 是汇总报告，其余文件保留各子项 stdout / trace log 便于定位。下面是一组使用标准参数记录的 x86_64 benchmark 参考结果；该次运行环境没有非交互 sudo 权限，因此 kernel uprobe 项被脚本自动跳过：
+运行完成后，结果会写到被忽略的 `benchmark/` 目录中；`benchmark/report.txt` 是汇总报告，其余文件保留各子项 stdout / trace log 便于定位。下面是一组使用标准参数并通过 `sudo make benchmark` 记录的 x86_64 benchmark 参考结果；该次运行检测到 `/sys/kernel/tracing/uprobe_events`，因此包含 kernel uprobe 对照：
 
 ```text
 iterations            : 1000000
 repeats               : 5
-baseline total ns     mean : 60826780 ns
-baseline per call     mean : 60.83 ns
-uprobe total ns       : skipped
-uprobe note           : kernel uprobe benchmark skipped: sudo is not available non-interactively
-uprobe per call       : skipped
-uprobe overhead/call  : skipped
-ztrace vs uprobe      : skipped
-ztrace total ns       mean : 228268087 ns
-ztrace per call       mean : 228.27 ns
-ztrace overhead/call  mean : 167.44 ns
-ztrace overhead/call  min  : 165.37 ns
-ztrace overhead/call  max  : 172.19 ns
+baseline total ns     mean : 61239703 ns
+baseline per call     mean : 61.24 ns
+uprobe total ns       mean : 1994438922 ns
+uprobe per call       mean : 1994.44 ns
+uprobe overhead/call  mean : 1933.20 ns
+ztrace vs uprobe      : 11.08x lower overhead
+ztrace total ns       mean : 235684856 ns
+ztrace per call       mean : 235.68 ns
+ztrace overhead/call  mean : 174.45 ns
+ztrace overhead/call  min  : 172.63 ns
+ztrace overhead/call  max  : 177.53 ns
 
 Probe lifecycle latency
 -----------------------
-install latency avg   : 339814 ns (0.340 ms) over 1000 rounds
-uninstall latency avg : 76822 ns (0.077 ms) over 1000 rounds
+install latency avg   : 370539 ns (0.371 ms) over 1000 rounds
+uninstall latency avg : 83892 ns (0.084 ms) over 1000 rounds
 ```
 
 从这组数据可以看到：
 
-- `zeroTrace` 单次额外开销均值约为 `167.44 ns`，低于题目要求的 `< 1000 ns`，也已经低于项目当前优化目标 `200 ns`
-- `probe` 安装延迟平均约为 `0.340 ms`，完整清理延迟平均约为 `0.077 ms`，都低于题目要求的 `< 10 ms`
-- 若需要生成 zeroTrace vs uprobe 的完整对比，请在具备 `bpftrace` 和非交互 sudo 权限的环境下重新运行 `make benchmark`
+- `zeroTrace` 单次额外开销均值约为 `174.45 ns`，低于题目要求的 `< 1000 ns`，也已经低于项目当前优化目标 `200 ns`
+- 本轮 kernel uprobe 额外开销均值约为 `1933.20 ns`，zeroTrace 为 `11.08x lower overhead`
+- `probe` 安装延迟平均约为 `0.371 ms`，完整清理延迟平均约为 `0.084 ms`，都低于题目要求的 `< 10 ms`
 
 ## 当前完成情况
 
 - 基础功能 F1-F7 已实现，并通过自动化测试覆盖 probe 生命周期、参数/返回值、多 probe、多线程、信号安全和资源清理。
 - 进阶功能 A1-A5 已按当前设计实现，包括 x86_64/aarch64 后端、条件探针、perf/ftrace 风格日志、probe 内 call action 和行为热更新；本机自动化证据覆盖 x86_64 runtime 和 aarch64 配置选择，aarch64 runtime 验证以目标 aarch64 机器上的 `make ARCH=aarch64 test` 为准。
-- 已记录 x86_64 benchmark 额外开销约 `167 ns/call`，install/uninstall 延迟低于题目指标。
-- 详细覆盖矩阵、实验步骤和剩余验证建议见 [docs/evaluation.md](./docs/evaluation.md)。
+- 已记录 x86_64 benchmark 额外开销约 `174 ns/call`，相对 kernel uprobe 为 `11.08x lower overhead`，install/uninstall 延迟低于题目指标。
+- 详细覆盖矩阵、实验步骤和剩余验证建议见 [zeroTrace-设计方案.pdf](./docs/zeroTrace-设计方案.pdf)。
 
-## 文档
+## 文档与提交材料
 
 | 文档 | 职责边界 |
 | --- | --- |
-| [docs/project-requirements.md](./docs/project-requirements.md) | 整理赛题要求与交付指标，不解释代码实现 |
-| [docs/architecture.md](./docs/architecture.md) | 说明系统架构、模块职责、关键数据结构和主执行流，不展开逐条实验记录 |
-| [docs/stub-control-flow.md](./docs/stub-control-flow.md) | 专门说明 trampoline / stub 控制流、栈布局和返回地址劫持细节 |
-| [docs/evaluation.md](./docs/evaluation.md) | 记录 F1-F7 / A1-A5 覆盖矩阵、实验方法、benchmark 结果和验证证据 |
-| [docs/ai-usage-report.md](./docs/ai-usage-report.md) | 总结 AI 辅助开发的使用范围、人工校验方式和风险控制 |
+| [docs/zeroTrace-设计方案.tex](./docs/zeroTrace-设计方案.tex) / [docs/zeroTrace-设计方案.pdf](./docs/zeroTrace-设计方案.pdf) | 正式设计方案文档，汇总项目目标、实现方案、实验结果、授权和辅助工具说明 |
+| [src/test/README.md](./src/test/README.md) | 测试目录说明，解释自动化测试、目标程序和手动 demo 的边界 |
+| [docs/2026年全国大学生计算机系统能力大赛操作系统设计赛全国赛-技术方案.pdf](./docs/2026年全国大学生计算机系统能力大赛操作系统设计赛全国赛-技术方案.pdf) | 比赛官方技术方案原文 |
+| [docs/2026年全国大学生计算机系统能力大赛操作系统设计赛全国赛-章程.pdf](./docs/2026年全国大学生计算机系统能力大赛操作系统设计赛全国赛-章程.pdf) | 比赛官方章程原文 |
 
-`docs/` 下保留的官方技术方案和章程 PDF 是原始需求来源；上述 Markdown 文档只做项目内归纳、实现说明和验证记录。
+设计方案源码、PDF 和 LaTeX 编译配置统一放在 `docs/` 下。PDF 可通过 `make paper` 从 tex 重新生成，命令会自动清理 LaTeX 过程文件。原来 `docs/` 下的阶段性 markdown 已经合并到正式设计方案中，当前只保留官方原始 PDF 和最终设计文档。
+答辩幻灯片和演示视频按提交平台要求另行制作，仓库不保留本地导出的 PPT/PDF 产物。
 
 ## 授权与引用
 
-本项目自写源代码和项目文档按根目录 [LICENSE](./LICENSE) 中的 GPLv3 发布。`docs/` 下保留的比赛技术方案和章程 PDF 是官方赛题材料，仅作为需求依据和引用来源；其授权和解释权归原发布方所有。
+本项目自写源代码按根目录 [LICENSE](./LICENSE) 中的 GPLv3 发布；项目文档、答辩幻灯片和演示视频按 CC-BY-SA 4.0 发布。`docs/` 下保留的比赛技术方案和章程 PDF 是官方赛题材料，仅作为需求依据和引用来源；其授权和解释权归原发布方所有。

@@ -6,6 +6,13 @@
 
 #include "zt_sigconf.h"
 
+/*
+ * Signature configuration and pretty-printer.
+ *
+ * The payload records raw register bits only. This file interprets those bits
+ * using conf/zttrace.conf, including remote strings, buffers, variadic format
+ * strings, and floating-point arguments.
+ */
 static zt_func_sig_t g_sig_table[ZT_SIGCONF_MAX_FUNCS];
 static int g_sig_count;
 static int g_sigconf_loaded;
@@ -339,6 +346,10 @@ static int zt_read_remote_chunk_or_byte(const zt_injector_session_t *session,
         return 0;
     }
 
+    /*
+     * Strings and buffers can cross an unmapped page. Falling back to one byte
+     * keeps formatting useful instead of failing the whole event.
+     */
     *len_inout = 1;
     return zt_read_remote_memory(session->pid, remote_addr, buffer, 1);
 }
@@ -520,6 +531,10 @@ static size_t zt_buffer_preview_len(const zt_func_sig_t *sig,
         return 0;
     }
 
+    /*
+     * Most C APIs place a length next to the buffer. Prefer following numeric
+     * parameters, then fall back to the return value for calls like read().
+     */
     if (for_return) {
         if (ret_event == NULL || (long long)ret_event->value0 <= 0) {
             return 0;

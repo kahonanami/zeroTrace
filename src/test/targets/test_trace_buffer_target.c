@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+/* Fast producer target used to exercise ring-buffer overwrite/lost-event paths. */
 #include <signal.h>
 #include <stdint.h>
 #include <unistd.h>

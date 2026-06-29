@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+/* Long-running target for live filter/call-action hot-update tests. */
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>

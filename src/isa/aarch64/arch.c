@@ -12,6 +12,7 @@
 #include "../../../include/zt_injector.h"
 #include "../common/zt_remote_exec.h"
 
+/* AArch64-specific instruction patching and remote syscall/call glue. */
 enum {
     ZT_AARCH64_INSN_SIZE = 4,
     ZT_AARCH64_PATCH_LEN = 16,
@@ -204,6 +205,10 @@ int zt_arch_install_jump(pid_t pid,
         return -1;
     }
 
+    /*
+     * AArch64 has no single-instruction absolute branch. Use an inline literal
+     * loaded into x16/ip0, the standard scratch register for veneers.
+     */
     memset(patch, 0, sizeof(patch));
     zt_store_u32(patch, 0, 0x58000050u); /* ldr x16, #8 */
     zt_store_u32(patch, 4, 0xD61F0200u); /* br x16 */

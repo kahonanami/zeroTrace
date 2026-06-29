@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+/* Benchmark target with a tiny noinline function used by baseline/uprobe/ztrace runs. */
 #include <signal.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>

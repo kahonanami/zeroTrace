@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+/* Target process for context-integrity tests. It self-checks FP math results. */
 #include <signal.h>
 #include <stdio.h>
 #include <unistd.h>

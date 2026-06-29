@@ -5,6 +5,13 @@
 
 #include "../../../include/zt_trampoline_manager.h"
 
+/*
+ * AArch64 trampoline builder.
+ *
+ * A trampoline calls entry_stub, restores x30, replays relocated prologue
+ * instructions, then branches back to the original function. PC-relative ADR,
+ * branches, and call instructions are expanded into absolute sequences.
+ */
 enum {
     ZT_AARCH64_INSN_SIZE = 4,
 };
@@ -42,6 +49,10 @@ static int zt_emit_mov_abs(uint8_t *buf,
         return -1;
     }
 
+    /*
+     * Materialize a 64-bit immediate with MOVZ/MOVK pairs; this is the common
+     * building block for absolute branches and relocated ADR/ADRP.
+     */
     for (hw = 0; hw < 4; ++hw) {
         uint32_t imm16 = (uint32_t)((value >> (hw * 16)) & 0xffffu);
         uint32_t insn = (hw == 0 ? 0xD2800000u : 0xF2800000u) |
@@ -221,6 +232,7 @@ static int zt_emit_adr_like(uint8_t *buf,
         return -1;
     }
 
+    /* Preserve the value computed by ADR/ADRP without depending on new PC. */
     rd = zt_read_u32(insn->bytes) & 0x1fu;
     return zt_emit_mov_abs(buf, buf_size, offset, rd, target_addr);
 }
@@ -371,6 +383,7 @@ int zt_build_trampoline(const zt_probe_info_t *probe,
         return -1;
     }
 
+    /* entry_stub returns with x15 holding exit_stub; restore the original LR. */
     if (zt_emit_u32(trampoline_buf, trampoline_buf_size, &offset, 0xAA0F03FEu) != 0) { /* mov x30, x15 */
         return -1;
     }

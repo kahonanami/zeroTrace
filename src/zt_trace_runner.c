@@ -17,6 +17,13 @@
 #include "zt_trampoline_manager.h"
 #include "zt_trace_runner.h"
 
+/*
+ * Trace orchestration layer.
+ *
+ * This file wires together injection, payload setup, trampoline installation,
+ * ring-buffer polling, conditional filtering, call actions, and log formatting.
+ * It is intentionally above ptrace details and below the interactive CLI.
+ */
 _Static_assert(ZT_PAYLOAD_PROBE_ACTION_CAP == ZT_PROBES_CAPACITY,
                "call action table must cover every probe slot");
 
@@ -211,6 +218,10 @@ static int zt_trace_write_call_action(zt_injector_session_t *session,
         return -1;
     }
 
+    /*
+     * Publish action updates with a disabled -> data -> enabled sequence. The
+     * payload snapshots and re-checks enabled, so it never executes mixed fields.
+     */
     staged_action = probe->call_action;
     staged_action.enabled = 0;
     if (zt_write_remote_memory(session->pid,
@@ -490,6 +501,10 @@ static int zt_trace_install_probe(zt_injector_session_t *session,
 
     zt_trace_set_probe_filter(probe, filter);
 
+    /*
+     * zt_enable_probe prepares original bytes and patch length only. The actual
+     * branch patch is installed after the remote trampoline bytes are written.
+     */
     if (zt_enable_probe(session, probe->probe_id) != 0) {
         printf("zt_enable_probe failed for probe %lu\n", probe->probe_id);
         zt_trace_rollback_probe_install(session, runtime, probe, &snapshot);
@@ -687,6 +702,10 @@ static void zt_dump_one_trace_event(zt_injector_session_t *session,
     } else if (event->event_type == ZT_TRACE_EVENT_RETURN && event->call_id != 0) {
         zt_entry_cache_slot_t *slot = &g_entry_cache[event->call_id % ZT_TRACE_EVENT_CAPACITY];
         if (slot->call_id == event->call_id) {
+            /*
+             * Return events need the matching entry event for typed formatting
+             * and for applying the same filter decision to the pair.
+             */
             matched_entry = &slot->event;
             if (slot->suppressed) {
                 slot->call_id = 0;
@@ -884,6 +903,11 @@ static int zt_trace_refresh_event_snapshots(zt_injector_session_t *session,
         return 0;
     }
 
+    /*
+     * Double-read committed_seq around the event copy. If either value changes
+     * or does not match the requested sequence, the slot was still pending or
+     * overwritten by the producer and must not be formatted.
+     */
     if (zt_trace_read_commit_snapshot(session,
                                       runtime,
                                       start_seq,
@@ -965,6 +989,7 @@ static int zt_dump_trace_events_since(zt_injector_session_t *session,
     seq = *last_seq + 1;
 
     if (write_seq - *last_seq > ZT_TRACE_EVENT_CAPACITY) {
+        /* The producer lapped the reader; emit an explicit loss marker. */
         uint64_t start_seq = write_seq - ZT_TRACE_EVENT_CAPACITY + 1;
         zt_trace_log_lost_events(session,
                                  out,

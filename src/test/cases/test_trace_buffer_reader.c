@@ -1,5 +1,9 @@
 #define _GNU_SOURCE
 
+/*
+ * Exercises reader-side ring-buffer behavior when the producer can overwrite
+ * old slots, including explicit lost-event reporting.
+ */
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>

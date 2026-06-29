@@ -4,6 +4,13 @@
 
 #include "zt_trampoline_manager.h"
 
+/*
+ * Common remote trampoline pool.
+ *
+ * Allocating one executable mapping per probe is slow and noisy. Instead we
+ * mmap one fixed-size pool in the target and hand out slots that can be reused
+ * after `untrace`/disable cleanup.
+ */
 static int zt_trampoline_pool_slot_valid(int slot) {
     return slot >= 0 && slot < ZT_TRAMPOLINE_POOL_SLOTS;
 }
@@ -168,6 +175,11 @@ void zt_trampoline_pool_release(zt_injector_session_t *session,
     zt_trampoline_pool_clear_probe_slot(probe);
 
     if (pool->remote_addr != 0 && zt_trampoline_pool_all_free(pool)) {
+        /*
+         * Releasing the whole pool is conservative: a failed munmap only leaks
+         * the remote page until detach, while keeping stale metadata would be
+         * more dangerous.
+         */
         if (zt_remote_munmap(session->pid, pool->remote_addr, pool->remote_size) == 0) {
             zt_trampoline_pool_reset(pool);
         }

@@ -1,3 +1,7 @@
+/*
+ * Unit tests for the x86_64 trampoline builder. These focus on relocation of
+ * overwritten prologue bytes without launching a traced process.
+ */
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>

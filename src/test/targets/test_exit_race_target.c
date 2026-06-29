@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+/* Short-lived target used to reproduce trace-poll vs process-exit races. */
 #include <signal.h>
 #include <unistd.h>
 

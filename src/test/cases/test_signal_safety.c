@@ -1,5 +1,9 @@
 #define _GNU_SOURCE
 
+/*
+ * Runs tracing while the target receives frequent signals. This guards against
+ * deadlocks or corrupted return handling when async stops interleave with probes.
+ */
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>

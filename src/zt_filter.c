@@ -6,6 +6,13 @@
 
 #include "zt_filter.h"
 
+/*
+ * Tiny expression compiler/evaluator for conditional probes.
+ *
+ * The CLI compiles `if ...` strings into a fixed token array stored in the
+ * probe metadata. Evaluation uses recursive descent with normal C-like
+ * precedence and no dynamic allocation, keeping the trace path predictable.
+ */
 typedef struct {
     const zt_probe_filter_t *filter;
     const zt_trace_event_t *event;
@@ -257,6 +264,10 @@ static uint64_t zt_filter_parse_with_eval(zt_filter_eval_t *ctx,
 static uint64_t zt_filter_parse_maybe_skipped(zt_filter_eval_t *ctx,
                                               int skip_eval,
                                               zt_filter_parse_fn_t parse) {
+    /*
+     * Short-circuiting still has to consume tokens on the skipped side. We parse
+     * with evaluation disabled so `0 && arg0 / 0` stays valid and safe.
+     */
     return skip_eval
         ? zt_filter_parse_with_eval(ctx, 0, parse)
         : parse(ctx);
@@ -297,6 +308,7 @@ static int zt_filter_validate(const zt_probe_filter_t *filter) {
         return -1;
     }
 
+    /* Parse once without an event to reject malformed expressions at install time. */
     ctx = zt_filter_eval_init(filter, NULL);
     (void)zt_filter_parse_or(&ctx);
     return ctx.ok && ctx.pos == filter->token_count ? 0 : -1;

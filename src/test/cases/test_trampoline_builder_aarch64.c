@@ -1,3 +1,7 @@
+/*
+ * Unit tests for the AArch64 trampoline builder, covering absolute rewrites for
+ * ADR/ADRP and common branch forms used in copied prologues.
+ */
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>

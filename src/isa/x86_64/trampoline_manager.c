@@ -4,6 +4,14 @@
 
 #include "../../../include/zt_trampoline_manager.h"
 
+/*
+ * x86_64 trampoline builder.
+ *
+ * A trampoline first calls entry_stub, then replays the overwritten prologue,
+ * then jumps back to the original function after the patch. PC-relative control
+ * flow and RIP-relative memory operands are rewritten so copied instructions
+ * keep their original meaning from the new address.
+ */
 static const uint8_t ZT_TRAMPOLINE_TEMPLATE_PREFIX[] = {
     0x68, 0x00, 0x00, 0x00, 0x00,       /* push imm32 */
     0xFF, 0x15, 0x00, 0x00, 0x00, 0x00, /* call qword ptr [rip + disp32] */
@@ -135,6 +143,10 @@ static int zt_rewrite_rel_call(uint8_t *buf,
     static const uint8_t k_call_r11[] = {0x41, 0xFF, 0xD3};
     static const uint8_t k_pop_r11[] = {0x41, 0x5B};
 
+    /*
+     * Preserve r11 around relocated calls. The copied prologue should behave as
+     * if it still lived at the original address, including caller-saved scratch.
+     */
     if (zt_emit_bytes(buf, buf_size, offset, k_push_r11, sizeof(k_push_r11)) != 0 ||
         zt_emit_bytes(buf, buf_size, offset, k_movabs_r11, sizeof(k_movabs_r11)) != 0 ||
         zt_emit_bytes(buf, buf_size, offset, &target_addr, sizeof(target_addr)) != 0 ||
@@ -265,6 +277,7 @@ static int zt_emit_relocated_orig_code(const zt_probe_info_t *probe,
             for (op_index = 0; op_index < x86->op_count; ++op_index) {
                 if (x86->operands[op_index].type == X86_OP_MEM &&
                     x86->operands[op_index].mem.base == X86_REG_RIP) {
+                    /* Rebase RIP-relative memory references onto the trampoline copy. */
                     uint64_t old_next = cur->address + cur->size;
                     int64_t old_disp = x86->disp;
                     uint64_t old_target = (uint64_t)((int64_t)old_next + old_disp);

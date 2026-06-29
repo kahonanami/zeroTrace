@@ -1,5 +1,9 @@
 #define _GNU_SOURCE
 
+/*
+ * Covers core probe lifecycle requirements: install, disable/enable, untrace,
+ * conditional filters, call actions, and 16 concurrent probes in one process.
+ */
 #include <errno.h>
 #include <limits.h>
 #include <signal.h>

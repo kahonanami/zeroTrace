@@ -10,12 +10,14 @@
 #define ZT_TRAMPOLINE_POOL_SLOT_SIZE ZT_TRAMPOLINE_MAX_SIZE
 #define ZT_TRAMPOLINE_POOL_SIZE ((size_t)ZT_TRAMPOLINE_POOL_SLOTS * (size_t)ZT_TRAMPOLINE_POOL_SLOT_SIZE)
 
+/* Remote executable page split into fixed-size slots, one trampoline per probe. */
 typedef struct {
     uint64_t remote_addr;
     size_t remote_size;
     unsigned char slot_used[ZT_TRAMPOLINE_POOL_SLOTS];
 } zt_trampoline_pool_t;
 
+/* ISA backends build the instruction bytes; the common pool owns remote slots. */
 int zt_build_trampoline(const zt_probe_info_t *probe,
                         uint64_t entry_stub_addr,
                         uint64_t trampoline_addr,

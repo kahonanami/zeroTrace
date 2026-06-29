@@ -8,6 +8,10 @@
 #define ZT_SIGCONF_MAX_FUNCS 256
 #define ZT_SIGCONF_MAX_PARAMS 6
 
+/*
+ * Small ltrace-like signature model used only by the tracer side. The payload
+ * records raw argument bits; this layer decides how to print them.
+ */
 typedef enum {
     ZT_SIG_TYPE_UNKNOWN = 0,
     ZT_SIG_TYPE_INT,
@@ -38,6 +42,7 @@ typedef struct {
     int variadic;
 } zt_func_sig_t;
 
+/* Load signatures and format raw trace events with symbol-specific types. */
 int zt_sigconf_load(const char *path);
 int zt_sigconf_load_default(void);
 const zt_func_sig_t *zt_sigconf_find(const char *symbol);

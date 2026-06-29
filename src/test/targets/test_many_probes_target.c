@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+/* Target exposing many stable noinline functions for lifecycle and 16-probe tests. */
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>

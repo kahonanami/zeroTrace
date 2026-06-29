@@ -1,5 +1,9 @@
 #define _GNU_SOURCE
 
+/*
+ * Production-style thread-group control test. It checks that attach/interrupt/
+ * continue tracks persistent and newly created threads without losing progress.
+ */
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>

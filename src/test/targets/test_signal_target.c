@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+/* Signal-heavy target used to ensure probes coexist with async signal delivery. */
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>

@@ -1,5 +1,6 @@
 #pragma once
 
+/* Shared helpers for integration tests: temp logs, process cleanup, and polling. */
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>

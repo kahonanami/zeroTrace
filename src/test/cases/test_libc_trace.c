@@ -1,5 +1,9 @@
 #define _GNU_SOURCE
 
+/*
+ * Integration test for libc symbol tracing and zttrace.conf formatting:
+ * read/write buffers, printf format strings, and typed return values.
+ */
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>

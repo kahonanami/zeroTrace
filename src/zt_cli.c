@@ -15,6 +15,12 @@
 #include "zt_injector.h"
 #include "zt_trace_runner.h"
 
+/*
+ * Interactive shell layer.
+ *
+ * Command handlers translate user input into injector/trace_runner operations;
+ * they should not duplicate low-level ptrace, trampoline, or payload logic.
+ */
 static int cmd_help(char *args);
 static int cmd_exit(char *args);
 static int cmd_attach(char *args);
@@ -69,6 +75,7 @@ static char g_cli_log_path[PATH_MAX];
 static long g_cli_log_offset;
 static uint64_t g_cli_last_poll_ns;
 
+/* Log tailing is best-effort UI feedback; the durable trace output is the file. */
 static void zt_cli_reset_log_state(void) {
     g_cli_log_path[0] = '\0';
     g_cli_log_offset = 0;
@@ -177,6 +184,7 @@ static int zt_cli_parse_call_arg(const char *text, zt_call_action_arg_t *arg_out
     }
 
     if (strncmp(text, "arg", 3) == 0) {
+        /* `argN` forwards the probed function's Nth integer argument. */
         errno = 0;
         entry_arg = strtoul(text + 3, &endptr, 10);
         if (errno == 0 && text + 3 != endptr && *endptr == '\0' &&

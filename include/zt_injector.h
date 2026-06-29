@@ -20,6 +20,13 @@ typedef struct {
     uint64_t remote_addr;
 } zt_symbol_target_t;
 
+/*
+ * Probe lifecycle state kept by the controlling process.
+ *
+ * A probe becomes INSTALLED only after original bytes are saved, a trampoline is
+ * written, and the target prologue is patched. DISABLED means the original
+ * bytes are restored but metadata/trampoline ownership is retained.
+ */
 typedef enum {
     ZT_PROBE_EMPTY = 0,
     ZT_PROBE_RESOLVED,
@@ -42,6 +49,7 @@ typedef struct {
     char call_symbol[ZT_PROBE_SYMBOL_MAX];
 } zt_probe_info_t;
 
+/* One ptrace-controlled task in the target thread group. */
 typedef struct {
     pid_t tid;
     int stopped;
@@ -62,6 +70,7 @@ typedef struct {
     zt_probe_info_t probes[ZT_PROBES_CAPACITY];
 } zt_injector_session_t;
 
+/* Thread-group control and remote-memory helpers. */
 int zt_injector_attach(zt_injector_session_t *session, pid_t pid);
 void zt_injector_detach(zt_injector_session_t *session);
 int zt_injector_interrupt_all(zt_injector_session_t *session);
@@ -96,6 +105,8 @@ int zt_remote_call2(pid_t pid,
                     uint64_t arg1,
                     uint64_t arg2,
                     uint64_t *ret_out);
+
+/* Probe table helpers used by CLI/tests and trace installation. */
 zt_probe_info_t *zt_probe_find_by_symbol(zt_injector_session_t *session, const char *symbol_name);
 zt_probe_info_t *zt_probe_find_by_id(zt_injector_session_t *session, uint64_t probe_id);
 zt_probe_info_t *zt_register_probe(zt_injector_session_t *session, const char *symbol_name);

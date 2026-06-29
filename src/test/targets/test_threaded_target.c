@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+/* Multi-threaded target that hammers traced functions from many threads. */
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>

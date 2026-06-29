@@ -13,8 +13,16 @@
 .extern zt_handle_return
 .extern get_ret_addr_c
 
-# ctx_t offsets used by zt_payload.c. These slots are ISA-agnostic ABI
-# argument/return positions, not architectural register names.
+/*
+ * AArch64 payload bridge. The trampoline passes probe id in x17 and the
+ * original link register in x15; the stub turns that into the ISA-neutral ctx_t
+ * layout.
+ */
+
+/*
+ * ctx_t offsets used by zt_payload.c. These slots are ISA-agnostic ABI
+ * argument/return positions, not architectural register names.
+ */
 .equ ZT_CTX_GP_ARG5_OFF, 48
 .equ ZT_CTX_GP_ARG4_OFF, 56
 .equ ZT_CTX_GP_ARG0_OFF, 64
@@ -26,7 +34,7 @@
 .equ ZT_CTX_SAVED_RET_OFF, 128
 .equ ZT_CTX_FUNC_ID_OFF, 136
 
-.equ ZT_FP_STATE_VEC_OFFSET, 160
+.equ ZT_FP_STATE_VEC_OFFSET, 0
 .equ ZT_FRAME_REGS_OFF, 0
 .equ ZT_FRAME_RETADDR_OFF, 240
 .equ ZT_FRAME_CTX_OFF, 256
@@ -70,6 +78,7 @@
 .endm
 
 .macro SAVE_FP_SNAPSHOT
+    /* Preserve full q0-q31 state while exposing q0 at fp_state_area + 0. */
     mrs x20, fpcr
     str x20, [sp, #ZT_FRAME_FPCR_OFF]
     mrs x20, fpsr
@@ -168,6 +177,7 @@ entry_stub:
     add x1, sp, #ZT_FRAME_FP_OFF
     bl zt_handle_entry
 
+    /* Save the original return address so exit_stub can match this call later. */
     ldr x0, [x19, #ZT_CTX_SAVED_RET_OFF]
     ldr x1, [x19, #ZT_CTX_FUNC_ID_OFF]
     bl save_probe_frame_c
@@ -176,6 +186,7 @@ entry_stub:
     ldr x20, [x19, #ZT_CTX_STATUS_FLAGS_OFF]
     msr nzcv, x20
     RESTORE_GPRS
+    /* Replace LR with exit_stub; the real LR is kept in the TLS shadow stack. */
     adrp x15, exit_stub
     add x15, x15, :lo12:exit_stub
     add sp, sp, #ZT_FRAME_SIZE

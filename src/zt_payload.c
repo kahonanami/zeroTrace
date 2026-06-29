@@ -9,6 +9,13 @@
 
 #include "zt_payload.h"
 
+/*
+ * Runtime code executed inside the target process.
+ *
+ * Keep this file small and predictable: every instruction here runs on the
+ * probed function's hot path. Heavy formatting and remote-memory reads stay in
+ * the tracer process; the payload only snapshots ABI state into shared memory.
+ */
 typedef struct {
     uint64_t ret_addr;
     uint64_t probe_id;
@@ -23,10 +30,19 @@ enum {
 
 static const uint64_t NSEC_PER_SEC = 1000000000ULL;
 
+/*
+ * Return probes are matched per target thread. A global stack would mix nested
+ * calls from different threads, so the return address/probe/call-id stack lives
+ * in TLS and mirrors the control-flow chain created by entry_stub.
+ */
 static __thread zt_saved_probe_frame_t saved_frames[ZT_MAX_SAVED_RET_ADDR];
 static __thread int call_stack_idx;
 static __thread uint64_t last_call_id;
+
+/* gettid is cached because a syscall on every probe hit dominates overhead. */
 static __thread uint64_t cached_tid;
+
+/* Prevent probe call actions from recursively tracing themselves. */
 static __thread int in_call_action;
 
 static zt_payload_config_t g_payload_config;
@@ -75,6 +91,10 @@ static uint64_t zt_fp_state_vec_low64(const void *fp_state_area, int index) {
         return 0;
     }
 
+    /*
+     * ISA stubs expose a compact vector snapshot where slot 0 starts at q0/xmm0.
+     * The tracer decides whether those raw bits are float, double, or opaque.
+     */
     base = (const unsigned char *)fp_state_area +
            ZT_FP_STATE_VEC_OFFSET +
            ((size_t)index * ZT_FP_STATE_VEC_STRIDE);
@@ -101,6 +121,11 @@ static zt_trace_event_t *zt_reserve_event_slot(uint64_t *commit_seq_out) {
         return NULL;
     }
 
+    /*
+     * The producer writes directly into the shared ring slot, then publishes it
+     * by storing committed_seq with release ordering. The reader only consumes a
+     * slot after seeing that matching sequence, avoiding a stack event copy here.
+     */
     seq = __atomic_fetch_add(&buffer->write_seq, 1, __ATOMIC_RELAXED);
     slot = &buffer->events[seq % ZT_TRACE_EVENT_CAPACITY];
     slot->committed_seq = 0;
@@ -143,6 +168,11 @@ static int zt_copy_call_action_if_match(const zt_probe_call_action_t *action,
         return 0;
     }
 
+    /*
+     * Call actions are updated by the tracer while the target may be running.
+     * Copy a bounded snapshot and re-check enabled so partially updated actions
+     * are ignored instead of executed with mixed fields.
+     */
     snapshot.callee_addr = action->callee_addr;
     snapshot.probe_id = action->probe_id;
     snapshot.arg_count = action->arg_count;
@@ -279,6 +309,10 @@ static void zt_run_call_action(const ctx_t *context, uint64_t call_id) {
 
     zt_resolve_call_args(&action, context, call_args);
 
+    /*
+     * Calling back into the target is intentionally narrow: integer ABI
+     * arguments only, no formatting, and recursion guarded by TLS.
+     */
     in_call_action = 1;
     retval = zt_call_action_invoke(action.callee_addr, action.arg_count, call_args);
     in_call_action = 0;
@@ -328,6 +362,10 @@ void zt_handle_entry(ctx_t *context, const void *fp_state_area) {
     call_id = __atomic_fetch_add(&g_call_id_seq, 1, __ATOMIC_RELAXED) + 1;
     last_call_id = call_id;
 
+    /*
+     * Entry events are committed before optional call actions so the log keeps
+     * the natural order: entry -> call-action -> return for the same call_id.
+     */
     event = zt_reserve_event_slot(&commit_seq);
     if (event == NULL) {
         return;
@@ -384,6 +422,10 @@ uint64_t save_probe_frame_c(uint64_t ret_addr, uint64_t func_id) {
         return 1;
     }
 
+    /*
+     * entry_stub calls this after zt_handle_entry. The saved return address is
+     * later popped by exit_stub to resume the original caller transparently.
+     */
     saved_frames[call_stack_idx].ret_addr = ret_addr;
     saved_frames[call_stack_idx].probe_id = func_id;
     saved_frames[call_stack_idx].call_id = last_call_id;

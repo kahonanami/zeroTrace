@@ -10,6 +10,7 @@
 #include "../../../include/zt_injector.h"
 #include "../common/zt_remote_exec.h"
 
+/* x86_64-specific instruction patching and remote syscall/call glue. */
 enum {
     ZT_X86_64_PATCH_LEN = 14,
     ZT_X86_64_REMOTE_SYSCALL_CODE_SIZE = 8,
@@ -73,6 +74,10 @@ static int zt_build_syscall_stub(uint8_t *stub_code,
     }
 
     memcpy(stub_code, saved_code, stub_size);
+    /*
+     * Replace the stopped instruction stream with `syscall; int3`. The int3 is
+     * the synchronization point used by common remote_exec to regain control.
+     */
     stub_code[0] = 0x0f; /* syscall */
     stub_code[1] = 0x05;
     stub_code[2] = 0xcc; /* int3 */
@@ -178,6 +183,11 @@ int zt_arch_install_jump(pid_t pid,
         return -1;
     }
 
+    /*
+     * Absolute jump without clobbering general registers:
+     *   jmp qword ptr [rip + 0]
+     *   .quad target_addr
+     */
     patch[0] = 0xFF; /* jmp qword ptr [rip + 0] */
     patch[1] = 0x25;
     memset(patch + 2, 0, 4);

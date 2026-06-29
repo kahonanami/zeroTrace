@@ -4,6 +4,13 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+/*
+ * Architecture boundary.
+ *
+ * The injector/runner code only asks for operations in this file: patch length,
+ * safe prologue span, branch patching, and temporary remote execution. Each ISA
+ * backend owns the exact instruction encoding and register layout.
+ */
 size_t zt_arch_probe_patch_len(void);
 int zt_arch_calc_patch_span(const uint8_t *code,
                             size_t code_size,

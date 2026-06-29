@@ -1,5 +1,9 @@
 #define _GNU_SOURCE
 
+/*
+ * Verifies context preservation around a probed floating-point function. The
+ * target checks its own result while the tracer verifies entry/return events.
+ */
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>

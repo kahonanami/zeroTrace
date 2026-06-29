@@ -1,5 +1,9 @@
 #define _GNU_SOURCE
 
+/*
+ * Stress target-exit races while the trace reader polls shared memory. The test
+ * accepts normal exits but rejects crashes, hangs, or stale active traces.
+ */
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>

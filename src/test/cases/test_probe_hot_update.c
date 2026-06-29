@@ -1,5 +1,9 @@
 #define _GNU_SOURCE
 
+/*
+ * Exercises live probe updates: filter replacement, call-action replacement,
+ * disable/enable transitions, and untrace cleanup while the target keeps going.
+ */
 #include <errno.h>
 #include <signal.h>
 #include <stdio.h>

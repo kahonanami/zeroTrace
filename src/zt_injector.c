@@ -21,6 +21,13 @@
 #include "zt_arch.h"
 #include "zt_injector.h"
 
+/*
+ * Low-level control layer.
+ *
+ * This file owns ptrace attachment, thread-group stop/resume, remote memory
+ * access, symbol resolution, and probe patch safety. It intentionally does not
+ * know how trace events are formatted or which CLI command requested a change.
+ */
 #ifndef PTRACE_O_TRACESYSGOOD
 #define PTRACE_O_TRACESYSGOOD 0x00000001
 #endif
@@ -282,6 +289,11 @@ static int zt_injector_refresh_threads(zt_injector_session_t *session) {
         return -1;
     }
 
+    /*
+     * Threads can appear while we are attaching. Refreshing /proc/pid/task before
+     * every stop pass lets us seize newly created tasks instead of patching code
+     * while one thread is still running.
+     */
     while ((entry = readdir(dir)) != NULL) {
         char *endptr;
         long tid;
@@ -459,6 +471,10 @@ int zt_injector_interrupt_all(zt_injector_session_t *session) {
     }
 
     for (pass = 0; pass < max_stop_passes; ++pass) {
+        /*
+         * Stop in passes: interrupt known threads, wait for them, compact exits,
+         * then enumerate again in case clone() raced with the previous pass.
+         */
         for (i = 0; i < session->thread_count; ++i) {
             zt_thread_info_t *thread = &session->threads[i];
 
@@ -705,6 +721,11 @@ static int zt_ensure_patch_regions_are_safe(zt_injector_session_t *session) {
                 break;
             }
 
+            /*
+             * A thread stopped inside bytes we are about to overwrite could
+             * resume into a half-restored instruction stream. Single-step it out
+             * before installing or uninstalling the patch.
+             */
             if (zt_single_step_thread(session, thread) != 0) {
                 return -1;
             }
@@ -749,6 +770,11 @@ int zt_read_remote_memory(pid_t pid, uint64_t remote_addr, void *buffer, size_t 
         return 0;
     }
 
+    /*
+     * process_vm_readv is fast and non-stopping, but it can fail for permission
+     * or partial mapping reasons. ptrace word reads keep small control-path
+     * operations reliable while the target is already seized.
+     */
     copied = 0;
     word_size = sizeof(long);
     while (copied < size) {
@@ -836,6 +862,10 @@ int zt_write_remote_memory(pid_t pid, uint64_t remote_addr, const void *buffer, 
         return 0;
     }
 
+    /*
+     * POKEDATA writes machine words. For a short tail write, preserve the
+     * untouched bytes by reading the original word first.
+     */
     copied = 0;
     word_size = sizeof(long);
     while (copied < size) {
@@ -1070,6 +1100,10 @@ int zt_find_remote_symbol_addr(pid_t pid,
     }
 
     if (is_dyn) {
+        /*
+         * Shared objects and PIE executables report symbol values relative to
+         * their load base, so the target's current maps decide the final address.
+         */
         if (zt_read_image_base(pid, module_path, &module_base) != 0) {
             return -1;
         }

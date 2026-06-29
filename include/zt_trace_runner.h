@@ -2,6 +2,10 @@
 
 #include "zt_injector.h"
 
+/*
+ * High-level tracing API used by the CLI and tests. This layer owns payload
+ * setup, trampoline installation, ring-buffer polling, filtering, and logging.
+ */
 int zt_trace_start_in_session(zt_injector_session_t *session,
                               const char *symbol,
                               const char *log_path);

@@ -4,6 +4,13 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+/*
+ * Shared remote-execution driver.
+ *
+ * ISA backends provide register access and tiny instruction stubs; this helper
+ * patches one stopped thread temporarily, runs it until a trap, then restores
+ * both registers and overwritten code bytes.
+ */
 typedef struct {
     long syscall_no;
     uint64_t arg1;

@@ -1,3 +1,4 @@
+/* Helper used by scripts/benchmark.py to attach ztrace to the benchmark target. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>

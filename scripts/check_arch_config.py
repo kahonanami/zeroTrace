@@ -66,6 +66,12 @@ def require_absent(config: dict[str, list[str]], key: str, value: str) -> None:
         raise RuntimeError(f"{key} for ARCH={config.get('ARCH', ['?'])[0]} unexpectedly contains {value}")
 
 
+def require_text(path: str, needle: str, why: str) -> None:
+    text = (ROOT / path).read_text(encoding="utf-8")
+    if needle not in text:
+        raise RuntimeError(f"{path} misses {needle!r}: {why}")
+
+
 def require_selected_arch(config: dict[str, list[str]], arch: str) -> None:
     selected = config.get("ARCH", [])
     if selected != [arch]:
@@ -93,6 +99,13 @@ def check_arch(arch: str) -> None:
 def main() -> int:
     for arch in ARCH_EXPECTED:
         check_arch(arch)
+
+    require_text(
+        "src/isa/aarch64/stub.S",
+        ".equ ZT_FP_STATE_VEC_OFFSET, 0",
+        "payload expects fp_state_area slot 0 to contain q0/d0",
+    )
+
     print("arch config self-test passed")
     return 0
 

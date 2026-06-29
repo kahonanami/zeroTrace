@@ -1,5 +1,9 @@
 #define _GNU_SOURCE
 
+/*
+ * Multi-thread safety stress test. Multiple probes are hit by many threads while
+ * tracing is toggled, proving TLS return stacks and patch transitions stay safe.
+ */
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
