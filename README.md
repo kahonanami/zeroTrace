@@ -1,11 +1,11 @@
-# zeroTrace
+# zeroTrace: A Lightweight Dynamic Probe for User Space
 
 `zeroTrace` 是一个轻量级 Linux 用户态动态探针工具。它通过 `ptrace` 注入 payload，改写目标函数入口，在目标进程用户态内部完成参数采集、返回值捕获和事件写入，避免每次 probe 命中都进入内核处理。
 
 项目材料：
 
 - 项目文档：[docs/zeroTrace-项目文档.pdf](./docs/zeroTrace-项目文档.pdf)
-- 汇报 PPT：[docs/zeroTrace_汇报.pptx](./docs/zeroTrace_汇报.pptx)
+- 汇报 PPT：[docs/zeroTrace-汇报.pptx](./docs/zeroTrace-汇报.pptx)
 - 演示视频：https://pan.baidu.com/s/1yDj9uWao5-tVfUNNjUbQ7w?pwd=83nj 提取码：`83nj`
 
 ## Features
@@ -25,7 +25,7 @@
 ```text
 .
 ├── conf/                 # 函数签名配置，用于参数和返回值格式化
-├── docs/                 # 项目文档、比赛官方材料和 LaTeX 配置
+├── docs/                 # 项目文档、汇报 PPT、比赛官方材料和 LaTeX 配置
 ├── include/              # 公共头文件
 ├── scripts/              # benchmark、架构检查和日志合流脚本
 ├── src/                  # zeroTrace 主体实现
@@ -207,6 +207,7 @@ make benchmark
 | --- | --- |
 | [docs/zeroTrace-项目文档.tex](./docs/zeroTrace-项目文档.tex) | 项目文档 LaTeX 源码 |
 | [docs/zeroTrace-项目文档.pdf](./docs/zeroTrace-项目文档.pdf) | 项目文档 PDF |
+| [docs/zeroTrace-汇报.pptx](./docs/zeroTrace-汇报.pptx) | 汇报 PPT |
 | [src/test/README.md](./src/test/README.md) | 测试目录说明 |
 | [docs/2026年全国大学生计算机系统能力大赛操作系统设计赛全国赛-技术方案.pdf](./docs/2026年全国大学生计算机系统能力大赛操作系统设计赛全国赛-技术方案.pdf) | 比赛官方技术方案 |
 | [docs/2026年全国大学生计算机系统能力大赛操作系统设计赛全国赛-章程.pdf](./docs/2026年全国大学生计算机系统能力大赛操作系统设计赛全国赛-章程.pdf) | 比赛官方章程 |
