@@ -1,78 +1,83 @@
 # zeroTrace: A Lightweight Dynamic Probe for User Space
 
-`zeroTrace` 是一个轻量级 Linux 用户态动态探针工具。它通过 `ptrace` 注入 payload，改写目标函数入口，在目标进程用户态内部完成参数采集、返回值捕获和事件写入，避免每次 probe 命中都进入内核处理。
+zeroTrace 是一个面向 Linux 的轻量级用户态动态探针工具。它通过 `ptrace` 将 payload 注入目标进程并改写函数入口，使参数采集、返回值捕获和事件写入在目标进程内完成，避免每次探针命中都切换到 tracer 处理。
 
-项目材料：
-
-- 项目文档：[docs/zeroTrace-项目文档.pdf](./docs/zeroTrace-项目文档.pdf)
-- 汇报 PPT：[docs/zeroTrace-汇报.pptx](./docs/zeroTrace-汇报.pptx)
-- 演示视频：https://pan.baidu.com/s/1yDj9uWao5-tVfUNNjUbQ7w?pwd=83nj 提取码：`83nj`
+> [!WARNING]
+> zeroTrace 目前处于实验阶段。它会修改运行中进程的指令和执行流，请先在可恢复的测试环境中验证，不要直接用于关键生产负载。
 
 ## Features
 
-- 动态 attach 到运行中的 Linux 进程。
-- 支持用户态函数 entry probe 和 return probe。
-- 捕获前 6 个整数 / 指针参数，并支持浮点参数和返回值展示。
-- 支持 `enable` / `disable` / `untrace` 动态管理 probe。
-- 支持条件探针，例如 `trace write if arg0 == 1 && arg2 > 0`。
-- 支持 probe 热更新和 probe 内 call action。
-- 支持 16 个以上 probe 共存、线程组级 stop/continue、多线程运行时安全处理。
-- 支持 x86_64 与 aarch64 后端。
-- 输出接近 `perf script` / `ftrace` 风格的日志，便于按时间戳合流分析。
+- 动态附加到已运行的 Linux 进程，无需重新编译目标程序。
+- 支持用户态函数的 entry probe 和 return probe。
+- 捕获前 6 个整数或指针参数，并支持浮点参数与返回值的格式化。
+- 支持 `enable`、`disable` 和 `untrace` 等运行时探针管理操作。
+- 支持条件过滤、探针热更新和探针内 call action。
+- 支持多探针共存、线程组级 stop/continue 和多线程目标。
+- 提供 x86_64 和 aarch64 两套 ISA 后端。
+- 输出接近 `perf script` / `ftrace` 的日志，便于按时间戳合流分析。
+
+## Architecture
+
+![zeroTrace architecture](./assets/architecture.png)
+
+zeroTrace 的追踪流程分为安装和运行两个阶段：
+
+1. tracer 通过 `ptrace` 附加目标进程，注入 payload，创建 trampoline 并改写函数入口。
+2. 探针命中后，目标函数跳转到 trampoline 和进程内 payload，再将事件写入共享 ring buffer。
+3. tracer 异步读取 ring buffer，将事件输出到终端和日志文件。
 
 ## Repository Layout
 
-```text
-.
-├── conf/                 # 函数签名配置，用于参数和返回值格式化
-├── docs/                 # 项目文档、汇报 PPT、比赛官方材料和 LaTeX 配置
-├── include/              # 公共头文件
-├── scripts/              # benchmark、架构检查和日志合流脚本
-├── src/                  # zeroTrace 主体实现
-│   ├── isa/              # x86_64 / aarch64 后端
-│   └── test/             # 自动化测试、benchmark 和手动 demo
-├── Makefile
-└── README.md
-```
+| 路径 | 说明 |
+| --- | --- |
+| `conf/` | 函数签名配置，用于参数和返回值格式化 |
+| `include/` | 公共头文件 |
+| `scripts/` | benchmark、架构检查和日志合流脚本 |
+| `src/` | zeroTrace 主体实现 |
+| `src/isa/` | x86_64 和 aarch64 后端 |
+| `src/test/` | 自动化测试、benchmark、fixture 和手动演示程序 |
+| `assets/` | README 使用的图片资源 |
 
-主要运行产物：
+主要构建产物：
 
-```text
-bin/ztrace              # 交互式 tracer
-bin/libzt_payload.so    # 注入目标进程的 payload
-bin/tests/test_loop     # 手动演示目标程序
-```
+| 路径 | 说明 |
+| --- | --- |
+| `bin/ztrace` | 交互式 tracer |
+| `bin/libzt_payload.so` | 注入目标进程的 payload |
+| `bin/tests/test_loop` | 手动演示目标程序 |
 
 ## Requirements
 
-在 Debian / Ubuntu 上安装依赖：
+zeroTrace 支持 Linux x86_64 和 aarch64，构建时需要：
+
+- GCC 和 GNU Make
+- Capstone
+- GNU Readline
+- Python 3（用于测试和 benchmark 脚本）
+
+Debian / Ubuntu 可使用以下命令安装：
 
 ```bash
-sudo apt install build-essential libcapstone-dev libreadline-dev
+sudo apt install build-essential libcapstone-dev libreadline-dev python3
 ```
 
-如果需要运行 kernel uprobe benchmark，还需要：
+如需运行 kernel uprobe 对照 benchmark，还需安装 `bpftrace`：
 
 ```bash
 sudo apt install bpftrace
 ```
 
-`zeroTrace` 依赖 `ptrace`。如果系统开启了 Yama 限制，需要临时放开：
-
-```bash
-cat /proc/sys/kernel/yama/ptrace_scope
-echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope
-```
+zeroTrace 依赖 `ptrace`。如果 Yama 策略禁止附加，请在了解安全影响后，根据实际环境调整 `/proc/sys/kernel/yama/ptrace_scope`。
 
 ## Build
 
-本机架构构建：
+构建当前主机架构：
 
 ```bash
 make
 ```
 
-显式选择后端：
+显式选择 ISA 后端：
 
 ```bash
 make ARCH=x86_64
@@ -88,19 +93,19 @@ make clean
 
 ## Quick Start
 
-启动一个手动测试目标：
+首先启动演示目标：
 
 ```bash
 ./bin/tests/test_loop
 ```
 
-另开终端启动 tracer：
+在另一个终端启动 tracer：
 
 ```bash
 ./bin/ztrace
 ```
 
-在 CLI 中执行：
+在 zeroTrace CLI 中附加目标进程并添加探针：
 
 ```text
 attach <pid>
@@ -108,7 +113,7 @@ trace add_loop
 trace fp_add_loop
 ```
 
-日志会同时输出到终端和 `ztrace.<pid>.log`。示例：
+探针命中后，日志会同时输出到终端和 `ztrace.<pid>.log`：
 
 ```text
 test_loop-532386/532386 [010] 58915.513461172: ztrace:entry: add_loop(24, 25)
@@ -117,7 +122,7 @@ test_loop-532386/532386 [010] 58915.513461172: ztrace:entry: fp_add_loop(24.25, 
 test_loop-532386/532386 [010] 58915.513468205: ztrace:return: fp_add_loop -> 25.75
 ```
 
-卸载 probe 并退出：
+完成后卸载探针并退出：
 
 ```text
 untrace add_loop
@@ -128,7 +133,7 @@ quit
 
 ## CLI Commands
 
-常用命令：
+zeroTrace 提供交互式命令行，常用命令如下：
 
 ```text
 help
@@ -151,11 +156,19 @@ continue
 quit
 ```
 
-条件表达式支持 `arg0` 到 `arg5`、十进制 / 十六进制常量、比较运算、布尔运算、算术运算和括号。详细语法见 [docs/zeroTrace-项目文档.pdf](./docs/zeroTrace-项目文档.pdf)。
+条件表达式可使用 `arg0` 到 `arg5`、十进制或十六进制常量、比较运算、算术运算、布尔运算和括号。例如：
+
+```text
+trace write if arg0 == 1 && arg2 > 0
+```
+
+探针可通过函数名或 `info probes` 显示的 ID 管理。
 
 ## Function Signatures
 
-[conf/zttrace.conf](./conf/zttrace.conf) 用于描述函数签名，命中已配置函数时会按参数名和类型格式化输出：
+[`conf/zttrace.conf`](./conf/zttrace.conf) 用于描述函数签名。当探针命中已配置的函数时，zeroTrace 会按参数名和类型格式化输出。
+
+配置格式：
 
 ```text
 function_name(arg_type arg_name, arg_type arg_name, ...) -> return_type
@@ -170,7 +183,7 @@ printf(const char *fmt, ...) -> int
 fp_add_loop(double a, double b) -> double
 ```
 
-未配置函数会回退到寄存器风格显示。
+未配置的函数会回退到原始寄存器风格的参数展示。
 
 ## Test
 
@@ -180,50 +193,32 @@ fp_add_loop(double a, double b) -> double
 make test
 ```
 
-测试覆盖 probe 生命周期、参数和返回值、动态开关、条件过滤、call action、多 probe、多线程、trace buffer、退出窗口和 ISA 后端配置。测试目录说明见 [src/test/README.md](./src/test/README.md)。
+测试覆盖探针生命周期、参数与返回值、动态开关、条件过滤、call action、热更新、多探针、多线程、信号安全、trace buffer 和 ISA 指令重写。详细说明见 [`src/test/README.md`](./src/test/README.md)。
 
 ## Benchmark
 
-运行 benchmark：
+运行性能评测：
 
 ```bash
 make benchmark
 ```
 
-脚本会运行 baseline、zeroTrace、kernel uprobe 对照和 probe install/uninstall latency。kernel uprobe 子项依赖 `bpftrace` 与 tracingfs 权限，环境不满足时会自动跳过。
+benchmark 会测量 baseline、zeroTrace、kernel uprobe 对照以及探针安装/卸载延迟。kernel uprobe 项依赖 `bpftrace` 和 tracingfs 权限，环境不满足时会自动跳过。
 
-当前记录的标准 5 轮 benchmark 摘要：
+性能结果会受 CPU、内核、编译器和系统负载影响，建议在目标环境中重新测量，并记录完整的测试条件。
 
-| 平台 | zeroTrace overhead/call | kernel uprobe overhead/call | 对比 | install / uninstall |
-| --- | ---: | ---: | ---: | ---: |
-| x86_64 | 174.45 ns | 1933.20 ns | 11.08x lower overhead | 0.371 ms / 0.084 ms |
-| aarch64 / Google Cloud T2A | 237.02 ns | 479.70 ns | 2.02x lower overhead | 0.599 ms / 0.216 ms |
+## Known Limitations
 
-完整实验环境、计算方式、min/max/stdev 和柱状图见 [docs/zeroTrace-项目文档.pdf](./docs/zeroTrace-项目文档.pdf)。
+- 仅支持 Linux x86_64 和 aarch64。
+- 附加目标进程需要满足系统的 `ptrace` 权限策略。
+- 动态改写指令对目标二进制、ABI 和线程时序敏感，不能保证兼容所有程序。
+- 可读的参数和返回值输出依赖函数签名配置。
+- zeroTrace 不是完整调试器，不支持内核函数或内核 tracepoint 跟踪。
 
-## Documentation
+## Contributing
 
-| 文件 | 说明 |
-| --- | --- |
-| [docs/zeroTrace-项目文档.tex](./docs/zeroTrace-项目文档.tex) | 项目文档 LaTeX 源码 |
-| [docs/zeroTrace-项目文档.pdf](./docs/zeroTrace-项目文档.pdf) | 项目文档 PDF |
-| [docs/zeroTrace-汇报.pptx](./docs/zeroTrace-汇报.pptx) | 汇报 PPT |
-| [src/test/README.md](./src/test/README.md) | 测试目录说明 |
-| [docs/2026年全国大学生计算机系统能力大赛操作系统设计赛全国赛-技术方案.pdf](./docs/2026年全国大学生计算机系统能力大赛操作系统设计赛全国赛-技术方案.pdf) | 比赛官方技术方案 |
-| [docs/2026年全国大学生计算机系统能力大赛操作系统设计赛全国赛-章程.pdf](./docs/2026年全国大学生计算机系统能力大赛操作系统设计赛全国赛-章程.pdf) | 比赛官方章程 |
-
-重新生成项目文档：
-
-```bash
-make paper
-```
-
-清理 LaTeX 过程文件：
-
-```bash
-make clean-paper
-```
+欢迎提交 issue 和 pull request。提交修改前请运行 `make test`；如果修改了探针执行路径或 ISA 后端，建议同时附上对应架构的 benchmark 结果和测试环境。
 
 ## License
 
-项目自写源代码按 [GPLv3](./LICENSE) 发布。项目文档、答辩材料和演示视频按 CC-BY-SA 4.0 发布。`docs/` 下的比赛官方 PDF 仅作为赛题材料和引用来源，其授权与解释权归原发布方所有。
+zeroTrace 以 [GNU General Public License v3.0](./LICENSE) 开源。

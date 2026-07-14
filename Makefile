@@ -90,11 +90,7 @@ STANDALONE_TEST_BINS := $(TEST_FIXTURE_BINS) $(THREAD_FIXTURE_BINS) $(MANUAL_TES
 TEST_BINS := $(CORE_TEST_BINS) $(STANDALONE_TEST_BINS) $(BENCHMARK_BINS)
 AUTO_TEST_BINS := $(CORE_TEST_BINS)
 APP_TARGET := $(BIN_DIR)/ztrace
-PAPER_DIR := docs
-PAPER_TEX := zeroTrace-项目文档.tex
-PAPER_BASE := $(basename $(PAPER_TEX))
-
-.PHONY: all clean directories test run-tests benchmark paper clean-paper print-arch-config
+.PHONY: all clean directories test run-tests benchmark print-arch-config
 
 all: directories $(APP_TARGET) $(PAYLOAD_SO) $(TEST_BINS)
 
@@ -102,15 +98,6 @@ test: all run-tests
 
 benchmark: all $(BENCHMARK_BINS)
 	python3 scripts/benchmark.py
-
-paper:
-	cd $(PAPER_DIR) && latexmk $(PAPER_TEX)
-	cd $(PAPER_DIR) && latexmk -c $(PAPER_TEX)
-	rm -f '$(PAPER_DIR)/$(PAPER_BASE).synctex(busy)'
-
-clean-paper:
-	cd $(PAPER_DIR) && latexmk -C $(PAPER_TEX)
-	rm -f '$(PAPER_DIR)/$(PAPER_BASE).synctex(busy)'
 
 run-tests:
 	@echo "\n=============================="
