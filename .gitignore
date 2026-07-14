@@ -11,23 +11,3 @@ perf.data*
 # Python cache
 __pycache__/
 *.pyc
-
-# LaTeX build artifacts
-*.aux
-*.bbl
-*.bcf
-*.blg
-*.fdb_latexmk
-*.fls
-*.run.xml
-*.synctex(busy)
-*.synctex.gz
-*.toc
-*.xdv
-
-# Slidev local artifacts
-slidev-*/node_modules/
-slidev-*/dist/
-slidev-*/slides-export/
-slidev-*/*.pptx
-slidev-*/*.pdf
